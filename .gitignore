@@ -5,7 +5,8 @@ AI_WorkSpace/
 project/
 
 # 官方参考工程大压缩包（约 1.3GB，不入库）
-docs/开发板资料/参考工程包/
+docs/易灵思资料/参考工程包/Demo
+docs/易灵思资料/参考工程包/Ti60F225_DemoBoard_v4
 
 # 仿真产物
 sim/*.vcd
@@ -13,19 +14,7 @@ sim/*.fst
 sim/*.wlf
 sim/work/
 
-# 软核 / IP 生成物（Sapphire SoC、DDR 控制器等官方 IP 输出，本地生成，不入库）
-# 生成位置取决于 Efinity IP Manager 输出目录；规则用于防漏
-ip/
-ip_generated/
-*.ip
-
 # 压缩包一律不入库（大文件/参考包/工具包，走群文件或网盘）
 *.zip
 *.rar
 *.7z
-
-# 编译/综合产物
-output/
-impl/
-*.bitstream
-*.bin

@@ -9,4 +9,3 @@
 | `03_接口契约.md` | AXI4 / Wishbone 约定、突发长度、数据位宽、命令格式 |
 | `04_地址空间规划.md` | DDR3 分区：Framebuffer A/B、贴图区、命令队列、堆栈 |
 
-> 参考：`AI_WorkSpace/output/工程拆分_赛题二.md`（AI 生成的模块拆分草案，可迁移整理为 01_系统架构设计.md）
