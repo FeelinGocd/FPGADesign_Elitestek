@@ -4,7 +4,8 @@ AI_WorkSpace/
 # Efinity 工程（本地生成，不入库）
 project/01_LED
 project/02_HDMI
-project/03_SoC_LED
+project/04_SoC_APB
+project/05_SoC_AXI
 
 # 官方参考工程大压缩包（约 1.3GB，不入库）
 docs/易灵思资料/参考工程包/Demo
