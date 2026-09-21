@@ -8,8 +8,6 @@ project/04_SoC_APB
 project/05_SoC_AXI
 project/10_Ti60f225_sc431hai2hdmi_demo
 
-res/example/05_01_SoC_AXI4_MUX
-
 # 官方参考工程大压缩包（约 1.3GB，不入库）
 docs/易灵思资料/参考工程包/Demo
 docs/易灵思资料/参考工程包/Ti60F225_DemoBoard_v4
@@ -19,6 +17,8 @@ sim/*.vcd
 sim/*.fst
 sim/*.wlf
 sim/work/
+
+sim/vivado
 
 # 压缩包一律不入库（大文件/参考包/工具包，走群文件或网盘）
 *.zip

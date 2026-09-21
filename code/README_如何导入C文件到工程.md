@@ -21,9 +21,16 @@ Efinity 的 C 工程被强制创建在 `software/standalone/` 下，离 `code/` 
 code/                        ← 给「最终工程」逐步积累
 ├── peripheral/              外设驱动（和 RTL/soc/Peripherial 一一镜像）
 │   └── APB0/
-│       └── key/
-│           ├── user_key.h   对外 API（只暴露函数，不暴露寄存器结构体）
-│           └── user_key.c   实现（寄存器结构体藏在这里）
+│       ├── key/             APB 槽 0：按键
+│       │   ├── user_key.h   对外 API（只暴露函数，不暴露寄存器结构体）
+│       │   └── user_key.c   实现（寄存器结构体藏在这里）
+│       ├── lineBuffer/      APB 槽 1：视频显示通路（与 AXI 从口 S1 同号）
+│       │   ├── user_lineBuffer.h
+│       │   └── user_lineBuffer.c
+│       └── checker/         APB 槽 1 原为 DDR 自检，已从系统摘除；驱动保留备用，
+│           ├── user_lineBuffer.h  寄存器表 / 帧缓存格式约定 / 全部 API
+│           └── user_lineBuffer.c  实现 + 几种上板验证图案
+│               （checker/ 里的两个文件同前，恢复时要另选空槽）
 ├── app/                     应用代码（最终工程用，预留）
 └── logic/                   算法/逻辑代码（和外设无关的部分，预留）
 
@@ -36,6 +43,7 @@ res/example/<编号>_<名字>/    ← 里程碑快照（换台设备能复现）
 | 来源 | 拷到工程的哪 |
 |---|---|
 | `code/peripheral/` | `<工程>/peripheral/`（**保持同构**） |
+| 新增一个外设目录之后 | 在工程 `makefile` 的 `INC` 列表补一行 `-Iperipheral/APB0/<名字>`（`SRCS` 是 wildcard，`.c` 会自动收进来） |
 | 应用代码 main.c / userDef.h | `<工程>/src/` |
 | makefile 模板 | `<工程>/makefile` |
 

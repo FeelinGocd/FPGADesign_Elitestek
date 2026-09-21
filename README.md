@@ -37,7 +37,7 @@ FPGADesign_Elitestek/
 │  ├─ soc/                                  SoC 集成
 │  │  └─ Peripherial/                       ★ 自定义 APB 外设【已完成】
 │  │     ├─ APBX_Interface.v                外设接口模板（参考用）
-│  │     ├─ APB0/APB0_Decoder.v             地址译码（槽 0 = KEY）
+│  │     ├─ APB0/APB0_Decoder.v             地址译码（槽 0 = KEY / 槽 1 = lineBuffer）
 │  │     ├─ APB0/APB0_Interconnect.v        外设互联 + 返回复用
 │  │     ├─ APB0/key/APB0_key.v             按键寄存器（APB 侧）
 │  │     └─ APB0/key/key.v                  同步 / 消抖 / 边沿
@@ -65,7 +65,12 @@ FPGADesign_Elitestek/
 ├─ project/                                 # Efinity 工程（本地生成，不入库）
 │  ├─ 01_LED/
 │  ├─ 02_HDMI/
-│  └─ 03_SoC_LED/
+│  ├─ 03_SoC_LED/
+│  └─ 05_SoC_AXI/                           # ★ 当前主线：SoC + DDR3 + 视频显示通路
+│                                            #   RTL/Accelerator_Top.v  顶层
+│                                            #   RTL/Axi_Mux.v          多主汇聚（X3）
+│                                            #   RTL/Peripherial/LineBuffer/   显示通路
+│                                            #   RTL/Peripherial/APB0/         APB 子系统
 │
 ├─ sim/
 │  └─ tb/                                   各模块 testbench（tb_<模块名>.v）
@@ -107,14 +112,47 @@ FPGADesign_Elitestek/
 
 ## 进度
 
+### 已完成（均已在硬件上验证）
+
 - [x] 资料收集与整理
-- [x] `docs/spec` 规格文档（架构 / 总线逻辑 / 渲染流程）
-- [x] HDMI 输出链路（1080p 彩条已出图，见 `project/02_HDMI/README_HDMI.md`）
+- [x] `docs/spec` 规格文档（总线逻辑 / 地址空间规划 / 渲染流程 / AXI4 解析 / **视频显示通路**）
+- [x] HDMI 输出链路（1080p60 已出图，见 `project/02_HDMI/README_HDMI.md`）
 - [x] SoC + RISC-V 跑通（`project/03_SoC_LED`）
-- [x] 自定义 APB 总线外设：按键（`APB0_Interconnect` + `APB0_key`，ID 自检通过）
+- [x] 自定义 APB 外设：按键（槽 0，ID 自检通过）
 - [x] 按键 → LED 跑通（板载 4 键 4 灯）
 - [x] 板载调试链路（JTAG co-debug + UART 串口）
-- [ ] RTL 各模块（bitblt / mem / soc / video 占位未实现）
-- [ ] 加速器挂到 APB0（槽 1~15，`0xf8101000` ~ `0xf810FFFF`）
-- [ ] 仿真验证
+- [x] DDR3 接入 + `Axi_Mux` 多主（`X3`：S0 = SoC / S1 = lineBuffer / S2 = 空闲）
+- [x] **视频显示通路 lineBuffer（APB 槽 1 + AXI S1）**：
+      DDR 取数 → 跨域双 bank → 128→24 拆包 → 1080p60 TMDS，CPU 只写寄存器
+      - 全屏显示、双缓冲翻页（DONE 交帧）
+      - 分屏（左右两块独立半幅）+ 左右**独立**翻页
+      - 全屏 ↔ 分屏 **运行时切换**
+      - ENABLE 门控、帧率统计（FPS_ACC / FPS_CPU）
+      - 实现逻辑、寄存器表、帧缓存格式、握手约定见 **`docs/spec/视频显示通路.md`**
+- [x] 仿真：5 个 TB（PingPong / 拆包 / 控制器 / APB+handler / **整链**）全绿
+- [x] 板级调试手段：按键控制显示切换 + 串口观测（`user_lineBuffer` 驱动 + 6 种测试模式）
+
+### 进行中 / 待做
+
+- [ ] **加速器接入**（最后做）：APB 槽 2（`0xf8102000`~）+ AXI `S2`（已留空接常量）
+      + 两个握手信号（`lineBuffer_frame_start` / `acc_frame_done`），
+      接口约定见 `docs/spec/视频显示通路.md` §8
+- [ ] 带宽压力测试（要等加速器：CPU 写入只有 ~17MB/s，压不出带宽竞争）
+- [ ] 渲染功能（BitBlt / Solid Fill / Alpha / Sprite —— 赛题要求）
+- [ ] 按归档约定，把本次验证过的模块搬进 `RTL/` 和 `code/`（测通一个放一个）
+- [ ] **素材通路（Flash → DDR → 显示）**：演示要一次烧 bitstream + hex + 素材三段。
+      素材形态：人物/特效 = ARGB8888 真彩；地图/背景 = 索引色（8bpp），调色板放 BRAM 查表。
+      位置已定：Flash 素材区 `0x3C0000` 起 4.25 MB；DDR 素材区 `0x01A0_0000` 起（唯一可变区）；
+      表头格式与加载流程见 `docs/spec/地址空间规划.md` §6.4~§6.6。
+      - **检查点 A（不需要屏幕）**：打包脚本吐出表头 + 一张确定的测试图 → 烧进 Flash `0x3C0000`
+        → app 读表头、`spiFlash_f2m` 搬到 DDR、刷 D-cache → CPU 回读几个像素逐字节比对，串口打印
+      - **检查点 B**：CPU 把 DDR 里那张素材按 RGB888 贴进帧缓存 → 屏上出图（先不做 alpha）
+      - 要写的东西：PC 打包脚本（约 60 行 Python）、素材加载器（约 100 行 C）、贴图（约 30 行 C）
+      - 待确认：Efinity Programmer 收 `.bin` 还是 `.hex`；素材搬运用单线（~2MB/s）还是四线（~4×）
 - [ ] 真机 Demo（V1 基础 → V2 高阶 → V3 游戏）
+
+> **checker 说明**：DDR 自检 checker 曾用来验证 AXI 通路，**已从系统摘除**
+> （省约 2K LUT）。它腾出来的位置已经改派：**APB 槽 1 与 AXI S1 都归 lineBuffer**，
+> 加速器统一约定用 **APB 槽 2 + AXI S2** —— 同一个外设在两条总线上编号一致。
+> 源文件保留在 `project/05_SoC_AXI/RTL/Peripherial/BRAM/` 与 `.../APB0/BRAM/`，
+> 需要时把顶层例化、Mux 接线和 APB 译码接回即可（并另选一个空槽）。
