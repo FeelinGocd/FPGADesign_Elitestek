@@ -65,6 +65,7 @@ localparam  TIMEOUT     = 200_000_000;               // 看门狗 40ms（一帧 
 // 时钟与复位
 //==============================================================================
 reg         clk_wr, clk_rd, rst_n_wr;
+reg         rst_n_disp;         // ★ 显示侧复位：单拉出来, 专门测"它不能动加速器侧计数"
 
 initial begin clk_wr = 1'b0; forever #CLK_WR_HALF clk_wr = ~clk_wr; end
 initial begin clk_rd = 1'b0; forever #CLK_RD_HALF clk_rd = ~clk_rd; end
@@ -94,10 +95,19 @@ endfunction
 reg  [2*AW-1:0]     framea_base_addr;
 reg  [2*AW-1:0]     frameb_base_addr;
 reg  [2*AW-1:0]     frame_full_base_addr;
+// ---- 来自 ⑤ Handler(寄存器侧那一层)----
 reg                 enable, split_pending, done_acc, done_cpu;
 wire  [1:0]         done_clr;
 wire  [31:0]        fps_acc_val, fps_cpu_val;
-wire                lineBuffer_frame_start;
+wire                lineBuffer_frame_start;     // lineBuffer -> Handler
+wire                lineBuffer_enable;          // Handler -> lineBuffer
+wire                lineBuffer_mode;            // Handler -> lineBuffer
+wire  [2*AW-1:0]    lineBuffer_addr;            // Handler -> lineBuffer {段0, 段1}
+
+// ---- Handler 加速器侧观测（★ 必须在实例之前声明: 先用后声明会变成隐式网）----
+wire [31:0] busy_val;
+wire [31:0] busy_cyc_val;
+integer     cyc_before;         // 显示侧复位前的忙周期快照
 
 wire [7:0]          m_AXI_AWID;      wire [31:0] m_AXI_AWADDR;
 wire [7:0]          m_AXI_AWLEN;     wire [2:0]  m_AXI_AWSIZE;
@@ -133,17 +143,10 @@ lineBuffer #(
     .clk_HDMI_x1                (clk_rd),
     .rst_n_wr                   (rst_n_wr),
 
-    .enable                     (enable),
-    .split_pending              (split_pending),
-    .done_acc                   (done_acc),
-    .done_cpu                   (done_cpu),
-    .framea_base_addr           (framea_base_addr),
-    .frameb_base_addr           (frameb_base_addr),
-    .frame_full_base_addr       (frame_full_base_addr),
-
-    .done_clr                   (done_clr),
-    .fps_acc_val                (fps_acc_val),
-    .fps_cpu_val                (fps_cpu_val),
+    // ★ 显示通道只认 Handler 翻译好的这 3 根(和 GPU_2D 里的接法一致)
+    .lineBuffer_enable          (lineBuffer_enable),
+    .lineBuffer_mode            (lineBuffer_mode),
+    .lineBuffer_addr            (lineBuffer_addr),
     .lineBuffer_frame_start     (lineBuffer_frame_start),
 
     .tmds_blue_o                (),
@@ -202,6 +205,51 @@ lineBuffer #(
     .m_AXI_RLAST                (m_AXI_RLAST),
     .m_AXI_RVALID               (m_AXI_RVALID),
     .m_AXI_RREADY               (m_AXI_RREADY)
+);
+
+//------------------------------------------------------------------------------
+// ⑤ Handler 集中层（和 GPU_2D 里同一个模块、同一个接法）
+//    · 显示侧：寄存器值 -> enable/mode/{段0,段1} 地址, 帧边界翻页
+//    · 加速器侧：acc_busy 恒 1, 只为了能看见 busy_cyc_val 在"显示侧复位"期间照走
+//    ★ 两路复位在 TB 里是【两根线】: rst_n = rst_n_wr, rst_n_disp 可单独拉低
+//------------------------------------------------------------------------------
+GPU2D_APBHandler #(
+    .ADDR_WIDTH                 (AW),
+    .FPS_WINDOW                 (60)
+) u_GPU2D_APBHandler (
+    .clk                        (clk_wr),
+    .rst_n                      (rst_n_wr),
+    .rst_n_disp                 (rst_n_disp),
+
+    .enable                     (enable),
+    .split_pending              (split_pending),
+    .framea_base_addr           (framea_base_addr),
+    .frameb_base_addr           (frameb_base_addr),
+    .frame_full_base_addr       (frame_full_base_addr),
+    .done_acc                   (done_acc),
+    .done_cpu                   (done_cpu),
+
+    .done_clr                   (done_clr),
+    .fps_acc_val                (fps_acc_val),
+    .fps_cpu_val                (fps_cpu_val),
+
+    .lineBuffer_frame_start     (lineBuffer_frame_start),
+    .lineBuffer_enable          (lineBuffer_enable),
+    .lineBuffer_mode            (lineBuffer_mode),
+    .lineBuffer_addr            (lineBuffer_addr),
+
+    .acc_busy                   (1'b1),
+    .cmd_done                   (1'b0),
+    .frame_done                 (1'b0),
+    .wr_beat_hs                 (1'b0),
+    .rd_beat_hs                 (1'b0),
+
+    .busy_val                   (busy_val),
+    .cmd_done_val               (),
+    .frame_done_val             (),
+    .wr_beats_val               (),
+    .rd_beats_val               (),
+    .busy_cyc_val               (busy_cyc_val)
 );
 
 //==============================================================================
@@ -263,12 +311,55 @@ end
 // 检查
 //==============================================================================
 integer err_cnt;
+// ★ 行同步探针: 看"欠账/还账"记账情况
+// (调试探针已清除)
+// ★ 行同步账本探针
+integer ls_pay_c, ls_max_d;
+initial begin ls_pay_c = 0; ls_max_d = 0; end
+always @(posedge clk_rd) begin
+end
+
+// ★★ 对账探针: 换 bank 的时刻, 显示停在哪一列(理想: 永远在行尾附近)
+reg        bl_last;
+integer    bl_sw, bl_x, bl_y;
+integer    bl_hist[0:7];
+integer    bl_i;
+initial begin
+    bl_last = 1'b0; bl_sw = 0; bl_x = 0; bl_y = 0;
+    for (bl_i = 0; bl_i < 8; bl_i = bl_i + 1) bl_hist[bl_i] = 0;
+end
+always @(posedge clk_rd) begin
+    if (u_lineBuffer.u_async_PingPongBuffer.rd_switch_flip !== bl_last) begin
+        bl_last = u_lineBuffer.u_async_PingPongBuffer.rd_switch_flip;
+        bl_sw   = bl_sw + 1;
+        bl_x    = u_lineBuffer.u_HDMI_Top.inst_pixel_timing.x_r;
+        bl_y    = u_lineBuffer.u_HDMI_Top.inst_pixel_timing.y_r;
+        if (u_lineBuffer.u_HDMI_Top.pixel_de_o)
+            bl_hist[bl_x[12:9]] = bl_hist[bl_x[12:9]] + 1;   // 每 512 列一档
+        else
+            bl_hist[7] = bl_hist[7] + 1;                      // de=0 也算"行外"
+        if (bl_sw <= 6)
+            $display("  [BANK] 第%0d次换 bank: 显示 行%0d 列%0d de=%b", bl_sw, bl_y, bl_x,
+                     u_lineBuffer.u_HDMI_Top.pixel_de_o);
+    end
+end
+integer ls_max, ls_seen_done;
+integer de_cnt, pv_cnt, ln_cnt, de_starve;
+initial begin ls_max=0; ls_seen_done=0; de_cnt=0; pv_cnt=0; ln_cnt=0; de_starve=0; end
+always @(posedge clk_rd) begin
+    if (u_lineBuffer.u_HDMI_Top.pixel_de_o) begin
+        de_cnt = de_cnt + 1;
+        if (u_lineBuffer.u_bufferUnpacker.cnt_byte < 3) de_starve = de_starve + 1;
+    end
+    if (u_lineBuffer.u_bufferUnpacker.pixel_valid) pv_cnt = pv_cnt + 1;
+end
+
 integer ar_cnt;             // AXI 读命令笔数
 integer ar_early;           // enable=0 期间发出来的读命令
 integer ar_prot_err;        // 协议违例(超 256 拍 / 跨 4KB / 属性不对)
 integer wr_axi_err;         // 写了不该写的通道
-integer pix_err;            // 像素错位个数
-integer pix_checked;        // 已比对像素数
+integer pixel_err;            // 像素错位个数
+integer pixel_checked;        // 已比对像素数
 integer rd_frames;          // 读域看到的帧起始个数
 integer wr_frames;          // 写域收到的 frame_start 个数
 integer pulse_err;          // 写域 frame_start 不是单拍
@@ -287,7 +378,7 @@ integer    check_frame;     // 只检查这一帧的像素(0 = 不检查)
 reg        exp_split;       // 期望的显示模式(0 全屏 / 1 分屏)
 reg        exp_acc;         // 分屏: 左半显示的是 A(0) 还是 B(1)
 reg        exp_cpu;         // 分屏: 右半显示的是 A(0) 还是 B(1)
-reg [31:0] pix_addr0;
+reg [31:0] pixel_addr0;
 
 // 观测点：走进 HDMI 的像素 / 编码器取数那一拍
 wire        dut_aligned  = u_lineBuffer.u_bufferControler.frame_valid_r; // 控制器"已对齐帧边界"(=取数许可)
@@ -296,7 +387,7 @@ wire [23:0] hdmi_pixel   = u_lineBuffer.pixel_data;
 wire        hdmi_de      = u_lineBuffer.u_HDMI_Top.pixel_de_o;
 wire        hdmi_fs      = u_lineBuffer.HDMI_frame_start_o;
 
-integer     pix_x, pix_y;
+integer     pixel_x, pixel_y;
 
 task check(input [255:0] name, input integer got, input integer exp);
 begin
@@ -309,12 +400,12 @@ endtask
 
 initial begin
     err_cnt = 0; ar_cnt = 0; ar_early = 0; ar_prot_err = 0; wr_axi_err = 0;
-    pix_err = 0; pix_checked = 0; rd_frames = 0; wr_frames = 0; pulse_err = 0;
+    pixel_err = 0; pixel_checked = 0; rd_frames = 0; wr_frames = 0; pulse_err = 0;
     wr_fs_d = 1'b0; check_on = 1'b0; ar_arm = 1'b0;
     fs_ok = 1'b0; ar_before_fs = 0; fs_chk_on = 1'b0; f_before = 0; ar_early_snap = 0;
     ar_first = 32'd0; exp_base_r = C_BASE; check_frame = 0;
     exp_split = 1'b0; exp_acc = 1'b0; exp_cpu = 1'b0;
-    pix_x = 0; pix_y = 0;
+    pixel_x = 0; pixel_y = 0;
 end
 
 // ---- AXI 侧检查（写域）----
@@ -355,40 +446,56 @@ always @(posedge clk_wr) begin
     end
 end
 
+// ★★ 账本探针: 每帧对账 —— 显示要走的字节(3x每像素)  vs  数据流给过的字节(16x每拍)
+integer lg_req, lg_beat, lg_drop, lg_fr;
+initial begin lg_req=0; lg_beat=0; lg_drop=0; lg_fr=0; end
+always @(posedge clk_rd) begin
+    if (rst_n_disp) begin
+        if (u_lineBuffer.u_bufferUnpacker.pixel_req)         lg_req  = lg_req  + 1;
+        if (u_lineBuffer.u_bufferUnpacker.unpacker_rd_valid) lg_beat = lg_beat + 1;
+        if (hdmi_fs && (lg_fr < 30))
+            $display("  [LEDG] 帧%0d: 要=%0d字节 给=%0d字节 差=%0d | 丢掉=%0d拍 债=%0d",
+                     lg_fr, lg_req*3, lg_beat*16, lg_req*3-lg_beat*16, lg_drop,
+                     16'd0);
+        if (hdmi_fs) begin
+            lg_fr = lg_fr + 1; lg_req = 0; lg_beat = 0; lg_drop = 0;
+        end
+    end
+end
 // ---- 像素域：帧起始 / 逐像素比对 ----
 always @(posedge clk_rd) begin
     if (hdmi_fs) begin
         rd_frames = rd_frames + 1;
-        pix_x = 0;
-        pix_y = 0;
+        pixel_x = 0;
+        pixel_y = 0;
     end
 
     if (hdmi_de) begin
-        if (check_on && (rd_frames == check_frame) && (pix_y < CHECK_LINES)) begin
+        if (check_on && (rd_frames == check_frame) && (pixel_y < CHECK_LINES)) begin
             if (exp_split) begin
                 /* 分屏: 左半(x<960) 来自 acc 那一块, 右半来自 cpu 那一块,
                  *       两块都是独立缓冲, 行距各自 2880 */
-                if (pix_x < HALF_PX)
-                    pix_addr0 = (exp_acc ? BL_BASE : AL_BASE)
-                              + pix_y * HALF_BYTES + pix_x * 3;
+                if (pixel_x < HALF_PX)
+                    pixel_addr0 = (exp_acc ? BL_BASE : AL_BASE)
+                              + pixel_y * HALF_BYTES + pixel_x * 3;
                 else
-                    pix_addr0 = (exp_cpu ? BR_BASE : AR_BASE)
-                              + pix_y * HALF_BYTES + (pix_x - HALF_PX) * 3;
+                    pixel_addr0 = (exp_cpu ? BR_BASE : AR_BASE)
+                              + pixel_y * HALF_BYTES + (pixel_x - HALF_PX) * 3;
             end
             else
-                pix_addr0 = exp_base_r + pix_y * LINE_BYTES + pix_x * 3;
-            if (hdmi_pixel !== {byte_at(pix_addr0+2), byte_at(pix_addr0+1), byte_at(pix_addr0)}) begin
-                pix_err = pix_err + 1;
-                if (pix_err <= 6)
+                pixel_addr0 = exp_base_r + pixel_y * LINE_BYTES + pixel_x * 3;
+            if (hdmi_pixel !== {byte_at(pixel_addr0+2), byte_at(pixel_addr0+1), byte_at(pixel_addr0)}) begin
+                pixel_err = pixel_err + 1;
+                if (pixel_err <= 6)
                     $display("  MISMATCH 帧%0d 行%0d 列%0d got=%06h exp=%06h @%0t",
-                             rd_frames-1, pix_y, pix_x, hdmi_pixel,
-                             {byte_at(pix_addr0+2), byte_at(pix_addr0+1), byte_at(pix_addr0)}, $time);
+                             rd_frames-1, pixel_y, pixel_x, hdmi_pixel,
+                             {byte_at(pixel_addr0+2), byte_at(pixel_addr0+1), byte_at(pixel_addr0)}, $time);
             end
-            pix_checked = pix_checked + 1;
+            pixel_checked = pixel_checked + 1;
         end
 
-        if (pix_x == H_ACTIVE-1) begin pix_x = 0; pix_y = pix_y + 1; end
-        else                            pix_x = pix_x + 1;
+        if (pixel_x == H_ACTIVE-1) begin pixel_x = 0; pixel_y = pixel_y + 1; end
+        else                            pixel_x = pixel_x + 1;
     end
 end
 
@@ -397,14 +504,16 @@ end
 //==============================================================================
 initial begin
     clk_wr = 1'b0;
-    rst_n_wr = 1'b0;
+    rst_n_wr   = 1'b0;
+    rst_n_disp = 1'b0;
     enable = 1'b0; split_pending = 1'b0; done_acc = 1'b0; done_cpu = 1'b0;
     framea_base_addr     = {AL_BASE, AR_BASE};
     frameb_base_addr     = {BL_BASE, BR_BASE};
     frame_full_base_addr = {C_BASE,  D_BASE };
 
     repeat (20) @(posedge clk_wr);
-    rst_n_wr = 1'b1;
+    rst_n_wr   = 1'b1;
+    rst_n_disp = 1'b1;
     repeat (20) @(posedge clk_wr);
 
     // ---- 1) 使能前：一条读命令都不该发 ----
@@ -418,17 +527,17 @@ initial begin
     @(posedge lineBuffer_frame_start);          // 写域帧边界 = 给出取数许可的那一拍
     @(posedge clk_wr);
 
-    pix_err = 0; pix_checked = 0;
+    pixel_err = 0; pixel_checked = 0;
     exp_base_r = C_BASE;
     check_frame = rd_frames;                    // 这一帧应该显示 C(acc_idx=0)
     check_on = 1'b1;
 
-    wait (rd_frames > check_frame && pix_y >= CHECK_LINES);   // 这一帧前几行看完
+    wait (rd_frames > check_frame && pixel_y >= CHECK_LINES);   // 这一帧前几行看完
     check_on = 1'b0;
     check("第0帧首笔读地址(应为C基址)", ar_first, C_BASE);
-    check("第0帧像素", pix_err, 0);
-    check("第0帧比对像素数", pix_checked, CHECK_LINES * H_ACTIVE);
-    $display("  [info] 第0帧(C): 读命令 %0d 笔, 比对像素 %0d 个, 错 %0d", ar_cnt, pix_checked, pix_err);
+    check("第0帧像素", pixel_err, 0);
+    check("第0帧比对像素数", pixel_checked, CHECK_LINES * H_ACTIVE);
+    $display("  [info] 第0帧(C): 读命令 %0d 笔, 比对像素 %0d 个, 错 %0d", ar_cnt, pixel_checked, pixel_err);
 
     // ---- 3) 交帧：done_acc 在帧边界被消费 -> 翻到 D ----
     done_acc = 1'b1;
@@ -441,17 +550,17 @@ initial begin
     //      注: 这次 done_acc 同时把【acc 索引】从 0 翻成 1 —— 索引会一直保留到
     //          下次交帧(包括后面切到分屏), 所以后面的分屏期望值要跟着走。
     ar_cnt   = 0;
-    pix_err  = 0; pix_checked = 0;
+    pixel_err  = 0; pixel_checked = 0;
     exp_base_r  = D_BASE;
     exp_acc     = 1'b1;
     check_frame = rd_frames;                    // done 在这一帧边界被消费
     check_on = 1'b1;
-    wait (rd_frames > check_frame && pix_y >= CHECK_LINES);
+    wait (rd_frames > check_frame && pixel_y >= CHECK_LINES);
     check_on = 1'b0;
     check("第1帧首笔读地址(应为D基址)", ar_first, D_BASE);
-    check("第1帧像素", pix_err, 0);
-    check("第1帧比对像素数", pix_checked, CHECK_LINES * H_ACTIVE);
-    $display("  [info] 第1帧(D): 读命令 %0d 笔, 比对像素 %0d 个, 错 %0d", ar_cnt, pix_checked, pix_err);
+    check("第1帧像素", pixel_err, 0);
+    check("第1帧比对像素数", pixel_checked, CHECK_LINES * H_ACTIVE);
+    $display("  [info] 第1帧(D): 读命令 %0d 笔, 比对像素 %0d 个, 错 %0d", ar_cnt, pixel_checked, pixel_err);
 
     // ---- 5) 帧中间拉使能: 必须先等到下一个帧边界才允许取数 ----
     //   注: "使能前不发命令" 这项只对【第一次使能之前】有意义 ——
@@ -483,15 +592,15 @@ initial begin
     exp_split   = 1'b1;
     exp_acc     = 1'b1;                         // 左半: 全屏阶段翻过一次, 现在显示 B
     exp_cpu     = 1'b0;                         // 右半: 还没交过帧, 显示 A
-    pix_err = 0; pix_checked = 0;
+    pixel_err = 0; pixel_checked = 0;
     check_frame = rd_frames;
     check_on    = 1'b1;
-    wait (rd_frames > check_frame && pix_y >= CHECK_LINES);
+    wait (rd_frames > check_frame && pixel_y >= CHECK_LINES);
     check_on    = 1'b0;
-    check("split 像素", pix_err, 0);
-    check("split 比对像素数", pix_checked, CHECK_LINES * H_ACTIVE);
+    check("split 像素", pixel_err, 0);
+    check("split 比对像素数", pixel_checked, CHECK_LINES * H_ACTIVE);
     $display("  [info] split(A/A): 命令 %0d 笔, 比对 %0d 像素, 错 %0d",
-             ar_cnt, pix_checked, pix_err);
+             ar_cnt, pixel_checked, pixel_err);
 
     // ---- 8) 分屏: 左半独立翻页(done_acc) -> 左半切 B, 右半不动 ----
     ar_cnt   = 0;
@@ -500,13 +609,13 @@ initial begin
     @(posedge clk_wr);
     done_acc = 1'b0;
     exp_acc  = 1'b0;                            // 左半再翻一次 -> 回到 A
-    pix_err = 0; pix_checked = 0;
+    pixel_err = 0; pixel_checked = 0;
     check_frame = rd_frames;
     check_on    = 1'b1;
-    wait (rd_frames > check_frame && pix_y >= CHECK_LINES);
+    wait (rd_frames > check_frame && pixel_y >= CHECK_LINES);
     check_on    = 1'b0;
-    check("split 左半翻页后 像素", pix_err, 0);
-    $display("  [info] split(A/A): 左半翻到 A, 比对 %0d 像素, 错 %0d", pix_checked, pix_err);
+    check("split 左半翻页后 像素", pixel_err, 0);
+    $display("  [info] split(A/A): 左半翻到 A, 比对 %0d 像素, 错 %0d", pixel_checked, pixel_err);
 
     // ---- 9) 分屏: 右半独立翻页(done_cpu) -> 右半切 B ----
     ar_cnt   = 0;
@@ -515,15 +624,33 @@ initial begin
     @(posedge clk_wr);
     done_cpu = 1'b0;
     exp_cpu  = 1'b1;                            // 右半切到 B
-    pix_err = 0; pix_checked = 0;
+    pixel_err = 0; pixel_checked = 0;
     check_frame = rd_frames;
     check_on    = 1'b1;
-    wait (rd_frames > check_frame && pix_y >= CHECK_LINES);
+    wait (rd_frames > check_frame && pixel_y >= CHECK_LINES);
     check_on    = 1'b0;
-    check("split 右半翻页后 像素", pix_err, 0);
-    $display("  [info] split(B/B): 右半翻到 B, 比对 %0d 像素, 错 %0d", pix_checked, pix_err);
+    check("split 右半翻页后 像素", pixel_err, 0);
+    $display("  [info] split(B/B): 右半翻到 B, 比对 %0d 像素, 错 %0d", pixel_checked, pixel_err);
 
-    // ---- 10) 收尾检查 ----
+    // ---- 10) ★ 独立复位: 拉低【显示侧复位】, 加速器侧计数不许被清零 ----
+    //        (上板踩过的坑: 合并两层时把一个加速器侧的寄存器悄悄换成了显示侧的复位域,
+    //         结果显示 PLL 没锁就把加速器摁住 -> CI 阻塞 -> CPU 停住 -> 调试器再也停不住。
+    //         这里用一个只有 TB 才能造的场景把它钉住。)
+    cyc_before = busy_cyc_val;
+    check("复位前 busy_val 跟随 acc_busy", busy_val, 1);
+    rst_n_disp = 1'b0;
+    repeat (10) @(posedge clk_wr);
+    rst_n_disp = 1'b1;
+    repeat (10) @(posedge clk_wr);
+    check("显示侧复位期间加速器计数被清零", (busy_cyc_val <= cyc_before), 0);
+    $display("  [info] 显示侧复位前后 busy_cyc: %0d -> %0d", cyc_before, busy_cyc_val);
+
+    // ---- 11) 收尾检查 ----
+    $display("  [BANK] 换 bank 总次数=%0d ; 列位置分布(de=1): 0-511=%0d 512-1023=%0d 1024-1535=%0d 1536-1919=%0d ; de=0(行外)=%0d",
+             bl_sw, bl_hist[0], bl_hist[1]+bl_hist[2], bl_hist[3], bl_hist[4]+bl_hist[5]+bl_hist[6], bl_hist[7]);
+    $display("  [DIAG] de=%0d pv=%0d 行=%0d 平均pv=%0d | 欠账累计=%0d 峰值=%0d 还账拍数=%0d",
+             de_cnt, pv_cnt, ln_cnt, (ln_cnt>0)?(pv_cnt/ln_cnt):0,
+             16'd0, ls_max_d, ls_pay_c);
     check("AXI 协议违例", ar_prot_err, 0);
     check("写通道被误用", wr_axi_err, 0);
     check("frame_start 跨域计数(读=写)", wr_frames, rd_frames);
@@ -540,8 +667,8 @@ end
 //==============================================================================
 initial begin
     #TIMEOUT;
-    $display("TIMEOUT @%0t (rd_frames=%0d pix_y=%0d ar_cnt=%0d)",
-             $time, rd_frames, pix_y, ar_cnt);
+    $display("TIMEOUT @%0t (rd_frames=%0d pixel_y=%0d ar_cnt=%0d)",
+             $time, rd_frames, pixel_y, ar_cnt);
     $display("---- FAIL ----");
     $finish;
 end

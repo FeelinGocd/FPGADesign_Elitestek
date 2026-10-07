@@ -192,7 +192,7 @@ HDMI_Top #(
 wire            hdmi_de = u_hdmi.pixel_de_o;
 
 reg             req_d;                                  // HDMI_data_req_o 延后一拍
-integer         pix_k;                                  // 已取走像素个数
+integer         pixel_k;                                  // 已取走像素个数
 integer         err;                                    // 像素错位个数
 integer         de_err;                                 // 契约违例
 integer         beats;                                  // 已弹出拍数
@@ -203,7 +203,7 @@ reg  [31:0]     b0, b1, b2;
 reg  [23:0]     exp_pix;
 
 initial begin
-    req_d = 1'b0; pix_k = 0; err = 0; de_err = 0; beats = 0; flips = 0; frames = 0; buf_sel_d = 1'b1;
+    req_d = 1'b0; pixel_k = 0; err = 0; de_err = 0; beats = 0; flips = 0; frames = 0; buf_sel_d = 1'b1;
 end
 
 always @(posedge clk_rd) begin
@@ -222,14 +222,14 @@ always @(posedge clk_rd) begin
 
         // 逐字节比对：第 k 个像素 = {B[3k+2], B[3k+1], B[3k]}
         if (hdmi_de) begin
-            b0 = 3*pix_k; b1 = b0 + 1; b2 = b0 + 2;
+            b0 = 3*pixel_k; b1 = b0 + 1; b2 = b0 + 2;
             exp_pix = {b2[7:0], b1[7:0], b0[7:0]};
             if (pixel_data !== exp_pix) begin
                 err = err + 1;
                 if (err <= 5)
-                    $display("  MISMATCH k=%0d got=%06h exp=%06h @%0t", pix_k, pixel_data, exp_pix, $time);
+                    $display("  MISMATCH k=%0d got=%06h exp=%06h @%0t", pixel_k, pixel_data, exp_pix, $time);
             end
-            pix_k = pix_k + 1;
+            pixel_k = pixel_k + 1;
         end
     end
 end
@@ -245,13 +245,13 @@ initial begin
 end
 
 initial begin
-    wait (pix_k >= CHECK_LINES*H_ACTIVE);
+    wait (pixel_k >= CHECK_LINES*H_ACTIVE);
     #200;
     $display("---- pixels = %0d (expect %0d), mismatch = %0d, de_err = %0d ----",
-             pix_k, CHECK_LINES*H_ACTIVE, err, de_err);
+             pixel_k, CHECK_LINES*H_ACTIVE, err, de_err);
     $display("---- beats popped = %0d, bank flips = %0d, frame_start = %0d ----",
              beats, flips, frames);
-    if (err == 0 && de_err == 0 && pix_k == CHECK_LINES*H_ACTIVE && flips >= CHECK_LINES)
+    if (err == 0 && de_err == 0 && pixel_k == CHECK_LINES*H_ACTIVE && flips >= CHECK_LINES)
         $display("PASS");
     else
         $display("FAIL");

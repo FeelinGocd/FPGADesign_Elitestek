@@ -1,0 +1,27 @@
+# ============================================================================
+#  .gitattributes —— 行尾与二进制标记
+#  为什么需要它：git 在 Windows 上默认会把 LF 转成 CRLF（git add 时那一堆
+#  warning 就是它），而 assets.hex / palette.hex 是给 $readmemh 读的初值文件，
+#  行尾一被改写就可能出问题 ⇒ 这里统一成 LF，并把数据文件标成不转换。
+# ============================================================================
+
+# 仓库里一律 LF（工作区也保持 LF，不再自动转 CRLF）
+* text=auto eol=lf
+
+# 综合 / 仿真用的数据文件：不做任何行尾转换
+*.hex  -text
+*.mif  -text
+*.dat  -text
+*.coe  -text
+
+# 二进制
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+*.bit   binary
+*.bin   binary
+*.pickle binary
+*.wlf   binary
+*.vstf  binary

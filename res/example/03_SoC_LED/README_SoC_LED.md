@@ -141,7 +141,7 @@ LED3（N2/CSI）、LED5（E1/NSTATUS）、LED6（E2/TEST_N）、LED7（M2/CSO）
 
 ## 8. 参考
 
-- docs/spec/总线逻辑.md（SoC 总线/地址/中断总表）
+- docs/spec/设计总纲.md §3（SoC 总线/地址/中断总表）
 - docs/芯片手册/ti60-ds-v3.8芯片手册.pdf（Table 73：Dual-Purpose Configuration Pins）
 - src/example/01_LED（LED/按键引脚已验证；LED.pinout.csv）
 - 官方 software/standalone/gpio/gpioDemo（GPIO 点亮/中断示例）

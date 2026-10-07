@@ -1,0 +1,30 @@
+﻿输入目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\num, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\alpha, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\logo
+输出目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\func\output
+最大边   : 256   调色板: 256 色   实际用到: 26
+PRAM     : 每字 4 个索引, 共 12870 字 = 50.3 KB
+
+  #  文件                          宽    高    跨距      字数      基址      透明      不透明纯白
+  0  run_left_00_contact.pn     63   89    16    1424       0    2718          0
+  1  run_left_01_passing.pn     65   86    17    1462    1424    2598          0
+  2  num0.png                   32   48     8     384    2886     704          0
+  3  num1.png                   32   48     8     384    3270     840          0
+  4  num2.png                   32   48     8     384    3654     744          0
+  5  num3.png                   32   48     8     384    4038     981          0
+  6  num4.png                   32   48     8     384    4422    1025          0
+  7  num5.png                   32   48     8     384    4806     826          0
+  8  num6.png                   32   48     8     384    5190     924          0
+  9  num7.png                   32   48     8     384    5574    1035          0
+ 10  num8.png                   32   48     8     384    5958     825          0
+ 11  num9.png                   32   48     8     384    6342     914          0
+ 12  minecraft_glass.png        32   32     8     256    6726     740          0
+ 13  competition_logo.png      256   92    64    5888    6982   18357          0
+
+ck(键色=白): 不透明纯白必须为 0, 否则那些像素会被抠掉。
+
+alpha 混合: palette.hex 一项 = AARRGGBB(α 在高字节), α 取该索引下所有像素的最大 α;
+            索引 0 是键色(白), 它的 α 强制为 0。
+  α 档位: [0, 128, 255]    半透明(0/255 之外)的索引: 2 个
+
+同一个颜色占了多个索引(拆出来的 2 项):
+    #fcfcfc   索引 18 → 1   α=128
+    #c1f5fe   索引 103 → 2   α=128

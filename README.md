@@ -14,145 +14,176 @@
 | 决赛入围公示 | 11月10日~12日 |
 | 决赛时间 | 11月20日~22日 |
 
+---
+
+## 一句话现状
+
+**赛题要求的功能性指标已全部做完并在硬件上验证**：BitBlt（块拷贝 / 纯色填充）、1080p60 显示、双缓冲翻页、
+**颜色键控**、**X/Y 镜像**、**硬件 Alpha 混合（12 个 DSP）**；分屏 **CPU vs 硬件帧率对比实测 5 : 60**。
+工程也已整理成"发布工程 + 已验证工程归档"的形式（见下）。剩下的是**高负载游戏 Demo** 与演示材料。
+
+---
+
 ## 目录结构
 
 ```
 FPGADesign_Elitestek/
 │
-├─ docs/                                    # 文档区
-│  ├─ 赛题/                                 官方选题指南（赛题一~四 + 自由选题要求）
-│  ├─ 芯片手册/                             Ti60 数据手册 v3.8（资源 / 性能 / 时序）
-│  ├─ 易灵思资料/                           官方技术文档
-│  │  ├─ TinyML和RISCV相关/                 EVSOC_tinyml 用户手册、Custom Instruction、DSP 原语
-│  │  ├─ 参考工程包/                        Demo / Ti60F225_DemoBoard_v4（大文件不入库）
-│  │  └─ 开发板/                            Ti60F225A_V4 原理图 + DEMO 板软硬件设计说明
-│  └─ spec/                                 自建规格：架构设计 / 总线逻辑 / 渲染流程
+├─ RTL/                          ★ 发布 RTL（发布工程直接读这里）
+│  ├─ GamingPlayUnit_Top.v       顶层
+│  ├─ Peripherial/GPU_2D/        2D 加速器（cmd / pixel / factory / process / interface / lineBuffer）
+│  ├─ Peripherial/APB0/          APB 子系统（按键 / GPU_2D 寄存器）
+│  ├─ Peripherial/AXI4/          AXI4 主/从
+│  ├─ Axi_Mux.v                  多主汇聚（X4）
+│  └─ ddr3_controller/           官方 DDR3 控制器
 │
-├─ RTL/                                     # 自研 RTL 模块（仓库副本）
-│  ├─ bitblt/                               BitBlt 引擎（占位）
-│  ├─ HDMI/                                 HDMI 输出驱动【已完成】
-│  │  ├─ Pixel_Timing/                      像素时序生成
-│  │  └─ TMDS/                              8b10b 编码
-│  ├─ mem/                                  AXI4 主端 / 突发 / FIFO / DDR 仲裁（占位）
-│  ├─ soc/                                  SoC 集成
-│  │  └─ Peripherial/                       ★ 自定义 APB 外设【已完成】
-│  │     ├─ APBX_Interface.v                外设接口模板（参考用）
-│  │     ├─ APB0/APB0_Decoder.v             地址译码（槽 0 = KEY / 槽 1 = lineBuffer）
-│  │     ├─ APB0/APB0_Interconnect.v        外设互联 + 返回复用
-│  │     ├─ APB0/key/APB0_key.v             按键寄存器（APB 侧）
-│  │     └─ APB0/key/key.v                  同步 / 消抖 / 边沿
-│  └─ video/                                显示 / 帧缓冲读路径（占位）
+├─ project/
+│  ├─ GamingPlayUnit/            ★★ 发布工程（工程形式）
+│  │  ├─ GamingPlayUnit.xml      设计文件表（指向仓库 ../../RTL/）
+│  │  ├─ hex/                    ★ 素材初值（assets.hex / palette.hex，$readmemh 按工程目录找）
+│  │  └─ embedded_sw/.../standalone/GamingPlayUnit/
+│  │        src/                 应用（main.c / demo_* / IRQ_frame）
+│  │        peripheral/          驱动（APB0 的 key / lineBuffer / gpu2d，CInstruction）
+│  │        makefile              这份是模板版（★ IDE 向导生成的那份不含 peripheral/）
+│  └─ verified/                  已验证工程归档（不再改动）
+│     ├─ 01_LED/  02_HDMI/  04_SoC_APB/  05_SoC_AXI/
+│     └─ 06_SoC_2DGPU/           开发阶段的完整工程（TB 从它的 RTL 编译）
 │
-├─ code/                                    # ★ C 代码（给最终工程逐步积累）
-│  ├─ peripheral/                           外设驱动（和 RTL/soc/Peripherial 一一镜像）
-│  │  └─ APB0/key/                          user_key.h / user_key.c
-│  ├─ app/                                  应用代码（给最终工程，预留）
-│  ├─ logic/                                算法 / 逻辑代码（预留）
-│  └─ README_如何导入C文件到工程.md          ★★ 用法看这份
-│
-├─ res/                                     # ★ 最小可复现集（里程碑快照）
-│  ├─ example/                              每个例程 = RTL + Code + project 三件套
-│  │  ├─ 01_LED/                            LED 参考例程
-│  │  ├─ 02_HDMI/                           HDMI 输出（含 README_HDMI.md）
-│  │  ├─ 03_SoC_LED/                        SoC GPIO 点灯（含 README_SoC_LED.md）
-│  │  └─ 04_SoC_APB0_key/                   APB 总线按键外设
-│  │     ├─ RTL/                            该里程碑的 RTL
-│  │     ├─ Code/                           该里程碑的 C 代码（main.c / userDef.h / makefile）
-│  │     └─ project/project.peri.xml        该里程碑的引脚约束
-│  ├─ pic/                                  图片素材
-│  └─ ftdi.cfg / ftdi_ti.cfg                OpenOCD 的 FTDI 配置（复现要用）
-│
-├─ project/                                 # Efinity 工程（本地生成，不入库）
-│  ├─ 01_LED/
-│  ├─ 02_HDMI/
-│  ├─ 03_SoC_LED/
-│  └─ 05_SoC_AXI/                           # ★ 当前主线：SoC + DDR3 + 视频显示通路
-│                                            #   RTL/Accelerator_Top.v  顶层
-│                                            #   RTL/Axi_Mux.v          多主汇聚（X3）
-│                                            #   RTL/Peripherial/LineBuffer/   显示通路
-│                                            #   RTL/Peripherial/APB0/         APB 子系统
+├─ docs/
+│  ├─ 赛题/                      官方选题指南（赛题一~四 + 自由选题）
+│  ├─ 芯片手册/                  Ti60 数据手册 v3.8
+│  ├─ 参考/                      AXI总线解析.md（协议速查）
+│  ├─ 易灵思资料/                官方技术文档与参考工程（大文件不入库）
+│  └─ spec/                      ★ 自建规格
+│     ├─ 设计总纲.md             系统分层 / 地址 / 带宽 / 时钟 / 纪律 / 里程碑
+│     ├─ 硬件_显示通路.md        lineBuffer：DDR → HDMI 1080p60
+│     ├─ 硬件_加速器.md          GPU_2D：CI 命令接口 / 数据通路 / alpha / ck / 镜像
+│     ├─ 软件_驱动与API.md       C 侧 API / 时序纪律 / 图层 / 脏区 / 自测模式
+│     ├─ 实测数据.md             ★ 所有量过的数（资源 / 带宽 / 命令开销 / TB / 上板）
+│     ├─ 功能拓展表.md           候选功能三态表（✅ / ❌ / ⬜）
+│     ├─ 待实现清单.md           （临时）下一步要做的功能清单
+│     └─ _归档/                  整理前的 14 份旧稿（只读留档）
 │
 ├─ sim/
-│  └─ tb/                                   各模块 testbench（tb_<模块名>.v）
+│  ├─ tb/                        18 个 TB + run_tb.ps1 + ALPHA_RESULT.md
+│  └─ host/                      宿主端算法仿真（脏区）
 │
-├─ tools/                                   构建 / 仿真 / 资料处理脚本、排查记录
+├─ res/
+│  ├─ pic/                       ★ 素材原图（打包的输入）
+│  │  ├─ character/              角色跑动帧（#0,#1）
+│  │  ├─ base/num/               数字 0-9（#2..#11）
+│  │  ├─ alpha/                  带 α 的素材：玻璃（#12）
+│  │  ├─ logo/                   比赛 logo 256×92（#13）
+│  │  └─ _原始图/                ★ 不参与打包的原图（比如 5087×1772 的 logo 原稿）
+│  ├─ func/                      pic2pram.py（素材 → PRAM/调色板）+ 预览/对拍脚本 + output/
+│  └─ example/                   里程碑快照（RTL + Code + project 三件套）
 │
-└─ AI_WorkSpace/                            AI 协作工作区：缓存 / 日志 / 输出（不入库）
+├─ code/                         C 代码归档（导入方法见 code/README_如何导入C文件到工程.md）
+├─ tools/                        构建 / 仿真 / 调试脚本与排查记录
+└─ AI_WorkSpace/                 AI 协作工作区（缓存 / 日志 / 输出，不入库）
 ```
 
-> **归档约定**
+> **改哪里（最容易搞混的一条）**
 >
-> - `project/`（Efinity 生成物）、`AI_WorkSpace/`、`docs/易灵思资料/参考工程包/` 大文件 **不入库**（见 `.gitignore`）
-> - **改代码改 `project/<工程>/RTL/Peripherial/`** —— Efinity 就从那儿读，是工作副本
-> - **`RTL/` 和 `code/` 是给「最终工程」逐步积累的** —— 不按测试工程分目录；测通一个模块就放进来
-> - **`res/example/<编号>_<名字>/` 是里程碑快照** —— 自带 `RTL/` + `Code/` + `project/`，换台设备能直接复现
-> - C 代码的导入方法见 `code/README_如何导入C文件到工程.md`
+> - **改 RTL 改仓库根 `RTL/`** —— 发布工程 `GamingPlayUnit` 的设计文件表指向它；改完**要重新综合**
+> - **改固件改 `project/GamingPlayUnit/embedded_sw/.../standalone/GamingPlayUnit/src|peripheral`**（只重编 app，不用重新综合）
+> - **改素材改 `res/pic/*` 然后跑 `res/func/pic2pram.py`** —— 它会自动把 hex 放到每个工程的 hex 位置；
+>   素材和调色板是 **BRAM 初值**，所以**一改就必须重新综合**
+> - `project/verified/` 是**冻结的已验证工程**（TB 从 `verified/06_SoC_2DGPU/RTL` 编译），平时不用动
+
+---
+
+## 素材怎么加（`res/func/pic2pram.py`）
+
+```
+python res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（新目录要加进脚本的 PIC_DIRS_DEFAULT）
+```
+
+产物：`assets.hex`（PRAM 初值）、`palette.hex`（一项 = `AARRGGBB`）、`assets_desc.h`（C 侧素材表）、
+`report.txt`（这次转换的账）、`preview_*.png`（量化后的预览）。脚本会顺手把这些放到：
+
+| 放哪 | 为什么 |
+|---|---|
+| `res/func/output/` | 归档 + 给 C 用 |
+| `<每个工程>/hex/` 或工程根 | `$readmemh` 的**相对路径按工程目录解析**，少一份就报 `VERI-1012 cannot open file` |
+| 各 C 工程的 `peripheral/APB0/gpu2d/` | 固件 `#include "assets_desc.h"` |
+
+**三条规矩（踩过才写下来的）**
+
+1. **α 只能用固定档位**（0 / 128 / 255 这种）。硬件是"一个索引 = 一种 (颜色, α)"，
+   α 一旦是连续值（抗锯齿、被缩放出来的），调色板 256 项会被拆爆 —— 脚本会直接报错退出并指出是哪张图。
+2. **尺寸在绘图工具里定好**，宽高都**对齐到 4**。`--max` 一旦触发缩放，α 就变连续值（同上）。
+3. **新素材加在目录顺序的最后**（`PIC_DIRS_DEFAULT` 的顺序 = 素材编号），这样已有素材的编号不动。
+
+当前用量：**14 张素材、PRAM 12870 / 32768 字（39%）、调色板 26 / 256 项**。
+
+---
 
 ## 关键资料索引
 
-- **赛题二要求**：`docs/赛题/…2026FPGA赛道选题指南-易灵思.pdf`（第 7–9 页）
-  - 基础：BitBlt（Block Copy / Solid Fill）+ 640×480@60 VGA/HDMI + AXI 突发/FIFO + 双缓冲 + CPU vs 硬件帧率对比
-  - 高阶：硬件 Alpha 混合、Color Keying、高同屏 Sprite 游戏 60FPS
-- **芯片资源**：`docs/芯片手册/ti60-ds-v3.8芯片手册.pdf`
-  - 60,800 LE / 62,016 XLR / 2.6 Mbit BRAM（256×10K）/ 160 DSP / 4 PLL
-- **官方参考例程**：`docs/易灵思资料/参考工程包/`（解压后重点：02/03_hdmi、08_soc、10_sc431hai2hdmi、04_GE、17_uart）
+- **赛题二要求**：`docs/赛题/…2026FPGA赛道选题指南-易灵思.pdf`（第 7–9 页；纯文本提取件 `AI_WorkSpace/output/赛题原文提取.txt`）
+  - 基础：BitBlt（Block Copy / Solid Fill）+ 640×480@60 显示 + AXI 突发 / FIFO + 双缓冲 + **CPU vs 硬件帧率对比**
+  - 高阶：**硬件 Alpha 混合**（用 DSP）、**颜色键控**、**高同屏元素数游戏 Demo 60 FPS**
+- **设计规格**：`docs/spec/` —— 先看 `设计总纲.md`，再看对应的部件文件
+- **实测数字**：`docs/spec/实测数据.md`（引用前先看日期；设计估算与实测分开写）
+- **芯片资源**：`docs/芯片手册/ti60-ds-v3.8芯片手册.pdf`（60800 LE / 256 块 10K BRAM / 160 DSP / 4 PLL）
+- **官方参考例程**：`docs/易灵思资料/参考工程包/`（重点：02/03_hdmi、08_soc、10_sc431hai2hdmi、04_GE、17_uart）
 - **软核与加速**：`docs/易灵思资料/TinyML和RISCV相关/`（Sapphire RISC-V、TinyML、Custom Instruction、DSP 原语）
-- **开发板**：`docs/易灵思资料/开发板/`（原理图 SCH + DEMO 板软硬件设计说明）
+- **开发板**：`docs/易灵思资料/开发板/`（原理图 + DEMO 板软硬件设计说明）
+
+---
 
 ## 开发环境
 
 | 工具 | 版本 | 来源 | 备注 |
 |---|---|---|---|
-| Elitestek® | 2026.1.132.3.9 | elitestek.com | 无 |
-| Elitestek®补丁 |  | elitestek.com | 无 |
+| Efinity | 2026.1.132.3.9 | elitestek.com | 无 |
 | Efinity RISCV IDE | 2026.1 | elitestek.com | 与 Efinity 配套 |
 | RISC-V 工具链 | riscv-none-elf-gcc 13.4.0 | IDE 自带 | `EfinityRISCV\toolchain` |
+| make | — | IDE 自带 | `EfinityRISCV\build_tools\bin\make.exe` |
 | OpenOCD | 0.11.0+dev | IDE 自带 | `EfinityRISCV\openocd` |
-| 开发板驱动/下载工具 | — | 群文件 | 见 `tools/JTAG_UART_驱动问题排查.md` |
+| ModelSim | SE-64 10.5 | 本机 | `sim/tb/run_tb.ps1 -TbDir <目录> -TbTop <顶层>` |
+| 开发板驱动 / 下载工具 | — | 群文件 | 见 `tools/JTAG_UART_驱动问题排查.md` |
+
+> 命令行编固件（可选）：在 app 目录下 `make BSP=efinix/EfxSapphireSoc`，产物在 `build/`；
+> 烧 Flash 用的是 `build/<工程名>.hex`（当前 15 KB 左右，RAM 用 ~20 KB / 124 KB）。
+
+---
 
 ## 进度
 
 ### 已完成（均已在硬件上验证）
 
-- [x] 资料收集与整理
-- [x] `docs/spec` 规格文档（总线逻辑 / 地址空间规划 / 渲染流程 / AXI4 解析 / **视频显示通路**）
-- [x] HDMI 输出链路（1080p60 已出图，见 `project/02_HDMI/README_HDMI.md`）
-- [x] SoC + RISC-V 跑通（`project/03_SoC_LED`）
-- [x] 自定义 APB 外设：按键（槽 0，ID 自检通过）
-- [x] 按键 → LED 跑通（板载 4 键 4 灯）
-- [x] 板载调试链路（JTAG co-debug + UART 串口）
-- [x] DDR3 接入 + `Axi_Mux` 多主（`X3`：S0 = SoC / S1 = lineBuffer / S2 = 空闲）
-- [x] **视频显示通路 lineBuffer（APB 槽 1 + AXI S1）**：
-      DDR 取数 → 跨域双 bank → 128→24 拆包 → 1080p60 TMDS，CPU 只写寄存器
-      - 全屏显示、双缓冲翻页（DONE 交帧）
-      - 分屏（左右两块独立半幅）+ 左右**独立**翻页
-      - 全屏 ↔ 分屏 **运行时切换**
-      - ENABLE 门控、帧率统计（FPS_ACC / FPS_CPU）
-      - 实现逻辑、寄存器表、帧缓存格式、握手约定见 **`docs/spec/视频显示通路.md`**
-- [x] 仿真：5 个 TB（PingPong / 拆包 / 控制器 / APB+handler / **整链**）全绿
-- [x] 板级调试手段：按键控制显示切换 + 串口观测（`user_lineBuffer` 驱动 + 6 种测试模式）
+- [x] 资料收集与整理；`docs/spec` 规格文档（6 份 + 归档）
+- [x] HDMI 输出链路（1080p60 出图）
+- [x] SoC + RISC-V 跑通；自定义 APB 外设（按键）；JTAG co-debug + UART
+- [x] DDR3 接入 + `Axi_Mux` 多主（**X4**：S0 CPU / S1 显示 / S2 加速器读 / S3 加速器写）
+- [x] **视频显示通路 lineBuffer**：DDR 取数 → 跨域双 bank → 拆包 → 1080p60 TMDS
+      全屏 / 双缓冲翻页 / 分屏（左右独立翻页）/ 全屏↔分屏运行时切换 / ENABLE 门控 / 帧率统计
+- [x] **M0** SoC IP 打开 CFU（自定义指令通道）
+- [x] **M1** CI 从端 → 命令 FIFO → **纯色填充** → AXI 写 → 交帧翻页（上板）
+- [x] **M1.5** APB 槽 2 寄存器 + C 驱动（ID / 计数器 / 状态）
+- [x] **M2** **块拷贝**（读通路 + 行缓冲 + 合成器）；整链逐字节 err=0
+- [x] **M3** **片上素材 + 调色板查表**（PRAM 128 KB，命令只带字偏移，零 DDR 读）
+- [x] **颜色键控 ck**（`flags[4]` + APB 键色寄存器）
+- [x] **X / Y 镜像**（`flags[6:5]`，人物左右跑）
+- [x] **Alpha 混合**（`MODE=2`，α 走调色板高字节，背景 = 读回目的，**12 个 DSP**）—— 上板验证通过
+- [x] **脏区 + 分层重放**（每块缓冲各记一份旧位置；层号 + 稳定排序；HUD 作为最高层）
+- [x] **M4** 分屏 CPU vs 硬件帧率对比 Demo —— **上板实测 CPU 5 fps : 加速器 60 fps**
+- [x] 仿真：**18 个 TB**，最近一次全量回归全部通过（清单见 `docs/spec/实测数据.md` §4）
+- [x] **工程整理**：抽取发布工程 `GamingPlayUnit`（RTL 收进仓库 `RTL/`、素材初值收进 `hex/`、
+      固件移入 `embedded_sw/.../standalone/GamingPlayUnit` 并**编译通过**）；旧工程存入 `project/verified/`
 
 ### 进行中 / 待做
 
-- [ ] **加速器接入**（最后做）：APB 槽 2（`0xf8102000`~）+ AXI `S2`（已留空接常量）
-      + 两个握手信号（`lineBuffer_frame_start` / `acc_frame_done`），
-      接口约定见 `docs/spec/视频显示通路.md` §8
-- [ ] 带宽压力测试（要等加速器：CPU 写入只有 ~17MB/s，压不出带宽竞争）
-- [ ] 渲染功能（BitBlt / Solid Fill / Alpha / Sprite —— 赛题要求）
-- [ ] 按归档约定，把本次验证过的模块搬进 `RTL/` 和 `code/`（测通一个放一个）
-- [ ] **素材通路（Flash → DDR → 显示）**：演示要一次烧 bitstream + hex + 素材三段。
-      素材形态：人物/特效 = ARGB8888 真彩；地图/背景 = 索引色（8bpp），调色板放 BRAM 查表。
-      位置已定：Flash 素材区 `0x3C0000` 起 4.25 MB；DDR 素材区 `0x01A0_0000` 起（唯一可变区）；
-      表头格式与加载流程见 `docs/spec/地址空间规划.md` §6.4~§6.6。
-      - **检查点 A（不需要屏幕）**：打包脚本吐出表头 + 一张确定的测试图 → 烧进 Flash `0x3C0000`
-        → app 读表头、`spiFlash_f2m` 搬到 DDR、刷 D-cache → CPU 回读几个像素逐字节比对，串口打印
-      - **检查点 B**：CPU 把 DDR 里那张素材按 RGB888 贴进帧缓存 → 屏上出图（先不做 alpha）
-      - 要写的东西：PC 打包脚本（约 60 行 Python）、素材加载器（约 100 行 C）、贴图（约 30 行 C）
-      - 待确认：Efinity Programmer 收 `.bin` 还是 `.hex`；素材搬运用单线（~2MB/s）还是四线（~4×）
-- [ ] 真机 Demo（V1 基础 → V2 高阶 → V3 游戏）
+- [ ] **M5 高负载游戏 Demo**（赛题高阶第 3 条）：同屏元素数阶梯加压 + 稳定 60 FPS + 屏上 HUD 显示元素数 / FPS
+      —— 方案见 `docs/spec/功能拓展表.md` §8、待办见 `docs/spec/待实现清单.md`
+- [ ] **命令开销基线测量**：各命令（FILL / sprite / spriteCK / spriteAlpha）× 尺寸的单价曲线
+      —— 没有它就无法回答"元素数极限在哪"（`docs/spec/实测数据.md` §3.3）
+- [ ] **演示视频 / 报告 / 资源与性能分析**（含带宽账、DSP 使用、资源占用表）
+- [ ] 素材通路（Flash → DDR）扩容：目前素材走片上 PRAM（换素材要重新综合），
+      大素材库需要 Flash 素材区 + 开机装载（`docs/spec/设计总纲.md` §5.2）
 
-> **checker 说明**：DDR 自检 checker 曾用来验证 AXI 通路，**已从系统摘除**
-> （省约 2K LUT）。它腾出来的位置已经改派：**APB 槽 1 与 AXI S1 都归 lineBuffer**，
-> 加速器统一约定用 **APB 槽 2 + AXI S2** —— 同一个外设在两条总线上编号一致。
-> 源文件保留在 `project/05_SoC_AXI/RTL/Peripherial/BRAM/` 与 `.../APB0/BRAM/`，
-> 需要时把顶层例化、Mux 接线和 APB 译码接回即可（并另选一个空槽）。
+> **checker 说明**：DDR 自检 checker 曾用来验证 AXI 通路，**已从系统摘除**（省约 2K LUT）。
+> 它腾出来的位置已经改派：APB 槽 1 与 AXI S1 都归 lineBuffer，加速器统一用 **APB 槽 2 + AXI S2/S3**。
+
