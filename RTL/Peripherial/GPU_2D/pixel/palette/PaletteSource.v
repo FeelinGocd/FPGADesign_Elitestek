@@ -175,7 +175,14 @@ assign flags_1 = line_flags[7*(IMAGE_NUM-1)+:7];
 //     一定要是组合的、不能在收行任务那一拍才锁存 —— 晚一拍 Decoder 就采到旧值
 //     （MX 的"字内索引反序"当场就错，m3palette 的镜像用例立刻报错，踩过）
 wire [6:0]                                      dec_flags;
-assign dec_flags = pass_r ? flags_1 : flags_0;
+//   ★★ 选"这一趟的模式位"不能只看 pass_r：pass_r 是【收行任务那一拍】才更新的，
+//      而 line_start 那一拍 Decoder 就把它锁进 mx_r 了 —— 那一拍 pass_r 还是【上一条命令】
+//      留下的值（上一条是两张图的命令就是 1）⇒ 第 2 格（往往是空的那一格，flags=0）被选上
+//      ⇒ 这一行 mx_r=0：MX 命令的【第一行】不做字内反序（症状：翻面后顶行 4 个像素错位）。
+//      所以只在"真的在第 2 趟"时才选 flags_1：状态不在 S_IDLE 且 pass_r=1。
+wire                                            in_pass2;
+assign in_pass2  = pass_r & (state != S_IDLE);
+assign dec_flags = in_pass2 ? flags_1 : flags_0;
 
 //==============================================================================
 // 判断组合条件
@@ -195,8 +202,14 @@ function lane_wanted;                              // 这一格那张图，这�
 endfunction
 wire my_line_0;                       // 图一那一趟要不要我
 assign my_line_0 = lane_wanted(flags_0);
-wire my_line_1;            // 图二那一趟要不要我
-assign my_line_1 = line_fx_en & lane_wanted(flags_1);
+wire my_line_1;            // 图二那一趟要不要我【读素材】
+//   ★★ 第 2 层是【纯色层】（flags[2:0]=3）时，这一趟本模块【一个字节都不读】：
+//      上层颜色是 Compositor 自己造的（线合成级把它当成"常量色 + 浓度"），素材 RAM 里没有这张图。
+//      以前这里少了这个条件 ⇒ 本模块会拿着"颜色值当字地址"去读一遍垃圾，然后卡在 S_WAIT
+//      等一个永远不来的 palette_ready（合成级那一趟压根不取源）⇒ line_src1_free 永不拉高
+//      ⇒ CmdExec 发不出下一行 ⇒ 板上就是"撞一下就整屏卡死"（2026-10 板上抓到的）。
+//      ★ 注意 switched（下面那个）【不能】跟着 gate 掉：合成级要靠这一拍进 S_COMBINE。
+assign my_line_1 = line_fx_en & lane_wanted(flags_1) & (flags_1[2:0] != 3'd3);
 wire take_task;
 assign take_task = (state == S_IDLE) & line_start & my_line_0;
 
@@ -217,7 +230,7 @@ assign drained = ~index_valid & ~decoder_busy;
 
 //   第 1 趟排空之后，这一拍换到第 2 趟（同时也是给下游的 line_image_next 脉冲）
 wire switched;
-assign switched = (state == S_WAIT) & drained & ~pass_r & my_line_1;
+assign switched = (state == S_WAIT) & drained & ~pass_r & line_fx_en;  // ★ 有第 2 层就发（第 2 层是纯色时本模块不读它，但合成级要靠这一拍进 S_COMBINE）
 assign  line_image_next  = switched;
 
 //==============================================================================
@@ -251,7 +264,7 @@ always @(*) begin
         S_IDLE : if (take_task)  next_state = (needed_bytes == 32'd0) ? S_WAIT : S_READ;
         S_READ : if (last_word)  next_state = S_WAIT;
         //   第 1 趟排空后：这一行还有图二 ⇒ 接着读第 2 趟；否则这一行完了
-        S_WAIT : if (drained)    next_state = switched ? S_READ : S_IDLE;
+        S_WAIT : if (drained)    next_state = switched ? (my_line_1 ? S_READ : S_IDLE) : S_IDLE;
         default:                 next_state = S_IDLE;
     endcase
 end

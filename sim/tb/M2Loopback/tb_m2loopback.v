@@ -95,6 +95,25 @@ localparam  [23:0]              CK_BG    = 24'h20_30_40;        // 底色（和 
 localparam  [31:0]              DST6_OFF = 32'h088E_0000;       // 第六段：单图 BLIT（只验源的行地址）
 localparam  [31:0]              DST7_OFF = 32'h0890_0000;       // 第七段：合成但【不开 ck】（期望处处 = 图二）
 
+//   ---- 第八段：水平镜像（MX）+ ck（复现 demo"角色撞墙翻面"那条命令）----
+//     ★ MX 的倒读起点由 CmdExec 给（行首字 + ceil(w/4) − 1），取出器每读一个字 −1。
+//       这一段是"地址倒着走"唯一的端到端覆盖：错了就是整行错位/读出上一行的尾巴。
+localparam  [31:0]              DST8_OFF = 32'h0892_0000;       // 低 4 位 = 0
+localparam  [6:0]               MX_FLAGS = 7'h39;               // REPLACE(1)|SPRITE(8)|CKEN(0x10)|MX(0x20) = 0x39（demo 里角色翻面就是这条）
+
+//   ---- 第九段：颜色合成（纯色层 + 插值染色）：复现 demo 的"撞击闪红" ----
+//     ★ 上层不是素材，是【一个颜色】：flags[2:0]=3（纯色层）、param 高 12 位 = 色调/强度
+localparam  [31:0]              DST9_OFF = 32'h0894_0000;       // 低 4 位 = 0
+localparam  [6:0]               TN_FLAGS = 7'h1B;               // REPLACE(1)|SPRITE(8)|CKEN(0x10)|3 = 纯色层
+localparam  [23:0]              TN_PARAM = 24'h28_0000;         // tone=1(bit21) | strength=128(bit12)
+localparam  [31:0]              TN_COLOR = 32'h00_FF_00_00;     // {A,R,G,B} = 纯红
+
+//   ---- 第十段：合成【目的地址不齐 + 高 48】—— 复现 demo 里那个"合成块"在脏区里的真实样子 ----
+//     ★ demo 的合成元素是 32x48、x 每帧动 3 像素 ⇒ 目的低 4 位 = (x*3) mod 16 ∈ 0..15，且 h=48。
+//       前面几段的合成都是 dst_off=0、h≤16 —— 这一段专门补上"不齐 + 高"这两条。
+localparam  [31:0]              DST10_OFF = 32'h0896_000F;      // 低 4 位 = 15（最不齐的那种）
+localparam  [15:0]              CMB_H48   = 16'd48;
+
 localparam  [9:0]               FID_BLIT = 10'h002;     // funct3=2
 localparam  [9:0]               FID_FILL = 10'h001;     // funct3=1
 localparam  [9:0]               FID_ARGS = 10'h007;     // funct3=7 参数 CI（命令结束词）
@@ -112,6 +131,17 @@ reg [23:0]              pix_img1, pix_img2, pix_exp;
 integer                 err_cnt, rd_bursts, wr_bursts, line_start_cnt, line_done_cnt, fill_err;
 integer                 blit_ls, blit_ld;                                                           // BLIT 段结束时的快照（FILL 段还会往上加）
 reg  [7:0]              exp_b, got_b;
+integer                 mx_ls0, mx_ld0;                                     // 镜像段快照
+integer                 u_ls0, u_ld0;                                       // 不齐合成段快照
+integer                 tn_ls0, tn_ld0;                                     // 颜色合成段快照
+reg  [7:0]              t_lo, t_up, t_d, t_q;                               // 颜色合成段的逐字节金标准（照抄 RTL 的算式）
+reg  [15:0]             t_q16;
+integer                 ti;                                                 // 色调用例循环
+integer                 t_s9;                                               // 饱和加的中间量
+reg  [2:0]              tm;                                                 // 本用例的色调模式
+reg  [7:0]              tk;                                                 // 本用例的浓度
+reg  [23:0]             tn_par;                                             // 本用例的 param
+integer                 tn_err_all;                                         // 9 个用例的总错字节
 
 //==============================================================================
 // CI 侧
@@ -841,6 +871,208 @@ initial begin
     $display("==== 合成(不开 ck) 段: 错字节 %0d (0 = 合成本身是对的) ====", err_bytes);
     if (err_bytes != 0) err_cnt = err_cnt + 1;
 
+    //--------------------------------------------------------------------------
+    // 第八段: 水平镜像(MX) + ck —— "角色撞墙翻面"那条命令
+    //   期望: 每个像素 = 素材【镜像后】那一点；素材里白色的地方被 ck 抠掉 ⇒ 留底色
+    //--------------------------------------------------------------------------
+    $display("==== 第八段: 镜像(MX)+ck 到 0x%08h ====", DST8_OFF);
+    for (line = 0; line < CK_H; line = line + 1)
+        for (i = 0; i < 3*CK_W; i = i + 1)
+            poke_byte(DST8_OFF + line*STRIDE + i,
+                      ((i % 3) == 0) ? CK_BG[7:0] :
+                      ((i % 3) == 1) ? CK_BG[15:8] : CK_BG[23:16]);
+
+    mx_ls0 = line_start_cnt;
+    mx_ld0 = line_done_cnt;
+    ci_send(FID_BLIT, {CK_W, CK_H}, DST8_OFF);
+    ci_send(FID_ARGS, CMB_A, {1'b0, MX_FLAGS, CMB_STR});
+    repeat (400000) @(posedge clk);
+
+    $display("==== 镜像段: line_start %0d / line_done %0d (期望 %0d / %0d) ====",
+             line_start_cnt - mx_ls0, line_done_cnt - mx_ld0, CK_H, CK_H);
+    if ((line_done_cnt - mx_ld0) != CK_H) begin
+        err_cnt = err_cnt + 1;
+        $display("  !! 镜像段没跑完: 只落盘 %0d 行(链路挂住了)", line_done_cnt - mx_ld0);
+    end
+
+    err_bytes = 0;
+    for (row_y = 0; row_y < CK_H; row_y = row_y + 1)
+        for (col_x = 0; col_x < CK_W; col_x = col_x + 1) begin
+            pix_img1 = asset_pix(CMB_A, CMB_STR, CK_W-1-col_x, row_y);      // ★ 镜像 = 反向取素材
+            pix_exp  = (pix_img1 == 24'hFFFFFF) ? CK_BG : pix_img1;         // 素材白处被 ck 抠掉 ⇒ 留底色
+            for (c = 0; c < 3; c = c + 1) begin
+                exp_b = ((c == 0) ? pix_exp[7:0] : (c == 1) ? pix_exp[15:8] : pix_exp[23:16]);
+                got_b = peek_byte(DST8_OFF + row_y*STRIDE + col_x*3 + c);
+                if (got_b !== exp_b) begin
+                    err_bytes = err_bytes + 1;
+                    if (err_bytes <= 8)
+                        $display("  !! 镜像 (%0d,%0d) c=%0d: 得 %02h 应 %02h (素材镜像点 %06h)",
+                                 col_x, row_y, c, got_b, exp_b, pix_img1);
+                end
+            end
+        end
+    $display("==== 镜像段: 错字节 %0d (0 = 倒读地址 + 字内反序都对) ====", err_bytes);
+    if (err_bytes != 0) err_cnt = err_cnt + 1;
+
+    begin : dump_mx_blk
+        integer                 fd_mx;
+        reg [23:0]              got_mx;
+        fd_mx = $fopen("mx_dump.txt", "w");
+        for (row_y = 0; row_y < CK_H; row_y = row_y + 1) begin
+            for (col_x = 0; col_x < CK_W; col_x = col_x + 1) begin
+                got_mx = {peek_byte(DST8_OFF + row_y*STRIDE + col_x*3 + 2),
+                          peek_byte(DST8_OFF + row_y*STRIDE + col_x*3 + 1),
+                          peek_byte(DST8_OFF + row_y*STRIDE + col_x*3 + 0)};
+                $fwrite(fd_mx, "%06h ", got_mx);
+            end
+            $fwrite(fd_mx, "\n");
+        end
+        $fclose(fd_mx);
+    end
+
+    //--------------------------------------------------------------------------
+    // 第九段: 颜色合成 —— 底色（素材 + ck）+ 上层纯红 + 插值染色，强度 128
+    //   期望: 素材不透明处 = 往红插值一半；透明处【不动】(留着底色)
+    //   ★ 这一段同时验三件事: ① 纯色层读素材那一趟【不发】 ② 颜色每行都该是同一个
+    //     ③ 出口掩码 = 下层那张图的 ck 掩码（纯色层不自己宣称"要写"）
+    //--------------------------------------------------------------------------
+    //   ★ 9 个用例 = 4 种色调 × 几档浓度（含 k=0 的直通和 k=255 的饱和端）
+    //     ★ 四种色调在 RTL 里【共用一级乘法器】（按模式 mux 乘数），所以这一段同时也是
+    //       "mux 出来的那一个乘法器没接错"的回归。
+    tn_err_all = 0;
+    for (ti = 0; ti < 9; ti = ti + 1) begin
+        case (ti)
+            0: begin tm = 3'd1; tk = 8'd0;   end
+            1: begin tm = 3'd1; tk = 8'd128; end
+            2: begin tm = 3'd1; tk = 8'd255; end
+            3: begin tm = 3'd2; tk = 8'd64;  end
+            4: begin tm = 3'd2; tk = 8'd128; end
+            5: begin tm = 3'd2; tk = 8'd255; end
+            6: begin tm = 3'd3; tk = 8'd128; end
+            7: begin tm = 3'd3; tk = 8'd255; end
+            8: begin tm = 3'd4; tk = 8'd128; end
+            default: begin tm = 3'd4; tk = 8'd255; end
+        endcase
+        tn_par = ({21'd0, tm} << 21) | ({12'd0, tk} << 12);
+
+        $display("==== 第九段: 颜色合成 色调=%0d 浓度=%0d 到 0x%08h ====", tm, tk, DST9_OFF);
+        for (line = 0; line < CK_H; line = line + 1)
+            for (i = 0; i < 3*CK_W; i = i + 1)
+                poke_byte(DST9_OFF + line*STRIDE + i,
+                          ((i % 3) == 0) ? CK_BG[7:0] :
+                          ((i % 3) == 1) ? CK_BG[15:8] : CK_BG[23:16]);
+
+        tn_ls0 = line_start_cnt;
+        tn_ld0 = line_done_cnt;
+        ci_send(FID_BLIT, {CK_W, CK_H}, DST9_OFF);
+        ci_send(FID_ARGS, CMB_A,    {1'b1, MX_FLAGS, CMB_STR});     // 底图: 开 ck + ★ 水平镜像（和 demo 的"撞墙闪红"一条不差）
+        ci_send(FID_ARGS, TN_COLOR, {1'b0, TN_FLAGS, tn_par });     // 纯色层: 颜色 + 色调/浓度
+        repeat (400000) @(posedge clk);
+
+        if ((line_done_cnt - tn_ld0) != CK_H) begin
+            err_cnt = err_cnt + 1;
+            $display("  !! 颜色合成(色调%0d) 没跑完: 只落盘 %0d 行(链路挂住了)", tm, line_done_cnt - tn_ld0);
+        end
+
+        err_bytes = 0;
+        for (row_y = 0; row_y < CK_H; row_y = row_y + 1)
+            for (col_x = 0; col_x < CK_W; col_x = col_x + 1) begin
+                pix_img1 = asset_pix(CMB_A, CMB_STR, CK_W-1-col_x, row_y);   // ★ 底图开了 MX ⇒ 取镜像点
+                for (c = 0; c < 3; c = c + 1) begin
+                    if (pix_img1 == 24'hFFFFFF) begin
+                        // 透明处: ck 掩码 0 ⇒ 一个字节都不写 ⇒ 底色原样
+                        exp_b = ((c == 0) ? CK_BG[7:0] : (c == 1) ? CK_BG[15:8] : CK_BG[23:16]);
+                    end
+                    else begin
+                        // ★ 照抄 imageCombine 里那条逐字节算式（÷255 用 >>8 近似，全工程同一口径）
+                        t_lo = ((c == 0) ? pix_img1[7:0] : (c == 1) ? pix_img1[15:8] : pix_img1[23:16]);
+                        t_up = ((c == 0) ? TN_COLOR[7:0] : (c == 1) ? TN_COLOR[15:8] : TN_COLOR[23:16]);
+                        case (tm)
+                            3'd1: begin      // 插值：往 C 偏 |C−p|·k
+                                t_d   = (t_up >= t_lo) ? (t_up - t_lo) : (t_lo - t_up);
+                                t_q16 = {8'd0, t_d} * {8'd0, tk};
+                                t_q   = t_q16[15:8];
+                                exp_b = (t_up >= t_lo) ? (t_lo + t_q) : (t_lo - t_q);
+                            end
+                            3'd2: begin      // 加光：p + C·k（饱和）
+                                t_q16 = {8'd0, t_up} * {8'd0, tk};
+                                t_q   = t_q16[15:8];
+                                t_s9  = t_lo + t_q;
+                                exp_b = (t_s9 > 255) ? 8'hFF : t_s9[7:0];
+                            end
+                            3'd3: begin      // 乘系数：p·k
+                                t_q16 = {8'd0, t_lo} * {8'd0, tk};
+                                exp_b = t_q16[15:8];
+                            end
+                            default: begin   // 正片叠底：p·C
+                                t_q16 = {8'd0, t_lo} * {8'd0, t_up};
+                                exp_b = t_q16[15:8];
+                            end
+                        endcase
+                    end
+                    got_b = peek_byte(DST9_OFF + row_y*STRIDE + col_x*3 + c);
+                    if (got_b !== exp_b) begin
+                        err_bytes = err_bytes + 1;
+                        if (err_bytes <= 4)
+                            $display("  !! 颜色合成 色调%0d k%0d (%0d,%0d) c=%0d: 得 %02h 应 %02h (素材 %06h)",
+                                     tm, tk, col_x, row_y, c, got_b, exp_b, pix_img1);
+                    end
+                end
+            end
+        $display("==== 颜色合成段: 色调=%0d 浓度=%0d 错字节 %0d ====", tm, tk, err_bytes);
+        tn_err_all = tn_err_all + err_bytes;
+    end
+    $display("==== 颜色合成段合计: 9 个用例 错字节 %0d (0 = 纯色层 + 4 种色调 + 掩码都对) ====", tn_err_all);
+    if (tn_err_all != 0) err_cnt = err_cnt + 1;
+
+    //--------------------------------------------------------------------------
+    // 第十段: 合成 + 目的不齐(dst_off=15) + h=48
+    //   ★ 只回答一个问题：这条命令【能不能跑完】，以及逐像素对不对
+    //--------------------------------------------------------------------------
+    $display("==== 第十段: 合成(dst_off=15, h=48) 到 0x%08h ====", DST10_OFF);
+    for (line = 0; line < CMB_H48; line = line + 1)
+        for (i = 0; i < 3*CK_W + 16; i = i + 1)
+            poke_byte(DST10_OFF + line*STRIDE + i,
+                      ((i % 3) == 0) ? CK_BG[7:0] :
+                      ((i % 3) == 1) ? CK_BG[15:8] : CK_BG[23:16]);
+
+    u_ls0 = line_start_cnt;
+    u_ld0 = line_done_cnt;
+    ci_send(FID_BLIT, {CK_W, CMB_H48}, DST10_OFF);
+    ci_send(FID_ARGS, CMB_A, {1'b1, CMB_FLAGS,    CMB_STR});        // 图一：不开 ck
+    ci_send(FID_ARGS, CMB_B, {1'b0, CMB_FLAGS_CK, CMB_STR});        // 图二：开 ck
+    repeat (400000) @(posedge clk);
+
+    $display("==== 不齐合成段: line_start %0d / line_done %0d (期望 %0d / %0d) ====",
+             line_start_cnt - u_ls0, line_done_cnt - u_ld0, CMB_H48, CMB_H48);
+    if ((line_done_cnt - u_ld0) != CMB_H48) begin
+        err_cnt = err_cnt + 1;
+        $display("  !! 不齐合成段没跑完: 只落盘 %0d 行(链路挂住了)", line_done_cnt - u_ld0);
+    end
+
+    err_bytes = 0; n_expose_img1 = 0; n_bgcolor = 0; n_img2_pix = 0;
+    for (row_y = 0; row_y < CMB_H48; row_y = row_y + 1)
+        for (col_x = 0; col_x < CK_W; col_x = col_x + 1) begin
+            pix_img1 = asset_pix(CMB_A, CMB_STR, col_x, row_y);
+            pix_img2 = asset_pix(CMB_B, CMB_STR, col_x, row_y);
+            if (pix_img2 !== 24'hFFFFFF)      begin pix_exp = pix_img2;      n_img2_pix    = n_img2_pix + 1; end
+            else if (pix_img1 !== 24'hFFFFFF) begin pix_exp = pix_img1;      n_expose_img1 = n_expose_img1 + 1; end
+            else                        begin pix_exp = CK_BG;   n_bgcolor    = n_bgcolor + 1; end
+            for (c = 0; c < 3; c = c + 1) begin
+                exp_b = ((c == 0) ? pix_exp[7:0] : (c == 1) ? pix_exp[15:8] : pix_exp[23:16]);
+                got_b = peek_byte(DST10_OFF + row_y*STRIDE + col_x*3 + c);
+                if (got_b !== exp_b) begin
+                    err_bytes = err_bytes + 1;
+                    if (err_bytes <= 8)
+                        $display("  !! 不齐合成 (%0d,%0d) c=%0d: 得 %02h 应 %02h (图一 %06h 图二 %06h)",
+                                 col_x, row_y, c, got_b, exp_b, pix_img1, pix_img2);
+                end
+            end
+        end
+    $display("==== 不齐合成段: 错字节 %0d, 露图一 %0d, 底色 %0d, 图二赢 %0d ====",
+             err_bytes, n_expose_img1, n_bgcolor, n_img2_pix);
+    if (err_bytes != 0) err_cnt = err_cnt + 1;
+
     $display("==== 结束: line_start %0d 次 / line_done %0d 次, AR %0d 笔, AW %0d 笔, R 收 %0d 拍, W 收 %0d 拍, err=%0d ====",
              line_start_cnt, line_done_cnt, rd_bursts, wr_bursts, r_beats, w_beats, err_cnt);
     if ((err_cnt == 0) && (fill_err == 0) && (blit_ls == HEIGHT) && (blit_ld == HEIGHT)
@@ -852,7 +1084,7 @@ initial begin
 end
 
 initial begin
-    #30_000_000;
+    #150_000_000;                      // ★ 段落多了，仿真时间上限跟着放大（原来 30ms 不够，误报"挂住"）
     $display("!! 全局超时 —— 链路挂住了（line_start %0d / line_done %0d / AR %0d / AW %0d）",
              line_start_cnt, line_done_cnt, rd_bursts, wr_bursts);
     $finish;

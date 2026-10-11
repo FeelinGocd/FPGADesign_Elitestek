@@ -215,9 +215,12 @@ function [31:0] src_stride_of;
     input [23:0] color;
     input [31:0] dst;
     begin
-        if (flags[3] == 1'b0)      src_stride_of = dst;             // DDR 源 / FILL：不变
-        else if (color == 24'd0)   src_stride_of = dst;
-        else                       src_stride_of = {8'd0, color};   // 调色板源：字
+        //   ★ 参数 24 位里只有低 12 位是【源行跨距】，高 12 位是【特效参数】
+        //     （色调模式 / 强度 / 上下，见 docs/spec/硬件_加速器.md §1.3.1）——
+        //      这里只吃低 12 位，高 12 位原样跟着 line_param 广播下去。
+        if (flags[3] == 1'b0)          src_stride_of = dst;                // DDR 源 / FILL：不变
+        else if (color[11:0] == 12'd0) src_stride_of = dst;                // 跨距 0 = 沿用目的跨距
+        else                            src_stride_of = {20'd0, color[11:0]};  // 调色板源：字
     end
 endfunction
 
@@ -417,10 +420,15 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                          line_y_r    <= line_y_r + 16'd1;
                          line_dst_r  <= line_dst_r + dst_stride;
                          //   ★ 每张图各推各的：各用自己的跨距；MY 时取负（往回走一行）
+                         //   ★★ 例外：纯色层（flags[2:0]=3）那一格带的【不是地址，是颜色】
+                         //      （Compositor 拿它当常量色用）⇒ 那一格【不递推】，每行都得是同一个颜色。
+                         //      递推了的话第 2 行起颜色就变了（症状：闪红一行一个色、越往下越怪）。
                          for (i = 0; i < IMAGE_NUM; i = i + 1)
-                             line_src_r[32*i +: 32] <= cmd_flags_r[7*i + 6]
-                                                     ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
-                                                     : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]});
+                             line_src_r[32*i +: 32] <= (cmd_flags_r[7*i +: 3] == MODE_CKEY)
+                                                     ?  line_src_r[32*i +: 32]
+                                                     : (cmd_flags_r[7*i + 6]
+                                                        ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
+                                                        : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]}));
                      end
             default: ;
         endcase

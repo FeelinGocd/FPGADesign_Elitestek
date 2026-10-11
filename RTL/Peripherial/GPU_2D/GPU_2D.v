@@ -480,12 +480,13 @@ Factory #(
     //   ★ 这里看【最后一格】：合成器出的是最终结果，所以按最后那一步的模式走
     .line_flags                     (line_flags_last),
     .line_param                     (line_param_last),
+    .line_src_addr_last            (line_src_addr_last),   // ★ 纯色层时这一格是颜色
+    .line_fx_en                    (line_fx_en),
     .line_dst_addr                  (line_dst_addr),
     .line_w                         (line_w),
     .line_done                      (line_done),
     //   ★ 图片合成那一路要的两根（透传给里面的 Compositor；ck 现在判在【源里】，
     //     键色只到 PaletteSource → PaletteDecoder，不再经过这一层）
-    .line_fx_en                     (line_fx_en),
     .line_image_next                     (line_image_next),
 
     // 像素流入口：源①（DDR 读回的一行）

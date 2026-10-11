@@ -55,8 +55,9 @@ module Factory #(
 
     input  wire [6:0]                       line_flags,     //(I) 命令 flags：[4] = 颜色键控(ck) 使能
     input  wire [23:0]                      line_param,     //(I) FILL 的填充色
+    input  wire [31:0]                 line_src_addr_last, //(I) 最后一格的源地址（纯色层时 = 颜色）
+    input  wire                        line_fx_en,     //(I) 本命令有没有第二层（合成）
     //   ★ 图片合成那一路要的两根（都在 Compositor 里做，本层只是透传）
-    input  wire                             line_fx_en,     //(I) 本命令有没有第二张图（合成）
     input  wire                             line_image_next,     //(I) 单拍：源② 那条流的"图一到此为止"
     input  wire [ADDR_WIDTH-1:0]            line_dst_addr,  //(I) 这一行的目的起始地址
     input  wire [15:0]                      line_w,         //(I) 这一行多少像素
@@ -145,7 +146,8 @@ Compositor #(
     .line_flags                 (line_flags             ),
     .line_done                  (line_done              ),   // ★ 写侧完成：合成器用它把源手上的尾巴丢掉
     .line_param                 (line_param             ),
-    .line_fx_en                 (line_fx_en             ),
+    .line_src_addr_last        (line_src_addr_last     ),
+    .line_fx_en                (line_fx_en             ),
     .line_image_next            (line_image_next        ),
 
     // 数据口：源①（DDR 读回的一行）

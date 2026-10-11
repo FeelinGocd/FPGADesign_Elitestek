@@ -166,12 +166,16 @@ wire [4:0]      shift;
 //        3 的倍数时跨 5 个像素），alpha 这种"一个像素一个"的属性就配不上。
 //   ★ 这一行要不要我 —— 我自己看 flags 决定（模式表见 硬件_加速器.md §1.3）：
 //       1 = REPLACE 且 flags[3]=0（源是 DDR 帧）      → 要
-//       2 = ALPHA   3 = CKEY（两路同时用）            → 要（我是背景那一路）
+//       2 = ALPHA（两路同时用）                       → 要（我是背景那一路）
+//       3 = 纯色层（颜色合成的上层，见 §1.3.1）        → 不要（用不到背景读回）
 //       0 = FILL / 未定义模式 / REPLACE 但源是 PRAM    → 不要
 //     ★ 同一份判断在 PaletteSource（要 bit1）和 Compositor（要两位）各有一份，
 //       改模式表要一起改。
-wire        my_line  = (line_flags[2:0] == 3'd2) | (line_flags[2:0] == 3'd3)
-                     | ((line_flags[2:0] == 3'd1) & ~line_flags[3]);
+wire        my_line;
+assign      my_line  = (line_flags[2:0] == 3'd2)                      // ALPHA：要背景（读回目的自己）
+                     | ((line_flags[2:0] == 3'd1) & ~line_flags[3]);  // REPLACE 且源是 DDR 帧：也要
+//   ★ mode 3 现在 = 【纯色层】（颜色合成的上层）：背景由下面那张图提供，读回目的没意义 ⇒ 不要。
+//   ★ 模式表改动要三处一起改：本处 / PaletteSource（要 bit1）/ Compositor（要两位）。
 //   ★ 读哪一行：
 //       普通 BLIT = line_src_addr（命令给的源行）
 //       alpha     = line_dst_addr（【目的自己】：读回现有像素去混合）

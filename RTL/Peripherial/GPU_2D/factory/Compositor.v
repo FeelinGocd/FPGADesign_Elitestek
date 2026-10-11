@@ -75,8 +75,9 @@ module Compositor #(
     input  wire [6:0]                               line_flags,     //(I) [2:0] = 合成模式，[4] = 颜色键控(ck) 使能
     input  wire                                     line_done,      //(I) 单拍脉冲：本行的写侧已经完成（写控制器给的）
     input  wire [23:0]                              line_param,     //(I) FILL 的填充色
+    input  wire [31:0]                              line_src_addr_last, //(I) 最后一格那格的源地址；纯色层时它就是颜色 {A,R,G,B}  <- CmdExec
+    input  wire                                     line_fx_en,     //(I) 本命令有没有第二层（合成）  <- CmdExec
     //   ★ 图片合成那一路要的三根（2026-10 加：合成与 ck 都在本模块里做）
-    input  wire                                     line_fx_en,     //(I) 本命令有没有第二张图（合成）
     input  wire                                     line_image_next,     //(I) 单拍：源② 那条流的"图一到此为止"
     //   ★ line_flags / 目的地址 / 行宽本模块都用不着：前者是给合成算法留的
     //     （alpha 的混合系数），后两者是写侧的几何，合成器不需要知道
@@ -125,7 +126,7 @@ function [1:0] src_en_of;
             MODE_FILL    : src_en_of = 2'b00;
             MODE_REPLACE : src_en_of = pal_src ? 2'b10 : 2'b01;
             MODE_ALPHA   : src_en_of = 2'b11;
-            MODE_CKEY    : src_en_of = 2'b11;
+            MODE_CKEY    : src_en_of = 2'b10;   // ★ 纯色层（第 2 层 flags[2:0]=3）：只要源②，上层由合成级造
             default      : src_en_of = 2'b00;
         endcase
     end
@@ -154,6 +155,13 @@ wire [PIXEL_BYTES-1:0]              blend_mask;
 reg  [6:0]                          flags_r;        // 本行的 flags（模式 + ck）—— 行任务那拍锁存
 reg  [1:0]                          src_en_r;       // 这一行要哪几路源（★ 从 flags_r 自己解出来的）
 reg  [23:0]                         color_r;        // FILL 的填充色
+reg  [31:0]                         fx_color_r;     // 纯色层颜色 {A,R,G,B}（line_src_addr 第 2 格）
+wire                                fx_solid_en;    // ★ 1 = 上面那层是纯色（flags[2:0]=3 且 tint 开了）
+wire [PIXEL_WIDTH-1:0]              fx_solid_data;  // 纯色层颜色（4 个像素同色）
+wire [PIXELS*ALPHA_WIDTH-1:0]       fx_solid_alpha; // 纯色层浓度（= strength）
+reg  [2:0]                          fx_tone_r;      // 色调模式 line_param[23:21]（0 = 关）
+reg  [7:0]                          fx_strength_r;  // 强度     line_param[19:12]
+reg                                 fx_over_r;      // 1 = 只上层在上（默认）；bit20=0 时为 1
 reg                                 row_done_r;     // 本行写侧已完成（line_done 锁一拍用）
 
 // ---- 选路 ----
@@ -189,6 +197,11 @@ assign  fill_data           = {4{color_r}};
 assign  src_used            = |src_en_r;
 assign  sel_src1            = src_en_r[1];
 assign  alpha_mode          = src_en_r[1] & src_en_r[0];            // 11 ⇒ 混合模式
+
+//   ★ 纯色层：第 2 层 flags[2:0]=3（不读素材）且开了色调模式 ⇒ 上层 = 常量色 + 浓度
+assign  fx_solid_en    = line_fx_en & (flags_r[2:0] == 3'd3) & (fx_tone_r != 3'd0);
+assign  fx_solid_data  = {PIXELS{fx_color_r[23:0]}};
+assign  fx_solid_alpha = {PIXELS{fx_strength_r}};
 
 assign  pixel_data          = alpha_mode      ? blend_data          // 混合：前景 ⊕ 背景
                             : src_en_r[1]     ? imgCombine_data     // 源②（单图 = 那一张；合成 = 合成结果）
@@ -241,12 +254,20 @@ always @(posedge clk or negedge rst_n) begin
         flags_r    <= 7'd0;
         src_en_r   <= 2'd0;
         color_r    <= 24'd0;
+        fx_color_r    <= 32'd0;
+        fx_tone_r     <= 3'd0;
+        fx_strength_r <= 8'd0;
+        fx_over_r     <= 1'b1;
         row_done_r <= 1'b0;
     end
     else if (line_start) begin
         flags_r    <= line_flags;
         src_en_r   <= src_en_of(line_flags[2:0], line_flags[3]);   // ★ 自己解
         color_r    <= line_param;
+        fx_color_r    <= line_src_addr_last;
+        fx_tone_r     <= line_param[23:21];
+        fx_strength_r <= line_param[19:12];
+        fx_over_r     <= ~line_param[20];   // bit=0(默认) = 特效层在上 = 老行为
         row_done_r <= 1'b0;                     // 新的一行：写完了重新算
     end
     else if (line_done) begin
@@ -267,8 +288,13 @@ imageCombine #(
     .clk                                (clk                ),
     .rst_n                              (rst_n              ),
     .line_start                         (line_start         ),
+    .line_solid_en                      (fx_solid_en        ),   // ★ 纯色层
+    .line_solid_data                    (fx_solid_data      ),
+    .line_solid_alpha                   (fx_solid_alpha     ),
+    .line_tint                          (fx_tone_r          ),   // ★ 色调模式 0~4
     .line_fx_en                         (line_fx_en         ),
     .line_colorKey_en                   (flags_r[4]         ),   // ★ 命令级 ck 开关（本行锁存的 flags）
+    .line_fx_over                       (fx_over_r          ),   // ★ 上下方向（1 = 上层在上，默认）
     .line_image_next                    (line_image_next    ),
     .line_src_free                      (line_src1_free     ),
     .source_data                        (src1_data          ),
