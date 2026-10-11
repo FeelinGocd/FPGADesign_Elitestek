@@ -11,7 +11,7 @@
 //
 //  为什么必须有这个 TB
 //      Decoder / Source 的单元 TB 是【手工喂行任务】的 —— 命令解码、行任务广播、
-//      合成器的 src1 选路、src1_free 参与的 buf_free 节奏，这几处只有整链才验得到。
+//      合成器的 src1 选路、line_src1_free 参与的 line_buf_free 节奏，这几处只有整链才验得到。
 //
 //  判据（不靠肉眼，逐字节比对）
 //      1) 目的区逐字节 == 素材期望（索引→调色板→B,G,R 字节序）
@@ -342,7 +342,7 @@ endtask
 integer pr_badw, pr_firstbad, pr_words;
 always @(posedge clk) begin
     //   源开始一行 ⇒ 行号+1、字/字节计数归零
-    if (u_dut.u_PaletteSource.line_start && u_dut.u_PaletteSource.my_line) begin
+    if (u_dut.u_PaletteSource.line_start && u_dut.u_PaletteSource.my_line_0) begin
         if (pr_line > 0)
             $display("  LINE %0d 小结: 读了 %0d 个字, 最后地址 %0d, 错字 %0d, 第一个错字 %0d",
                      pr_line-1, pr_words, u_dut.u_PaletteSource.index_address_r, pr_badw, pr_firstbad);
@@ -399,9 +399,9 @@ task draw_sprite_and_check;
         my_on = flip[6];
         line_done_cnt = 0;
         probe_stream(dst);                      // ★ 打开源出口探针
-        //   命令: BLIT + src=0(PRAM 字 0) + dst ; ARGS{宽,高} + {flags=REPLACE|SPRITE, color=跨距}
-        ci_send(FID_BLIT, 32'd0, dst);
-        ci_send(FID_ARGS, {w_draw[15:0], AH[15:0]},
+        //   命令: 第 1 条给宽高 + 目的 ; 第 2 条（第 1 张图）给源地址(PRAM 字 0) + flags/跨距
+        ci_send(FID_BLIT, {w_draw[15:0], AH[15:0]}, dst);
+        ci_send(FID_ARGS, 32'd0,
                 {1'b0, (FLAGS_SPRITE | flip), STRIDE_W});   // ★ 镜像位就加在 flags 上
 
         //   等到恰好 AH 行写完

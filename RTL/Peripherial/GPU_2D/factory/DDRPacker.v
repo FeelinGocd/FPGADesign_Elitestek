@@ -45,7 +45,9 @@
 //   ⇒ 两者只在 cnt_byte == OUT_BYTES 这一拍重叠，净变化 = 一拍输入 - 一拍输出 = -4 字节
 //
 //  参考：pixel/DDR/DDRUnpacker.v（同一套字节累加器，方向相反）
-//        LineBuffer/bufferUnpacker.v（最早那一版）
+//        LineBuffer/bufferUnpacker.v（最早那一版）//  上一级是谁
+//      factory/Factory.v
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -56,22 +58,22 @@ module DDRPacker #(
     input  wire                     clk,
     input  wire                     rst_n,
 
-    //==================== 行边界（CmdExec 广播，各下游各取所需）====================
+    //==================== 行边界（CmdExec 广播，各下游各取所需）  ====================
     input  wire                     line_start,     //(I) 单拍脉冲：清掉上一行多读回来的尾巴
     input  wire [3:0]               line_dst_off,   //(I) 目的地址低 4 位：行首预置几个哑字节
 
     //==================== 数据入口（接 Compositor）====================
-    input  wire [IN_WIDTH-1:0]      in_data,
-    input  wire [IN_WIDTH/8-1:0]    in_mask,        //(I) 每字节要不要写（ColorKey 给的，1=写）
+    input  wire [IN_WIDTH-1:0]      pixel_data,
+    input  wire [IN_WIDTH/8-1:0]    pixel_mask,        //(I) 每字节要不要写（ColorKey 给的，1=写）
 
-    input  wire                     in_valid,
-    output wire                     in_ready,
+    input  wire                     pixel_valid,
+    output wire                     pixel_ready,
 
     //==================== 数据出口（接 WriteController）====================
-    output wire [OUT_WIDTH-1:0]     out_data,
-    output wire [OUT_WIDTH/8-1:0]   out_mask,       //(O) 拼好的一拍掩码（→ wr_strb 的一个与项）
-    output wire                     out_valid,
-    input  wire                     out_ready
+    output wire [OUT_WIDTH-1:0]     packer_data,
+    output wire [OUT_WIDTH/8-1:0]   packer_mask,       //(O) 拼好的一拍掩码（→ wr_strb 的一个与项）
+    output wire                     packer_valid,
+    input  wire                     packer_ready
 );
 
 //==============================================================================
@@ -102,21 +104,21 @@ wire    emit;                                           // 兜里够一拍输出
 wire    do_emit;                                        // 这一拍真的吐出去了（★ 必须握手）
 
 assign  accept  = (cnt_byte <= OUT_BYTES[CNT_WIDTH-1:0]);
-assign  in_hs   = in_valid & accept;
+assign  in_hs   = pixel_valid & accept;
 
 assign  emit    = (cnt_byte >= OUT_BYTES[CNT_WIDTH-1:0]);
-assign  do_emit = emit & out_ready;
+assign  do_emit = emit & packer_ready;
 
 //==============================================================================
 // 组合输出
 //==============================================================================
-assign  in_ready  = accept;
-assign  out_data  = byte_buffer[OUT_WIDTH-1:0];         // 低位 = 最老的字节
+assign  pixel_ready  = accept;
+assign  packer_data  = byte_buffer[OUT_WIDTH-1:0];         // 低位 = 最老的字节
 //   ★ 掩码走【同一套】移位：同一个 cnt_byte、同一个 line_start 清空、同一个 >>16 字节。
 //     数据和掩码在物理上就不可能错位 —— 这是整个 ck 最容易错的地方，所以不另算一套。
-assign  out_mask  = mask_buffer[OUT_BYTES-1:0];
+assign  packer_mask  = mask_buffer[OUT_BYTES-1:0];
 
-assign  out_valid = emit;
+assign  packer_valid = emit;
 
 //==============================================================================
 // 拼接：新到的一拍接到兜里已有字节的【上面】（纯拼接，没有移位器）
@@ -126,40 +128,40 @@ assign  out_valid = emit;
 //     还没攒够，永远不会被吐出去），移位量、切片宽度一模一样。
 always @(*) begin
     case (cnt_byte)
-6'd0 :  begin next_buffer = { {160{1'b0}}, in_data };
-              next_mask   = { { 20{1'b1}}, in_mask }; end
-6'd1 :  begin next_buffer = { {152{1'b0}}, in_data, byte_buffer[  7:0] };
-              next_mask   = { { 19{1'b1}}, in_mask, mask_buffer[ 0:0] }; end
-6'd2 :  begin next_buffer = { {144{1'b0}}, in_data, byte_buffer[ 15:0] };
-              next_mask   = { { 18{1'b1}}, in_mask, mask_buffer[ 1:0] }; end
-6'd3 :  begin next_buffer = { {136{1'b0}}, in_data, byte_buffer[ 23:0] };
-              next_mask   = { { 17{1'b1}}, in_mask, mask_buffer[ 2:0] }; end
-6'd4 :  begin next_buffer = { {128{1'b0}}, in_data, byte_buffer[ 31:0] };
-              next_mask   = { { 16{1'b1}}, in_mask, mask_buffer[ 3:0] }; end
-6'd5 :  begin next_buffer = { {120{1'b0}}, in_data, byte_buffer[ 39:0] };
-              next_mask   = { { 15{1'b1}}, in_mask, mask_buffer[ 4:0] }; end
-6'd6 :  begin next_buffer = { {112{1'b0}}, in_data, byte_buffer[ 47:0] };
-              next_mask   = { { 14{1'b1}}, in_mask, mask_buffer[ 5:0] }; end
-6'd7 :  begin next_buffer = { {104{1'b0}}, in_data, byte_buffer[ 55:0] };
-              next_mask   = { { 13{1'b1}}, in_mask, mask_buffer[ 6:0] }; end
-6'd8 :  begin next_buffer = { { 96{1'b0}}, in_data, byte_buffer[ 63:0] };
-              next_mask   = { { 12{1'b1}}, in_mask, mask_buffer[ 7:0] }; end
-6'd9 :  begin next_buffer = { { 88{1'b0}}, in_data, byte_buffer[ 71:0] };
-              next_mask   = { { 11{1'b1}}, in_mask, mask_buffer[ 8:0] }; end
-6'd10:  begin next_buffer = { { 80{1'b0}}, in_data, byte_buffer[ 79:0] };
-              next_mask   = { { 10{1'b1}}, in_mask, mask_buffer[ 9:0] }; end
-6'd11:  begin next_buffer = { { 72{1'b0}}, in_data, byte_buffer[ 87:0] };
-              next_mask   = { {  9{1'b1}}, in_mask, mask_buffer[10:0] }; end
-6'd12:  begin next_buffer = { { 64{1'b0}}, in_data, byte_buffer[ 95:0] };
-              next_mask   = { {  8{1'b1}}, in_mask, mask_buffer[11:0] }; end
-6'd13:  begin next_buffer = { { 56{1'b0}}, in_data, byte_buffer[103:0] };
-              next_mask   = { {  7{1'b1}}, in_mask, mask_buffer[12:0] }; end
-6'd14:  begin next_buffer = { { 48{1'b0}}, in_data, byte_buffer[111:0] };
-              next_mask   = { {  6{1'b1}}, in_mask, mask_buffer[13:0] }; end
-6'd15:  begin next_buffer = { { 40{1'b0}}, in_data, byte_buffer[119:0] };
-              next_mask   = { {  5{1'b1}}, in_mask, mask_buffer[14:0] }; end
-default:begin next_buffer = { { 32{1'b0}}, in_data, byte_buffer[127:0] };
-              next_mask   = { {  4{1'b1}}, in_mask, mask_buffer[15:0] }; end    // cnt_byte = 16
+6'd0 :  begin next_buffer = { {160{1'b0}}, pixel_data };
+              next_mask   = { { 20{1'b1}}, pixel_mask }; end
+6'd1 :  begin next_buffer = { {152{1'b0}}, pixel_data, byte_buffer[  7:0] };
+              next_mask   = { { 19{1'b1}}, pixel_mask, mask_buffer[ 0:0] }; end
+6'd2 :  begin next_buffer = { {144{1'b0}}, pixel_data, byte_buffer[ 15:0] };
+              next_mask   = { { 18{1'b1}}, pixel_mask, mask_buffer[ 1:0] }; end
+6'd3 :  begin next_buffer = { {136{1'b0}}, pixel_data, byte_buffer[ 23:0] };
+              next_mask   = { { 17{1'b1}}, pixel_mask, mask_buffer[ 2:0] }; end
+6'd4 :  begin next_buffer = { {128{1'b0}}, pixel_data, byte_buffer[ 31:0] };
+              next_mask   = { { 16{1'b1}}, pixel_mask, mask_buffer[ 3:0] }; end
+6'd5 :  begin next_buffer = { {120{1'b0}}, pixel_data, byte_buffer[ 39:0] };
+              next_mask   = { { 15{1'b1}}, pixel_mask, mask_buffer[ 4:0] }; end
+6'd6 :  begin next_buffer = { {112{1'b0}}, pixel_data, byte_buffer[ 47:0] };
+              next_mask   = { { 14{1'b1}}, pixel_mask, mask_buffer[ 5:0] }; end
+6'd7 :  begin next_buffer = { {104{1'b0}}, pixel_data, byte_buffer[ 55:0] };
+              next_mask   = { { 13{1'b1}}, pixel_mask, mask_buffer[ 6:0] }; end
+6'd8 :  begin next_buffer = { { 96{1'b0}}, pixel_data, byte_buffer[ 63:0] };
+              next_mask   = { { 12{1'b1}}, pixel_mask, mask_buffer[ 7:0] }; end
+6'd9 :  begin next_buffer = { { 88{1'b0}}, pixel_data, byte_buffer[ 71:0] };
+              next_mask   = { { 11{1'b1}}, pixel_mask, mask_buffer[ 8:0] }; end
+6'd10:  begin next_buffer = { { 80{1'b0}}, pixel_data, byte_buffer[ 79:0] };
+              next_mask   = { { 10{1'b1}}, pixel_mask, mask_buffer[ 9:0] }; end
+6'd11:  begin next_buffer = { { 72{1'b0}}, pixel_data, byte_buffer[ 87:0] };
+              next_mask   = { {  9{1'b1}}, pixel_mask, mask_buffer[10:0] }; end
+6'd12:  begin next_buffer = { { 64{1'b0}}, pixel_data, byte_buffer[ 95:0] };
+              next_mask   = { {  8{1'b1}}, pixel_mask, mask_buffer[11:0] }; end
+6'd13:  begin next_buffer = { { 56{1'b0}}, pixel_data, byte_buffer[103:0] };
+              next_mask   = { {  7{1'b1}}, pixel_mask, mask_buffer[12:0] }; end
+6'd14:  begin next_buffer = { { 48{1'b0}}, pixel_data, byte_buffer[111:0] };
+              next_mask   = { {  6{1'b1}}, pixel_mask, mask_buffer[13:0] }; end
+6'd15:  begin next_buffer = { { 40{1'b0}}, pixel_data, byte_buffer[119:0] };
+              next_mask   = { {  5{1'b1}}, pixel_mask, mask_buffer[14:0] }; end
+default:begin next_buffer = { { 32{1'b0}}, pixel_data, byte_buffer[127:0] };
+              next_mask   = { {  4{1'b1}}, pixel_mask, mask_buffer[15:0] }; end    // cnt_byte = 16
     endcase
 end
 

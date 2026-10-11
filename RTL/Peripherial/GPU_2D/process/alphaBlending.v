@@ -39,6 +39,9 @@
 //      像素流里【低位字节 = B】。本模块按字节独立算，不关心谁是谁，
 //      所以字节序天然跟随输入。
 //
+//  上一级是谁
+//      factory/Compositor.v —— 它把本模块插在"合成结果(前景) ↔ 源①(背景)"之间。
+//
 //  参考：docs/spec/硬件_加速器.md §5.3、process/colorKey.v（同一种"在哪儿做"的论证）
 //==============================================================================
 `timescale 1ns/100ps
@@ -49,16 +52,16 @@ module alphaBlending #(
     parameter BYTES_PER_PIXEL   = 3,                // 一个像素几字节（RGB888 = 3）
     parameter ALPHA_WIDTH       = 8                 // 一个像素的 α 几位
 )(
-    //==================== 前景（源② PRAM 精灵）====================
-    input  wire [PIXEL_WIDTH-1:0]               fg_data,    //(I) 一拍 PIXELS 个像素
-    input  wire [PIXELS*ALPHA_WIDTH-1:0]        fg_alpha,   //(I) 同上那些像素的 α（旁路来的）
+    //==================== 前景（源② PRAM 精灵）  ← PaletteSource  ====================
+    input  wire [PIXEL_WIDTH-1:0]               fg_data,    //(I) 前景像素 ← imageCombine.imgCombine_data
+    input  wire [PIXELS*ALPHA_WIDTH-1:0]        fg_alpha,   //(I) 前景 α  ← imageCombine.imgCombine_alpha
 
-    //==================== 背景（源① DDR 读回的目的像素）====================
-    input  wire [PIXEL_WIDTH-1:0]               bg_data,    //(I) 一拍 PIXELS 个像素
+    //==================== 背景（源① DDR 读回的目的像素）  ← DDRSource  ====================
+    input  wire [PIXEL_WIDTH-1:0]               bg_data,    //(I) 背景像素 ← Compositor.src0_data
 
     //==================== 结果 ====================
-    output wire [PIXEL_WIDTH-1:0]               blend_data, //(O) 混合后的 PIXELS 个像素
-    output wire [PIXELS*BYTES_PER_PIXEL-1:0]    blend_mask  //(O) 每字节要不要写（α=0 ⇒ 0）
+    output wire [PIXEL_WIDTH-1:0]               blend_data, //(O) 混合结果 → Compositor.blend_data
+    output wire [PIXELS*BYTES_PER_PIXEL-1:0]    blend_mask  //(O) 每字节要不要写（α=0 ⇒ 0）→ Compositor.blend_mask
 );
 
 //==============================================================================
@@ -68,23 +71,30 @@ genvar gp, gc;
 generate
     for (gp = 0; gp < PIXELS; gp = gp + 1) begin : g_pixel
         //   ---- 这个像素的 α（4 个像素共用同一位宽，各取各的）----
-        wire [ALPHA_WIDTH-1:0] alpha = fg_alpha[gp*ALPHA_WIDTH +: ALPHA_WIDTH];
+        wire [ALPHA_WIDTH-1:0] alpha;
+        assign alpha = fg_alpha[gp*ALPHA_WIDTH +: ALPHA_WIDTH];
 
         for (gc = 0; gc < BYTES_PER_PIXEL; gc = gc + 1) begin : g_channel
-            wire [7:0] fg = fg_data[(gp*BYTES_PER_PIXEL + gc)*8 +: 8];
-            wire [7:0] bg = bg_data[(gp*BYTES_PER_PIXEL + gc)*8 +: 8];
+            wire [7:0] fg;
+            wire [7:0] bg;
+            assign fg = fg_data[(gp*BYTES_PER_PIXEL + gc)*8 +: 8];
+            assign bg = bg_data[(gp*BYTES_PER_PIXEL + gc)*8 +: 8];
 
             //   ---- 差值：带符号，范围 −255..255 ----
-            wire signed [8:0] diff      = $signed({1'b0, fg}) - $signed({1'b0, bg});
+            wire signed [8:0] diff;
+            assign diff = $signed({1'b0, fg}) - $signed({1'b0, bg});
             //   ---- 取绝对值参与乘法（负号最后再补回去）----
-            wire        [8:0] diff_abs  = diff[8] ? (~diff + 9'd1) : diff;
+            wire        [8:0] diff_abs;
+            assign diff_abs = diff[8] ? (~diff + 9'd1) : diff;
             //   ---- 唯一的乘法：9 位 × 8 位 ⇒ 17 位（最大 255×255 = 65025）----
-            wire        [16:0] product  = diff_abs * alpha;
+            wire        [16:0] product;
+            assign product = diff_abs * alpha;
             //   ---- ÷255（精确，无除法器）：q = (p + 1 + (p>>8)) >> 8 ----
-            wire        [16:0] quotient = (product + 17'd1 + (product >> 8)) >> 8;
+            wire        [16:0] quotient;
+            assign quotient = (product + 17'd1 + (product >> 8)) >> 8;
             //   ---- 加回背景（带上原来的符号）----
-            wire        [8:0]  mixed    = diff[8] ? ({1'b0, bg} - quotient)
-                                                  : ({1'b0, bg} + quotient);
+            wire        [8:0]  mixed;
+            assign mixed = diff[8] ? ({1'b0, bg} - quotient) : ({1'b0, bg} + quotient);
 
             assign blend_data[(gp*BYTES_PER_PIXEL + gc)*8 +: 8] = mixed[7:0];
 

@@ -1,11 +1,24 @@
 
 param([string]$TbDir, [string]$TbTop)
 $ErrorActionPreference = 'Continue'
-$R = 'E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\project\verified\06_SoC_2DGPU\RTL'
+$ROOT = 'E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek'
+#  NOTE (keep this file ASCII-only; PS 5.1 reads BOM-less .ps1 as ANSI):
+#  Compile target = the RELEASE RTL (repo\RTL) -- the same files Efinity synthesizes.
+#  The frozen milestone copy under project\verified is no longer simulated.
+$R = Join-Path $ROOT 'RTL'
 $MS = 'E:\FPGA\ModelSim\modeltech64_10.5\win64'
 $env:PATH = "$MS;$env:PATH"
 $P = "$R\Peripherial"
-Set-Location "E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\sim\tb\$TbDir"
+$RUNDIR = Join-Path $ROOT "sim\tb\$TbDir"
+Set-Location $RUNDIR
+#  The release PaletteSource init paths are "hex/palette.hex", so mirror the hex files
+#  into <rundir>\hex\ as well (a testbench's own $readmemh keeps using the run directory).
+New-Item -ItemType Directory -Force -Path (Join-Path $RUNDIR 'hex') | Out-Null
+foreach ($h in @('palette.hex','assets.hex')) {
+  $src = Join-Path $RUNDIR $h
+  if (!(Test-Path $src)) { $src = Join-Path $ROOT "sim\tb\$h" }
+  if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $RUNDIR "hex\$h") -Force }
+}
 if (Test-Path work) { Remove-Item -Recurse -Force work }
 & "$MS\vlib.exe" work | Out-Null
 $F = @(
@@ -17,6 +30,7 @@ $F = @(
   "$P\GPU_2D\pixel\palette\PaletteDecoder.v", "$P\GPU_2D\pixel\palette\PaletteSource.v",
   "$P\GPU_2D\pixel\DDR\DDRSource.v", "$P\GPU_2D\pixel\DDR\DDRUnpacker.v",
   "$P\GPU_2D\process\colorKey.v", "$P\GPU_2D\process\alphaBlending.v",
+  "$P\GPU_2D\process\imageCombine.v",
   "$P\GPU_2D\cmd\CmdExec.v", "$P\GPU_2D\cmd\CmdChannel.v", "$P\GPU_2D\cmd\CmdBuffer.v", "$P\GPU_2D\cmd\CIUnpack.v",
   "$P\APB0\GPU_2D\APB0_GPU_2D.v",  "$P\GPU_2D\lineBuffer\lineBuffer.v", "$P\GPU_2D\lineBuffer\bufferControler.v", "$P\GPU_2D\lineBuffer\bufferUnpacker.v",
   "$P\GPU_2D\lineBuffer\HDMI\HDMI_Top.v", "$P\GPU_2D\lineBuffer\HDMI\asyn_rst_syn.v",

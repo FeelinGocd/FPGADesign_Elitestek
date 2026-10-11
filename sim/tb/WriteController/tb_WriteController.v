@@ -15,12 +15,12 @@
 //  ★ 接口对齐（RTL 现状；旧 TB 按老接口写的地方）
 //    1) 没有 line_op / line_color 了 —— WriteController 现在是【纯写入器】：
 //       不再自己生成常数色和相位（那件事搬到了 Compositor + DDRPacker），
-//       数据由上游给：src_data[127:0] + src_valid。
+//       数据由上游给：packer_data[127:0] + packer_valid。
 //       所以 TB 必须【假扮上游】供数（见下面的"上游供数模型"）——
-//       给完 line_start 之后把 src_valid 拉起来，一拍一拍喂 128 位。
-//    2) 新增 wr_free —— "本行连 B 响应都回来了，能接下一行任务"（上游拿它做发送节奏）。
+//       给完 line_start 之后把 packer_valid 拉起来，一拍一拍喂 128 位。
+//    2) 新增 line_wr_free —— "本行连 B 响应都回来了，能接下一行任务"（上游拿它做发送节奏）。
 //    3) 行任务【先锁存再开工】：line_start 那一拍只锁行上下文并置 line_pend_r，
-//       等 src_valid 才进 S_CMD 发 AW。数据没起来就永远不发 AW（用例10 专门钉这条路径）。
+//       等 packer_valid 才进 S_CMD 发 AW。数据没起来就永远不发 AW（用例10 专门钉这条路径）。
 //    4) line_done 是单拍脉冲，在"最后一笔的 cmd_wr_done"那一拍；
 //       空行(w*3 == 0，拍数 0)在 line_start 同拍就回 done（组合出来的）。
 //
@@ -54,16 +54,16 @@ localparam CLK_HALF = 5.0;
 reg          clk, rst_n;
 
 // ---- 行任务口 ----
-//   ★ 没有 line_op / line_color 了；新增 wr_free（能不能接下一行任务）
+//   ★ 没有 line_op / line_color 了；新增 line_wr_free（能不能接下一行任务）
 reg          line_start;
 reg  [31:0]  line_dst_addr;
 reg  [15:0]  line_w;
 wire         line_done;
-wire         wr_free;
+wire         line_wr_free;
 
 // ---- 上游供数口（TB 假扮 Compositor + DDRPacker）----
-reg  [127:0] src_data;
-reg          src_valid;
+reg  [127:0] packer_data;
+reg          packer_valid;
 
 // ---- 地址任务 / 数据口（WriteController ↔ AXIMastersHandler）----
 wire         cmd_wr_valid, cmd_wr_ready;
@@ -122,7 +122,7 @@ wire          m_AXI_RREADY;
 integer err_cnt, k;
 integer done_evt_cnt;                   // line_done 累计个数（空行的 done 是组合脉冲，靠计数才不漏）
 integer done_base;                      // 本行的基线
-integer wf_low_cnt;                     // wr_free = 0 的累计拍数
+integer wf_low_cnt;                     // line_wr_free = 0 的累计拍数
 integer wf_before;
 integer up_idx;                         // 上游已经喂到第几拍（0 起）
 integer up_wait;                        // 数据还有几拍才备好
@@ -151,15 +151,15 @@ WriteController u_dut (
     .line_dst_addr  (line_dst_addr),
     .line_w         (line_w),
     .line_done      (line_done),
-    .wr_free        (wr_free),
+    .line_wr_free        (line_wr_free),
     .cmd_wr_valid   (cmd_wr_valid),
     .cmd_wr_ready   (cmd_wr_ready),
     .cmd_wr_addr    (cmd_wr_addr),
     .cmd_wr_len     (cmd_wr_len),
     .cmd_wr_done    (cmd_wr_done),
     .cmd_wr_err     (cmd_wr_err),
-    .src_data       (src_data),
-    .src_valid      (src_valid),
+    .packer_data       (packer_data),
+    .packer_valid      (packer_valid),
     .wr_data        (wr_data),
     .wr_strb        (wr_strb),
     .wr_valid       (wr_valid),
@@ -313,7 +313,7 @@ always @(posedge clk or negedge rst_n) begin
 end
 
 ////////////////////////////////////////////////////////////////////////////////
-// line_done / wr_free 监视
+// line_done / line_wr_free 监视
 //   ★ 空行的 line_done 与 line_start 同拍（组合），等一拍去采就漏了 ——
 //     所以统一在 posedge 上计数，用"计数变化"判完成，不再去追那个脉冲
 ////////////////////////////////////////////////////////////////////////////////
@@ -324,17 +324,17 @@ always @(posedge clk or negedge rst_n) begin
     end
     else begin
         if (line_done) done_evt_cnt <= done_evt_cnt + 1;
-        if (!wr_free)  wf_low_cnt   <= wf_low_cnt + 1;
+        if (!line_wr_free)  wf_low_cnt   <= wf_low_cnt + 1;
     end
 end
 
 ////////////////////////////////////////////////////////////////////////////////
 // 上游供数模型（TB 假扮 Compositor + DDRPacker）
 //   收到 line_start 之后：
-//     · 先等 data_delay 拍（模拟 BLIT 时源还在从 DDR 往回读）—— 期间 src_valid=0
-//     · 然后拉高 src_valid，按【拍号】给数据：第 k 拍 = pat_of(k)
+//     · 先等 data_delay 拍（模拟 BLIT 时源还在从 DDR 往回读）—— 期间 packer_valid=0
+//     · 然后拉高 packer_valid，按【拍号】给数据：第 k 拍 = pat_of(k)
 //     · 每被写主收走一拍（wr_valid & wr_ready），拍号 +1，数据跟着换
-//   ★ 数据必须与被收走的那一拍同拍对齐：wr_data 是组合直连 src_data 的
+//   ★ 数据必须与被收走的那一拍同拍对齐：wr_data 是组合直连 packer_data 的
 //     （AXI4_Master_Write 里 m_AXI_WDATA = wr_data），所以"数据在第 k 次握手那一拍
 //     呈现 pat_of(k)"就是唯一正确的相位。
 //   ★ 拍号在 line_start 清 0 —— 换行必须重新从第 0 拍算起
@@ -343,8 +343,8 @@ wire up_fire = wr_valid & wr_ready;     // 写主收走一拍
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        src_valid <= 1'b0;
-        src_data  <= 128'd0;
+        packer_valid <= 1'b0;
+        packer_data  <= 128'd0;
         up_idx    <= 0;
         up_wait   <= 0;
         up_run    <= 1'b0;
@@ -354,19 +354,19 @@ always @(posedge clk or negedge rst_n) begin
             up_idx    <= 0;
             up_wait   <= data_delay;
             up_run    <= 1'b1;
-            src_valid <= 1'b0;
-            src_data  <= pat_of(0);
+            packer_valid <= 1'b0;
+            packer_data  <= pat_of(0);
         end
         else if (up_run) begin
             if (up_wait != 0) begin              // 数据还没备好
                 up_wait   <= up_wait - 1;
-                src_valid <= 1'b0;
+                packer_valid <= 1'b0;
             end
             else begin                           // 数据一直备着，被收走才换下一拍
-                src_valid <= 1'b1;
+                packer_valid <= 1'b1;
                 if (up_fire) begin
                     up_idx   <= up_idx + 1;
-                    src_data <= pat_of(up_idx + 1);
+                    packer_data <= pat_of(up_idx + 1);
                 end
             end
         end
@@ -387,13 +387,13 @@ task push_line;
     begin
         tick;
         done_base     = done_evt_cnt;
-        // ★ 拉起 line_start 之前先把 src_valid 收回来
-        //   上一行的数据早供完了，但 src_valid 可能还挂在 1 上；带着它给 line_start，
-        //   DUT 那一拍就会看到 "line_ready & src_valid" 直接开进 S_CMD —— 那就不是
+        // ★ 拉起 line_start 之前先把 packer_valid 收回来
+        //   上一行的数据早供完了，但 packer_valid 可能还挂在 1 上；带着它给 line_start，
+        //   DUT 那一拍就会看到 "line_ready & packer_valid" 直接开进 S_CMD —— 那就不是
         //   "数据晚到"的场景了。真实上游（Compositor/DDRPacker）换行时会重新备数，
         //   这里照它的规矩来：数据没备好就是 0
-        src_valid     = 1'b0;
-        src_data      = pat_of(0);
+        packer_valid     = 1'b0;
+        packer_data      = pat_of(0);
         line_dst_addr = dst;
         line_w        = w;
         line_start    = 1'b1;
@@ -481,7 +481,7 @@ initial begin
     err_cnt = 0;
     rst_n = 1'b0;
     line_start = 1'b0; line_dst_addr = 32'd0; line_w = 16'd0;
-    src_valid  = 1'b0; src_data = 128'd0;
+    packer_valid  = 1'b0; packer_data = 128'd0;
     data_delay = 0; up_idx = 0; up_wait = 0; up_run = 1'b0;
     repeat (10) @(posedge clk);
     rst_n = 1'b1;
@@ -502,14 +502,14 @@ initial begin
     check_strb(0, 16'hFFFF, "对齐3拍-首拍");
     check_strb(2, 16'hFFFF, "对齐3拍-末拍");
     check_all_beats("对齐3拍");
-    // wr_free：干活期间必须是 0（上游才不会把下一行塞进来）
+    // line_wr_free：干活期间必须是 0（上游才不会把下一行塞进来）
     if (wf_low_cnt == wf_before) begin
-        $display("FAIL [对齐3拍]: 整行期间 wr_free 一直是 1（上游会以为能接新行）");
+        $display("FAIL [对齐3拍]: 整行期间 line_wr_free 一直是 1（上游会以为能接新行）");
         err_cnt = err_cnt + 1;
     end
     else
-        $display("PASS [对齐3拍]: 干活期间 wr_free 掉低 %0d 拍，收工后又回到 1（当前 %b）",
-                 wf_low_cnt - wf_before, wr_free);
+        $display("PASS [对齐3拍]: 干活期间 line_wr_free 掉低 %0d 拍，收工后又回到 1（当前 %b）",
+                 wf_low_cnt - wf_before, line_wr_free);
 
     //==========================================================
     $display("---- 用例2: 地址不对齐（低 4 位 = 4）----");
@@ -632,12 +632,12 @@ initial begin
 
     //==========================================================
     //  ★ 用例10（新增）：数据晚到几十拍
-    //     行任务在 line_start 那一拍就锁下来了，但数据要等 src_valid。
+    //     行任务在 line_start 那一拍就锁下来了，但数据要等 packer_valid。
     //     验两件事：
     //       a) 数据没到之前【绝不开工】—— 不发 AW、不收一拍数据、line_done 不响
     //          （数据没备好就发 AW，Axi_Mux 的 W 通道会从那一刻锁给我们而写不出字节）
     //       b) 数据到了以后照常发 AW、正常走完、正常 line_done
-    $display("---- 用例10: line_start 后晚 30 拍才拉 src_valid ----");
+    $display("---- 用例10: line_start 后晚 30 拍才拉 packer_valid ----");
     clear_rec;
     data_delay = 30;
     push_line(32'h0800_9000, 16'd16);
@@ -662,10 +662,10 @@ initial begin
     end
     else $display("PASS [数据晚到]: 等待期间一拍数据都没被收走");
 
-    //   观察（不断言）：这一拍的 wr_free 是 RTL 的 "state == S_IDLE"，
+    //   观察（不断言）：这一拍的 line_wr_free 是 RTL 的 "state == S_IDLE"，
     //   行任务锁下之后、数据没来的这段时间状态【还在 S_IDLE】—— 打印出来存档
-    $display("OBSERVE [数据晚到]: 等 src_valid 期间 wr_free=%b（line_pend 已置起，状态仍是 S_IDLE）",
-             wr_free);
+    $display("OBSERVE [数据晚到]: 等 packer_valid 期间 line_wr_free=%b（line_pend 已置起，状态仍是 S_IDLE）",
+             line_wr_free);
 
     wait_done("数据晚到");
     if (nburst !== 1 || nbeat !== 3) begin

@@ -16,6 +16,9 @@
 //      · z=0 的色块若干个：要能看见"玻璃盖在它上面"
 //      · z=2 的色块若干个：同一批颜色，但不受玻璃影响
 //      · 跑步角色（PRAM 精灵 + ck + 左右镜像）画在最上面
+//      · ★ 玻璃之上那批里【第 1 块】不是纯色块，而是一张【合成图】：
+//        一条命令 3 条 CI（num0 + num1 + ck），图二抠白 ⇒ 图二的白底处露出图一，
+//        两张都白的地方谁都不写 ⇒ 玻璃/底色直接透上来（见 docs/spec/硬件_加速器.md §5.5）
 //      ⇒ 对照着看：同一块颜色，一层写着"在里面"、一层写着"在外面"。
 //
 //  脏区怎么重画（★ 上板踩过，务必看懂）
@@ -91,13 +94,20 @@ static const u32 g_band[BAND_N] = { 0x182028u, 0x2A3440u, 0x3E4A58u, 0x55636Fu }
 
 #define K_BLOCK          0
 #define K_RUN            1
+#define K_CMB            2              /* ★ 合成块：两张素材图合成的一张，当移动元素用 */
+
+/* ---- 合成块用的两张素材（num0 / num1，都是 32x48、跨距 8 字）----------------- */
+#define CMB_A            2              /* g_assets[2] = "num0" */
+#define CMB_B            3              /* g_assets[3] = "num1" */
+#define CMB_FLAGS_A      (GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE)                      /* 图一：不抠 */
+#define CMB_FLAGS_B      (GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN) /* 图二：抠白 */
 
 typedef struct {
     int x, y, w, h;         /* 矩形（像素）*/
     int vx, vy;             /* 每帧走几像素 */
     int z;                  /* Z_UNDER / Z_OVER */
     int id;                 /* 同层里按它排（稳定顺序）*/
-    int kind;               /* K_BLOCK / K_RUN */
+    int kind;               /* K_BLOCK / K_RUN / K_CMB */
     int flip;               /* K_RUN：要不要水平镜像 */
     u32 color;              /* K_BLOCK 颜色 */
     int asset;              /* K_RUN 素材下标 */
@@ -186,6 +196,14 @@ static void draw_elem(u32 fb, int i)
 
     if (e->kind == K_BLOCK) {
         CI_gpu2d_fillRect(fb, (u32)e->x, (u32)e->y, (u32)e->w, (u32)e->h, e->color);
+        g_cmd++;
+    } else if (e->kind == K_CMB) {
+        /*   ★ 一条合成命令 = 3 条 CI：命令开始 + 图一 + 图二（驱动里已经封好）
+         *   图二开 ck ⇒ 它的白底不写：图一在那些位置露出来；两张都白的地方
+         *   谁都不写 ⇒ 玻璃/底色直接透上来（这正是我们刚验过的语义）。*/
+        CI_gpu2d_combineRect(g_assets[CMB_A].base_word, g_assets[CMB_A].stride_word, CMB_FLAGS_A,
+                             g_assets[CMB_B].base_word, g_assets[CMB_B].stride_word, CMB_FLAGS_B,
+                             fb, (u32)e->x, (u32)e->y, (u32)e->w, (u32)e->h);
         g_cmd++;
     } else {
         CI_gpu2d_spriteFlipCK(g_assets[e->asset].base_word,
@@ -297,7 +315,11 @@ static void init_model(void)
     }
     for (i = 0; i < OVER_N; i++, n++) {             /* 玻璃之上 */
         el_t *e = &g_el[n];
-        e->w = 32; e->h = 32; e->kind = K_BLOCK; e->z = Z_OVER; e->id = i;
+        e->w = 32; e->h = 32; e->z = Z_OVER; e->id = i;
+        /*   ★ 玻璃之上的第 1 块 = 合成图（其余还是纯色块）：
+         *     用满素材高度 32x48，好看清"图二的白底处露出图一"。*/
+        if (i == 0) { e->kind = K_CMB; e->h = 48; }
+        else        { e->kind = K_BLOCK; }
         e->x = 16 + (int)(rnd_next() % (u32)(SCR_W - 96));
         e->y = 96 + (int)(rnd_next() % (u32)(SCR_H - 192));
         e->vx = ((int)(rnd_next() % 7u)) - 3;

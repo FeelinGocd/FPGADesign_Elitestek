@@ -49,7 +49,9 @@
 //      像素流里【低位字节 = B】（帧缓存就是 B,G,R 序，显示侧 dvi_encoder_Top 拿
 //      [7:0] 当蓝）。本模块只搬运，不翻字节。
 //
-//  参考：docs/spec/硬件_加速器.md §4.1（封装修法）、docs/spec/硬件_加速器.md §4.3（拍对齐下沉）
+//  参考：docs/spec/硬件_加速器.md §4.1（封装修法）、docs/spec/硬件_加速器.md §4.3（拍对齐下沉）//  上一级是谁
+//      pixel/palette/PaletteSource.v
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -72,7 +74,7 @@ module PaletteDecoder #(
     input  wire [COLOR_WIDTH-1:0]                   key_color,      //(I) 键色(APB 0x2078, 复位默认白)
     input  wire [6:0]                               line_flags,     //(I) [5] = MX 水平镜像
 
-    //==================== 索引字入口（接 PaletteSource 的素材 RAM 读口）====================
+    //==================== 索引字入口（接 PaletteSource 的素材 RAM 读口）  ====================
     input  wire [INDEXES_PER_WORD*INDEX_WIDTH-1:0]  index_data,     //(I) 一个字 = 4 个索引
     input  wire                                     index_valid,    //(I) 这个字有效
     output wire                                     index_ready,    //(O) 我还能收（下游没堵住）

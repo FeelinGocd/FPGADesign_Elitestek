@@ -15,7 +15,7 @@
 //        之后送进来（多输入对单输出），本模块只从它那儿取。
 //      ★ 首尾遮头（wr_strb）留在这里，因为它由【目的几何】决定（地址低 4 位
 //        + 行跨度），和内容无关 —— 换什么源都一样。
-//      ★ src_valid 没起来（BLIT 时源还没备好）wr_valid 就拉低，写侧因此
+//      ★ packer_valid 没起来（BLIT 时源还没备好）wr_valid 就拉低，写侧因此
 //        天然会等，不需要任何额外的握手状态。
 
 //  WSTRB 只有首尾两拍要遮
@@ -26,12 +26,12 @@
 //  行任务怎么收（★ 锁任务和开工必须分开）
 //      line_start 只有一拍，而数据可能要几十拍后才到（BLIT 要等 DDR 读回来）。
 //      所以：line_start 那一拍只【锁存行上下文】并置 line_pend_r，
-//      等 src_valid（数据备好）再进 S_CMD 发 AW —— 直接把两个条件写在一个 if 里，
+//      等 packer_valid（数据备好）再进 S_CMD 发 AW —— 直接把两个条件写在一个 if 里，
 //      数据没到的那一行就会被整行跳过，AR 发了、AW 永远不发。
 //      ★ 开工前才发 AW 是有意为之：数据没备好就发 AW，Axi_Mux 的 W 通道会从那一刻
 //        锁给我们，而我们一个字节都写不出，别人的写全被挡住（见 docs/spec/设计总纲.md §8.4）
 
-//  wr_free：报给上游做发送节奏
+//  line_wr_free：报给上游做发送节奏
 //      含义 = "本行连 B 响应都回来了，我可以接下一行任务了"。
 //      上游（Factory 容器）把它和各源的 free 相与成 buf_free，顶层再送给 CmdExec。
 //      ★ 少这一根会出两种错，都实测过：
@@ -49,7 +49,9 @@
 //      本笔拍数 = min(256, (4096 − (addr & 0xFFF)) >> 4, 本行剩余拍数)
 
 //  参考：RTL/Peripherial/LineBuffer/bufferControler.v（读方向的镜像）
-//        docs/spec/硬件_加速器.md §3
+//        docs/spec/硬件_加速器.md §3//  上一级是谁
+//      factory/Factory.v
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -58,12 +60,12 @@ module WriteController (
     input  wire             clk_acc,            //(I) 命令侧时钟（与 CmdExec 同域）
     input  wire             rst_acc_n,          //(I) 异步复位，低有效
 
-    //==================== 行任务口（接 CmdExec）====================
+    //==================== 行任务口（接 CmdExec）  ====================
     input  wire             line_start,         //(I) 单拍脉冲：这一行的任务在这拍有效
     input  wire [31:0]      line_dst_addr,      //(I) 这一行的目的起始地址
     input  wire [15:0]      line_w,             //(I) 这一行多少像素
     output wire             line_done,          //(O) 单拍脉冲：这一行真的写完了
-    output wire             wr_free,            //(O) 能接下一行任务（本行已经全部写完）
+    output wire             line_wr_free,            //(O) 能接下一行任务（本行已经全部写完）
 
     //==================== 地址任务（接 AXIMastersHandler）====================
     output wire             cmd_wr_valid,       //(O) 提交一笔写
@@ -77,11 +79,11 @@ module WriteController (
     //   ★ 数据由 Compositor 给（多输入对单输出），本模块不再自己生成 ——
     //     它只负责"什么时候能供"（wr_valid）和首尾字节使能（wr_strb）。
     //     首尾遮头是【目的几何】决定的，和内容无关，所以留在这里。
-    input  wire [127:0]     src_data,           //(I) 来自 Compositor 的一拍 16 字节
-    input  wire             src_valid,          //(I) 这一拍有效（BLIT 时要等源备好）
-    //   ck 掩码：从 DDRPacker 的掩码兜出来，和 src_data 是【同一个字节网格】。
+    input  wire [127:0]     packer_data,           //(I) 来自 Compositor 的一拍 16 字节
+    input  wire             packer_valid,          //(I) 这一拍有效（BLIT 时要等源备好）
+    //   ck 掩码：从 DDRPacker 的掩码兜出来，和 packer_data 是【同一个字节网格】。
     //   本行没开 ck 时恒全 1 ⇒ 一与就是原值，老行为一位不变。
-    input  wire [15:0]      ck_mask,            //(I) 每字节要不要写（1=写）
+    input  wire [15:0]      packer_mask,            //(I) 每字节要不要写（1=写）
     
     output wire [127:0]     wr_data,            //(O) 一拍 16 字节 → AXIMastersHandler
     output wire [15:0]      wr_strb,            //(O) 字节使能
@@ -189,7 +191,7 @@ assign skip_line  = (line_beats == 14'd0);
 assign skip_done  = (state == S_IDLE) & line_start & skip_line;
 assign take_line  = (state == S_IDLE) & line_start & ~skip_line;
 //   ★ 任务【锁下来】和【开工】必须分开：line_start 只有一拍，而数据可能要几十拍后才到
-//     （BLIT 要等 DDR 读回来）。原来写成 S_IDLE : if (take_line & src_valid) ——
+//     （BLIT 要等 DDR 读回来）。原来写成 S_IDLE : if (take_line & packer_valid) ——
 //     数据没到的那些行，任务就在这一拍被跳过了，AW 一直不发、line_done 永远不回。
 //     实测：发 3 行，第 1 行有 AR（源收到了）却没有 AW。
 assign line_ready = take_line | line_pend_r;
@@ -200,19 +202,19 @@ assign line_ready = take_line | line_pend_r;
 //
 //     ★★ 为什么必须带 ~line_pend_r（不是"顺手加的保险"，是实测过的洞）：
 //        行任务锁进 line_pend_r 之后、数据还没到的那段时间里，state 【仍然停在 S_IDLE】。
-//        这时 wr_free 若还是 1，上游就会再发一个 line_start，而 take_line 在这个窗口里
+//        这时 line_wr_free 若还是 1，上游就会再发一个 line_start，而 take_line 在这个窗口里
 //        照样成立 → 整组行上下文被覆盖 → 上一行静默消失、它的 line_done 永不回来
 //        → CmdExec 按 line_done_cnt_r == h 判完成，整条命令永久卡在 S_RUN。
 //        实测复现：A 行锁下后数据未到，pend 窗口内再给 B 行 line_start，
 //        结果只发出 1 笔 AW（B 行的）、只回 1 个 line_done —— A 行不见了。
-//        （BLIT 要等 DDR 读回、src_valid 几十拍后才来，正好落在这个窗口里）
+//        （BLIT 要等 DDR 读回、packer_valid 几十拍后才来，正好落在这个窗口里）
 //
 //     回到 S_IDLE 本身的含义是"这一行连 B 响应都回来了"，同时还保证：
 //       · 上游各源的 ping-pong 那一块已经被取空（src_free 的含义）
 //       · 字节兜里剩下的只可能是本行多读回来的尾巴
 //     两条合起来，下一次 line_start 清兜才是安全的（见 DDRPacker 的文件头）。
 //     代价只是"等 B 的那十几拍不和下一行的读重叠"，行内的读写重叠一点没动。
-assign wr_free    = (state == S_IDLE) & ~line_pend_r;
+assign line_wr_free    = (state == S_IDLE) & ~line_pend_r;
 
 assign last_burst = (beats_left_r == burst_len_r);      // 本笔正好把剩下的发完
 assign beat_take  = wr_valid & wr_ready;
@@ -234,7 +236,7 @@ assign cmd_wr_len   = burst_len_r[7:0] - 8'd1;          // 拍数 - 1
 assign line_done    = skip_done | ((state == S_RUN) & cmd_wr_done & last_burst);
 
 // ---- 数据：内容由 Compositor 给（本模块不再生成）----
-assign wr_data = src_data;
+assign wr_data = packer_data;
 
 // 首拍遮头、末拍遮尾、中间全开
 //   ★ 两个遮罩要【分别】算再相与，不能写成多路选择：
@@ -247,12 +249,12 @@ assign tail_mask = is_last  ? (16'hFFFF >> (16 - last_bytes_r))   : 16'hFFFF;
 //       ck 掩码是"内容"决定的（这个像素命中键色 = 不写）
 //     两者相与 = 最终这一拍写哪几个字节。
 //   ★ 掩码按字节、跟着数据走同一套移位 ⇒ 像素就算横跨两拍也自动对。
-//     ck 没开时 ck_mask 恒全 1，这里结果和改造前逐拍一致（回归）。
-assign wr_strb   = head_mask & tail_mask & ck_mask;
+//     ck 没开时 packer_mask 恒全 1，这里结果和改造前逐拍一致（回归）。
+assign wr_strb   = head_mask & tail_mask & packer_mask;
 
 //   供完了就拉低; 源还没备好（BLIT 时 Compositor 没数据）也跟着拉低 —— 
 //   写侧因此天然会等, 不需要任何额外的握手状态
-assign wr_valid = (beat_idx_r < beats_total_r) & src_valid;
+assign wr_valid = (beat_idx_r < beats_total_r) & packer_valid;
 
 //==============================================================================
 // 状态机
@@ -275,11 +277,11 @@ always @(*) begin
     next_state = state;
     case (state)
         //   ★ 任务字段在 take_line 那一拍就锁存(它们只在 line_start 有效),
-        //     但【开写】要等 src_valid —— 数据没备好就发 AW 的话, Axi_Mux 的
+        //     但【开写】要等 packer_valid —— 数据没备好就发 AW 的话, Axi_Mux 的
         //     W 通道会从 AW 那一刻就锁给我们, 而我们一个字节都写不出,
         //     期间别人的写(CPU 串口/显示侧)全被挡住(见 §9.1)。
         //     FILL 的常数色源恒有效 → 立刻开写; BLIT 等 bank 装满。
-        S_IDLE : if (line_ready & src_valid) next_state = S_CMD;
+        S_IDLE : if (line_ready & packer_valid) next_state = S_CMD;
         S_CMD  : if (cmd_wr_ready) next_state = S_RUN;      // 命令被收下
         S_RUN  : if (cmd_wr_done)                           // 这一笔完成了
                      next_state = last_burst ? S_IDLE : S_CMD;
@@ -325,7 +327,7 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                              line_pend_r   <= 1'b1;
                          end
                          //   数据备好了 → 交给 S_CMD（同拍 take_line 时也成立，写在后面覆盖）
-                         if (line_ready & src_valid) line_pend_r <= 1'b0;
+                         if (line_ready & packer_valid) line_pend_r <= 1'b0;
                      end
 
             S_CMD  : ;

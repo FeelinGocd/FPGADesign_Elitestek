@@ -42,7 +42,9 @@
 //      显示侧 dvi_encoder_Top 拿 [7:0] 当蓝、[15:8] 当绿、[23:16] 当红
 //      （帧缓存里就是 B,G,R 这个序）。本模块原样输出 0xRRGGBB，不做字节翻转。
 //
-//  参考：LineBuffer/PingPongBuffer/BlockRAM.v、docs/spec/硬件_加速器.md §7.3（调色板容量）
+//  参考：LineBuffer/PingPongBuffer/BlockRAM.v、docs/spec/硬件_加速器.md §7.3（调色板容量）//  上一级是谁
+//      pixel/palette/PaletteDecoder.v
+
 //==============================================================================
 `timescale 1ns/100ps
 

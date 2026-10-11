@@ -51,7 +51,7 @@ reg  [23:0] line_param;
 reg  [31:0] line_dst_addr;
 reg  [15:0] line_w;
 wire        line_done;
-wire        buf_free;
+wire        line_buf_free;
 
 //==============================================================================
 // 索引源
@@ -93,7 +93,7 @@ wire         wr_ready;
 wire [95:0] src0_data = 96'd0;
 reg         src0_valid = 1'b0;
 wire        src0_rd_en;
-reg         src0_free = 1'b1;
+reg         line_src0_free = 1'b1;
 
 integer wleft, wcnt;
 reg     in_burst = 1'b0;
@@ -159,10 +159,13 @@ Factory #(.PIXEL_WIDTH(96), .DATA_WIDTH(128), .ADDR_WIDTH(32), .LEN_WIDTH(8)) u_
     .clk(clk), .rst_n(rst_n), .line_start(line_start),
     .line_flags(line_flags), .line_param(line_param), .line_dst_addr(line_dst_addr),
     .line_w(line_w), .line_done(line_done),
-    .src0_data(src0_data), .src0_valid(src0_valid), .src0_rd_en(src0_rd_en), .src0_free(src0_free),
+    /* ★ 合成/键控那三根：本 TB 只测 ck（合成由 tb_imageCombine / tb_m2loopback 测）
+       —— 别悬空：line_fx_en 悬空 = X，会把 imageCombine 的状态机整成 X，行就永远不 done */
+    .line_fx_en(1'b0), .line_image_next(1'b0),
+    .src0_data(src0_data), .src0_valid(src0_valid), .src0_rd_en(src0_rd_en), .line_src0_free(line_src0_free),
     .src1_data(pal_data), .src1_mask(pal_mask), .src1_alpha(pal_alpha),
     .src1_valid(pal_valid), .src1_rd_en(pal_ready),
-    .src1_free(1'b1), .buf_free(buf_free),
+    .line_src1_free(1'b1), .line_buffer_free(line_buf_free),
     .cmd_wr_valid(cmd_wr_valid), .cmd_wr_ready(cmd_wr_ready), .cmd_wr_addr(cmd_wr_addr),
     .cmd_wr_len(cmd_wr_len), .cmd_wr_done(cmd_wr_done), .cmd_wr_err(cmd_wr_err),
     .wr_data(wr_data), .wr_strb(wr_strb), .wr_valid(wr_valid), .wr_ready(wr_ready)

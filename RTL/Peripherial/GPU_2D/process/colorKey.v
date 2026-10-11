@@ -29,7 +29,9 @@
 //      来自 APB 寄存器：显示子块 0x2078 CKEY_COLOR，复位默认 0xFFFFFF(白)。
 //      软件（lineBuffer_setCkeyColor）不写它时就是白 —— 配套约定见 pic2pram.py：
 //      透明像素统一落成调色板第 0 项 = ffffff。
-//
+////  上一级是谁
+//      pixel/palette/PaletteDecoder.v（逐像素比键色，生成字节掩码）
+
 //==============================================================================
 `timescale 1ns/100ps
 

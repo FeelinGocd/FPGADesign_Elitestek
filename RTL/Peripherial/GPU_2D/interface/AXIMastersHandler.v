@@ -33,7 +33,9 @@
 //      4) cmd_wr_done 单拍，且等 B 响应回来才拉 → 它一响就代表数据已落进 DDR
 
 //  参考：docs/参考/AXI总线解析.md（协议）+ docs/spec/设计总纲.md §8（本工程结论）
-//        RTL/Peripherial/AXI4/Master/AXI4_Master.v（合并版；本模块按方向拆开）
+//        RTL/Peripherial/AXI4/Master/AXI4_Master.v（合并版；本模块按方向拆开）//  上一级是谁
+//      GPU_2D.v（把 DDRSource / Factory 的命令与数据接到 SoC 的 AXI）
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -49,7 +51,7 @@ module AXIMastersHandler #(
     input  wire                     clk,
     input  wire                     rst_n,          //(I) 异步复位，低有效
 
-    //==================== 写命令口（对上层：写引擎）====================
+    //==================== 写命令口（对上层：写引擎）  ← Factory ====================
     input  wire                     cmd_wr_valid,   //(I) 提交一笔写
     output wire                     cmd_wr_ready,   //(O) 可接收（空闲且不在复位）
     input  wire [ADDR_WIDTH-1:0]    cmd_wr_addr,    //(I) 写起始字节地址
@@ -89,7 +91,7 @@ module AXIMastersHandler #(
     input  wire                     m_AXI_BVALID,
     output wire                     m_AXI_BREADY,
 
-    //==================== 读命令口（对上层：读引擎）====================
+    //==================== 读命令口（对上层：读引擎）  ← DDRSource ====================
     input  wire                     rd_cmd_valid,   //(I) 提交一笔读
     output wire                     rd_cmd_ready,   //(O) 可接收（空闲且不在复位）
     input  wire [ADDR_WIDTH-1:0]    rd_cmd_addr,    //(I) 读起始字节地址

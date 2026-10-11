@@ -9,12 +9,18 @@
  * @brief 2D 加速器 GPU_2D 的绘图 API —— 走自定义指令(CI), 【不占 APB 地址】。
  *        实现: CI_gpu2d.c    RTL: GPU_2D/GPU_2D.v, cmd/CIUnpack.v, cmd/CmdExec.v
  *
- * 一条绘图命令 = 两条 CI(位序必须和 CIUnpack.v 一致, 改一边就得改另一边):
+ * 一条绘图命令 = N+1 条 CI(N = 这条命令画几张图; 单张图 N=1, 合成 N=2)。
+ * 位序必须和 RTL CIUnpack.v 一致, 改一边就得改另一边:
  *   第 1 条  function_id = 操作类型(见 GPU2D_FID_*)
- *            inputs_0    = 源地址(不用就传 0),  inputs_1 = 目的地址
- *   第 2 条  function_id = ARGS(参数 + 命令结束词)
- *            inputs_0    = { 宽[31:16], 高[15:0] }        单位: 像素 / 行
- *            inputs_1    = { more[31], flags[30:24], 颜色[23:0] }
+ *            inputs_0    = { 宽[31:16], 高[15:0] }   单位: 像素 / 行(几张图共用)
+ *            inputs_1    = 目的地址                    (几张图合成到同一块地方)
+ *   第 2 条起 function_id = ARGS  —— 【一条 CI = 一张图】
+ *            inputs_0    = 这张图的源地址(纯色图传 0)
+ *            inputs_1    = { more[31], flags[30:24], 这张图的参数[23:0] }
+ *            more = 1 后面还有一张图, more = 0 这条是最后一张(命令结束词)
+ *   ★ 几条 CI 只是"一条装不下一张图的全部资料", 命令本身仍然只有一条。
+ *   ★ 画【两张图】就用【两条参数 CI】（图片合成, 见下面 CI_gpu2d_combine）:
+ *     第 1 张图 more=1、最后一张 more=0。
  *
  * 命令是【发完不管】的: 硬件收下立刻回 rsp, 绘制在后台做, CPU 不等。
  * 一帧画完发一条 FENCE —— 它等前面所有行都写进 DDR 才置 DONE_ACC,
@@ -131,6 +137,29 @@ void CI_gpu2d_spriteAlpha(u32 asset_base, u32 dst_addr, u32 w, u32 h,
 /* alpha 的坐标版（extra 同上；extra=0 就是纯 alpha 混合） */
 void CI_gpu2d_spriteAlphaRect(u32 asset_base, u32 stride, u32 dst_fb,
                               u32 dx, u32 dy, u32 w, u32 h, u32 extra);
+
+/*   —— 图片合成：把两张 PRAM 素材图合成一张再写进目的 ——
+ *   一条命令 = 3 条 CI（硬件只发一条命令，软件发三条）:
+ *        ① 命令开始: { 宽, 高 } + 目的地址          （两张图共用）
+ *        ② 图一（底图）: 素材基址 + 模式 + 行跨距     more = 1
+ *        ③ 图二（特效图）: 素材基址 + 模式 + 行跨距   more = 0（结束词）
+ *   · base_/fx_ 的【模式各按自己那条 CI 给】: GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE
+ *     再按需要或上 GPU2D_MODE_CKEY_EN(抠色) / GPU2D_FLIP_X / GPU2D_FLIP_Y(镜像)。
+ *   · 合成结果 = 两张图叠起来（图二在上面那张）:
+ *         某个字节上"图二不透明" ⇒ 用图二的颜色；否则用图一的颜色
+ *         掩码 = 两张的掩码相或 ⇒ 图二把原图的透明洞填上；图二透明的地方保留图一
+ *   · 要不要和【背景】(目的里原有的像素)做 alpha 混合，由【图二那张】的模式决定
+ *     （模式给 GPU2D_MODE_ALPHA，硬件自己把目的那一行读回来当背景，不用软件给）。
+ *   · w/h 是目标矩形，两张图共用；两张素材都要 ≥ 这个尺寸（宽不够会读到相邻行）。
+ *   · 现在一条命令最多 2 张图（硬件 IMAGE_NUM = 2）。 */
+void CI_gpu2d_combine(u32 base_addr, u32 base_stride, u32 base_flags,
+                      u32 fx_addr,   u32 fx_stride,   u32 fx_flags,
+                      u32 dst_addr,  u32 w, u32 h);
+
+/* 合成的坐标版（只有目的要换算地址） */
+void CI_gpu2d_combineRect(u32 base_addr, u32 base_stride, u32 base_flags,
+                          u32 fx_addr,   u32 fx_stride,   u32 fx_flags,
+                          u32 dst_fb, u32 dx, u32 dy, u32 w, u32 h);
 
 /* 帧结束: 单独一条 CI。硬件把前面所有绘制都落盘后置 DONE_ACC,
  * 显示端在下一个帧边界翻页并清掉它 —— 一帧发一次。 */

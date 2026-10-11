@@ -11,7 +11,7 @@
 //    ⑤ ck 与 alpha 同时开 ⇒ 掩码相与；只开 ck ⇒ 老行为（用源给的掩码）
 //    ⑥ 混合模式的两路 valid 要相与
 //    ⑦ 老行为回归：00(FILL) / 01(源①) / 10(源②) 的选路和掩码一位不差
-//    ⑧ buf_free：两路同时用时【两路都得 free】才能开新行
+//    ⑧ line_buf_free：两路同时用时【两路都得 free】才能开新行
 //
 //  模型（和 alphaBlending.v 同一份整数算法）
 //      每通道：d = |fg − bg|, p = d*alpha, q = (p + 1 + (p>>8)) >> 8, out = bg ± q
@@ -39,6 +39,8 @@ reg  [6:0]      line_flags;                      // ★ 模式就在这里面（
 reg             line_done;                       // 写侧完成（单拍脉冲）：源手上的尾巴靠它放开
 reg  [23:0]     line_param;
 reg             line_start;
+reg             line_fx_en;                      // ★ 合成：本 TB 不走（恒 0 = 合成级旁路）
+reg             line_image_next;                      // ★ 单拍：源侧"图一到此为止"（本 TB 不用）
 
 reg  [95:0]     src0_data;
 reg             src0_valid;
@@ -48,8 +50,8 @@ reg  [11:0]     src1_mask;
 reg  [31:0]     src1_alpha;
 reg             src1_valid;
 wire            src1_rd_en;
-reg             src0_free, src1_free;
-wire            buf_free;
+reg             line_src0_free, line_src1_free;
+wire            line_buf_free;
 
 wire [95:0]     pixel_data;
 wire [11:0]     pixel_mask;
@@ -66,6 +68,8 @@ Compositor #(
     .line_flags     (line_flags),
     .line_done      (line_done),
     .line_param     (line_param),
+    .line_fx_en     (line_fx_en),       // ★ 新端口：0 = 合成级旁路（本 TB 单路）
+    .line_image_next     (line_image_next),       // ★ 新端口：合成级切趟用，本 TB 恒 0
     .src0_data      (src0_data),
     .src0_valid     (src0_valid),
     .src0_rd_en     (src0_rd_en),
@@ -74,9 +78,9 @@ Compositor #(
     .src1_alpha     (src1_alpha),
     .src1_valid     (src1_valid),
     .src1_rd_en     (src1_rd_en),
-    .src0_free      (src0_free),
-    .src1_free      (src1_free),
-    .buf_free       (buf_free),
+    .line_src0_free      (line_src0_free),
+    .line_src1_free      (line_src1_free),
+    .line_buf_free       (line_buf_free),
     .pixel_data     (pixel_data),
     .pixel_mask     (pixel_mask),
     .pixel_valid    (pixel_valid),
@@ -245,10 +249,11 @@ reg [11:0] ck_win;
 initial begin
     clk = 1'b0; rst_n = 1'b0; err_cnt = 0; case_no = 0;
     line_start = 1'b0; line_flags = 7'd0; line_done = 1'b0;
+    line_fx_en = 1'b0; line_image_next = 1'b0;
     line_param = 24'd0;
     src0_data = 96'd0; src0_valid = 1'b0;
-    src1_data = 96'd0; src1_alpha = 32'd0; src1_mask = 12'hfff; src1_valid = 1'b0;
-    src0_free = 1'b1; src1_free = 1'b1; pixel_ready = 1'b1;
+    src1_data = 96'd0; src1_alpha = 32'd0; src1_mask = 12'hfff; src1_valid = 1'b0;   // ★ src1_mask = 源给的（ck）掩码
+    line_src0_free = 1'b1; line_src1_free = 1'b1; pixel_ready = 1'b1;
 
     repeat (4) @(negedge clk);
     rst_n = 1'b1;
@@ -291,15 +296,16 @@ initial begin
     $display("---- 4) ck 与 alpha 同时开 : 掩码相与 ----");
     case_no = 4;
     do_line(3'd2, 1'b1, 1'b1, 4'd0);                              // ck 开
-    ck_win = 12'b0000_1111_1111;                             // 源只给前 8 个字节写
+    ck_win = 12'b0000_1111_1111;                             // ★ 源给的（ck）掩码：低 8 位要写
     beat(BG_A, FG_A, 32'hFF80_4000, ck_win, 1'b1, 1'b1);
-    //   期望掩码 = 源掩码 & alpha 掩码(ff8)
-    if (pixel_mask !== (ck_win & 12'hff8)) begin
+    //   ★ 掩码 = alpha 掩码 & 源给的掩码 = ff8 & 0ff = 0f8
+    if (pixel_mask !== 12'h0f8) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] ck&alpha : 掩码 got %03x exp %03x", pixel_mask, ck_win & 12'hff8);
+        $display("  [FAIL] ck&alpha : 掩码 got %03x exp %03x", pixel_mask, 12'h0f8);
     end
     expect_mix(BG_A, FG_A, 32'hFF80_4000, e_d, e_m);
-    chk(e_d, e_m & ck_win, 1'b1, "ck&alpha");
+    e_m = e_m & ck_win;                     // ★ 还要与上【源给的（ck）掩码】
+    chk(e_d, e_m, 1'b1, "ck&alpha");
 
     //------------------------------------------------------------------
     $display("---- 5) 混合模式两路 valid 相与 ----");
@@ -336,39 +342,39 @@ initial begin
     end
 
     //------------------------------------------------------------------
-    $display("---- 7) buf_free : 两路同时用时两路都得 free ----");
+    $display("---- 7) line_buf_free : 两路同时用时两路都得 free ----");
     case_no = 7;
     do_line(3'd2, 1'b1, 1'b0, 4'd0);
-    src0_free = 1'b1; src1_free = 1'b1; #1;
-    if (buf_free !== 1'b1) begin
+    line_src0_free = 1'b1; line_src1_free = 1'b1; #1;
+    if (line_buf_free !== 1'b1) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] buf_free : 两路都 free 应该是 1");
+        $display("  [FAIL] line_buf_free : 两路都 free 应该是 1");
     end
-    src0_free = 1'b0; src1_free = 1'b1; #1;
-    if (buf_free !== 1'b0) begin
+    line_src0_free = 1'b0; line_src1_free = 1'b1; #1;
+    if (line_buf_free !== 1'b0) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] buf_free : 源① 没 free 时不该开新行");
+        $display("  [FAIL] line_buf_free : 源① 没 free 时不该开新行");
     end
-    src0_free = 1'b1; src1_free = 1'b0; #1;
-    if (buf_free !== 1'b0) begin
+    line_src0_free = 1'b1; line_src1_free = 1'b0; #1;
+    if (line_buf_free !== 1'b0) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] buf_free : 源② 没 free 时不该开新行");
+        $display("  [FAIL] line_buf_free : 源② 没 free 时不该开新行");
     end
-    src0_free = 1'b1; src1_free = 1'b1;
+    line_src0_free = 1'b1; line_src1_free = 1'b1;
     //   只用一路时，只看那一路
     do_line(3'd1, 1'b0, 1'b0, 4'd0);
-    src0_free = 1'b1; src1_free = 1'b0; #1;
-    if (buf_free !== 1'b1) begin
+    line_src0_free = 1'b1; line_src1_free = 1'b0; #1;
+    if (line_buf_free !== 1'b1) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] buf_free(01) : 没用源② 就不该看它");
+        $display("  [FAIL] line_buf_free(01) : 没用源② 就不该看它");
     end
     do_line(3'd0, 1'b0, 1'b0, 4'd0);
-    src0_free = 1'b0; src1_free = 1'b0; #1;
-    if (buf_free !== 1'b1) begin
+    line_src0_free = 1'b0; line_src1_free = 1'b0; #1;
+    if (line_buf_free !== 1'b1) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] buf_free(00) : FILL 不用源，永远能开新行");
+        $display("  [FAIL] line_buf_free(00) : FILL 不用源，永远能开新行");
     end
-    src0_free = 1'b1; src1_free = 1'b1;
+    line_src0_free = 1'b1; line_src1_free = 1'b1;
 
     //------------------------------------------------------------------
     $display("---- 8) 老行为回归 : 00/01/10 三个模式的选路与掩码 ----");
@@ -392,18 +398,20 @@ initial begin
     chk(BG_A, 12'hfff, 1'b1, "src0+ck");
     //   10 = 源②（调色板）：开 ck 才用源给的掩码
     do_line(3'd1, 1'b1, 1'b0, 4'd0);
-    beat(BG_A, FG_A, 32'h00000000, 12'h123, 1'b1, 1'b1);
+    beat(BG_A, FG_A, 32'h00000000, 12'hfff, 1'b1, 1'b1);   // ★ ck 关 ⇒ 源那边给的就是全 1
     chk(FG_A, 12'hfff, 1'b1, "src1");
+    //   ★ ck 判在【源里】（PaletteDecoder 逐像素比键色）⇒ 合成器只认源给的掩码：
+    //     开了 ck 就把源掩码原样用（这里 = 12'h123），颜色一位不改
     do_line(3'd1, 1'b1, 1'b1, 4'd0);
-    beat(BG_A, FG_A, 32'h00000000, 12'h123, 1'b1, 1'b1);
-    chk(FG_A, 12'h123, 1'b1, "src1+ck");
+    beat(BG_A, 96'h000000_000000_112233_FFFFFF, 32'h00000000, 12'h123, 1'b1, 1'b1);
+    chk(96'h000000_000000_112233_FFFFFF, 12'h123, 1'b1, "src1+ck");
 
     //------------------------------------------------------------------
     $display("---- 9) 取数门控：写完(line_done)之后，源手上的尾巴要能各取各的丢掉 ----");
     //   ★ 这条是上板卡死那个 bug 的回归哨兵：
     //     ① 正常情况下"取走一拍"必须用【和下游同一个条件】(pixel_valid & pixel_ready)，
     //        否则先到的那一路会被取走但没人要地丢掉（PRAM 先到、DDR 后到）。
-    //     ② line_done 之后，两路各自把剩下的尾巴丢掉，src_free 才回得来。
+    //     ② line_done 之后，两路各自把剩下的尾巴丢掉，line_src0_free 才回得来。
     case_no = 9;
     do_line(3'd2, 1'b1, 1'b0, 4'd0);                         // alpha
     //   ① 只有一路有货、下游想要：两路都不该 pop（配不上）
@@ -422,7 +430,7 @@ initial begin
         err_cnt = err_cnt + 1;
         $display("  [FAIL] 配对齐了应该两路一起 pop (got %b/%b)", src0_rd_en, src1_rd_en);
     end
-    //   ③ 写侧完成后：只剩一路有尾巴，也要能取走（否则 src_free 永远不回）
+    //   ③ 写侧完成后：只剩一路有尾巴，也要能取走（否则 line_src0_free 永远不回）
     @(negedge clk); line_done = 1'b1; @(negedge clk); line_done = 1'b0;
     @(negedge clk);
     src0_data = BG_A; src0_valid = 1'b0;      // 源① 空了（尾巴都在源② 那边）

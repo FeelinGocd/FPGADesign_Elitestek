@@ -55,7 +55,14 @@ reg  [2:0]   cmd_type;
 reg  [31:0]  cmd_src, cmd_dst;
 reg  [15:0]  cmd_w, cmd_h;
 reg  [6:0]   cmd_flags;
-reg  [23:0]  cmd_color;
+reg  [23:0]  cmd_args;
+
+//   ★ N 张图：源地址 / 模式 / 参数 这三根线一张图一格；TB 只驱动第 1 张图（原图）那格，
+//     宽高是几张图共用的，直接接。上面的量和老 TB 一模一样，一个字都不用改
+localparam IMAGE_NUM = 2;
+wire [32*IMAGE_NUM-1:0] cmd_src_bus   = {{(32*(IMAGE_NUM-1)){1'b0}}, cmd_src};
+wire [7*IMAGE_NUM-1:0]  cmd_flags_bus = {{(7*(IMAGE_NUM-1)){1'b0}},  cmd_flags};
+wire [32*IMAGE_NUM-1:0] cmd_args_bus  = {{(32*(IMAGE_NUM-1)){1'b0}}, cmd_args};
 
 // ---- 配置口 ----
 //   ★ 只有 lineBuffer_mode：源和目的同跨距，5760/2880 由它在内部派生
@@ -69,6 +76,10 @@ wire  [31:0] line_dst_addr, line_src_addr;
 wire  [15:0] line_w;
 wire  [6:0]  line_flags;
 wire  [23:0] line_param;
+//   ★ "最后一格"那三根（背景源 / 合成器 / 写侧用）；本 TB 只验透传，接出来免得悬空告警
+wire  [31:0] line_src_addr_last;
+wire  [6:0]  line_flags_last;
+wire  [23:0] line_param_last;
 reg          line_done;
 reg          line_buffer_free;              // 下游还有没有空块（TB 自己驱动，测发送节奏）
 
@@ -96,12 +107,12 @@ CmdExec #(.LINE_BYTES(5760)) u_dut (
     .cmd_valid          (cmd_valid),
     .cmd_ready          (cmd_ready),
     .cmd_type           (cmd_type),
-    .cmd_src            (cmd_src),
     .cmd_dst            (cmd_dst),
     .cmd_w              (cmd_w),
     .cmd_h              (cmd_h),
-    .cmd_flags          (cmd_flags),
-    .cmd_color          (cmd_color),
+    .cmd_src            (cmd_src_bus),
+    .cmd_flags          (cmd_flags_bus),
+    .cmd_args           (cmd_args_bus),
     .lineBuffer_mode    (lineBuffer_mode),
     .line_start         (line_start),
     .line_dst_addr      (line_dst_addr),
@@ -109,6 +120,9 @@ CmdExec #(.LINE_BYTES(5760)) u_dut (
     .line_w             (line_w),
     .line_flags         (line_flags),
     .line_param         (line_param),
+    .line_src_addr_last (line_src_addr_last),
+    .line_flags_last    (line_flags_last),
+    .line_param_last    (line_param_last),
     .line_done          (line_done),
     .line_buffer_free   (line_buffer_free)
 );
@@ -172,7 +186,7 @@ task push_cmd;
     begin
         tick;
         cmd_type = t; cmd_src = s; cmd_dst = d;
-        cmd_w = w; cmd_h = h; cmd_flags = fl; cmd_color = col;
+        cmd_w = w; cmd_h = h; cmd_flags = fl; cmd_args = col;
         cmd_valid = 1'b1;
         wait_cnt = 0;
         while (!cmd_ready && wait_cnt < 200) begin tick; wait_cnt = wait_cnt + 1; end
@@ -260,7 +274,7 @@ initial begin
     err_cnt = 0; line_delay = 2;
     rst_n = 1'b0;
     cmd_valid = 1'b0; cmd_type = 3'd0; cmd_src = 32'd0; cmd_dst = 32'd0;
-    cmd_w = 16'd0; cmd_h = 16'd0; cmd_flags = 7'd0; cmd_color = 24'd0;
+    cmd_w = 16'd0; cmd_h = 16'd0; cmd_flags = 7'd0; cmd_args = 24'd0;
     lineBuffer_mode = 1'b0;
     line_buffer_free = 1'b1;            // 默认下游有空（节奏用例里再拉低）
     repeat (10) @(posedge clk);

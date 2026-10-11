@@ -44,15 +44,23 @@ reg         ci_rsp_ready;
 wire [31:0] ci_outputs_0;
 
 // ---- 命令队列出口 ----
+//   ★ N = 一条命令几张图（这些线里一张图一格）
+//     （localparam 必须写在用到它的线之前，不然 Verilog 会当成隐式线网）
+localparam IMAGE_NUM = 2;
 wire        cmd_valid;
 reg         cmd_ready;
-wire [2:0]  cmd_type;
-wire [31:0] cmd_src;
-wire [31:0] cmd_dst;
-wire [15:0] cmd_w;
-wire [15:0] cmd_h;
-wire [6:0]  cmd_flags;
-wire [23:0] cmd_color;
+wire [2:0]              cmd_type;             // 共用
+wire [31:0]             cmd_dst;              // 共用
+wire [15:0]             cmd_w;                // 共用
+wire [15:0]             cmd_h;                // 共用
+wire [32*IMAGE_NUM-1:0] cmd_src_full;         // 每张图一格
+wire [7*IMAGE_NUM-1:0]  cmd_flags_full;       // 每张图一格
+wire [32*IMAGE_NUM-1:0] cmd_args_full;        // 每张图一格
+
+//   下面的断言只看第 1 张图（原图那格）；第 2 张图用 check_slot 单独查
+wire [31:0] cmd_src   = cmd_src_full[31:0];
+wire [6:0]  cmd_flags = cmd_flags_full[6:0];
+wire [23:0] cmd_args  = cmd_args_full[23:0];
 
 integer err_cnt, i, k, ncmd;
 integer ready_seen;
@@ -60,7 +68,7 @@ reg  full_hit, ok;
 reg  [9:0]  rty_fid;
 reg  [31:0] rty_in0, rty_in1;
 
-CmdBuffer #(.FIFO_AW(FIFO_AW)) u_dut (
+CmdBuffer #(.FIFO_AW(FIFO_AW), .IMAGE_NUM(IMAGE_NUM)) u_dut (
     .clk_ci         (clk),
     .rst_ci_n       (rst_n),
     .clk_acc        (clk),
@@ -76,12 +84,12 @@ CmdBuffer #(.FIFO_AW(FIFO_AW)) u_dut (
     .cmd_valid      (cmd_valid),
     .cmd_ready      (cmd_ready),
     .cmd_type       (cmd_type),
-    .cmd_src        (cmd_src),
     .cmd_dst        (cmd_dst),
     .cmd_w          (cmd_w),
     .cmd_h          (cmd_h),
-    .cmd_flags      (cmd_flags),
-    .cmd_color      (cmd_color)
+    .cmd_src        (cmd_src_full),
+    .cmd_flags      (cmd_flags_full),
+    .cmd_args       (cmd_args_full)
 );
 
 localparam [9:0] FID_NOP   = 10'h000;
@@ -162,16 +170,16 @@ task push_fill;
     input [31:0] dst; input [15:0] w; input [15:0] h;
     input [23:0] col; input [6:0]  fl;
     begin
-        push_ci(FID_FILL, 32'd0, dst);
-        push_ci(FID_ARGS, {w, h}, {1'b0, fl, col});
+        push_ci(FID_FILL, {w, h}, dst);
+        push_ci(FID_ARGS, 32'd0, {1'b0, fl, col});   // 纯色图：地址填 0，纯色放参数格
     end
 endtask
 
 task push_blit;
     input [31:0] src; input [31:0] dst; input [15:0] w; input [15:0] h; input [6:0] fl;
     begin
-        push_ci(FID_BLIT, src, dst);
-        push_ci(FID_ARGS, {w, h}, {1'b0, fl, 24'd0});
+        push_ci(FID_BLIT, {w, h}, dst);
+        push_ci(FID_ARGS, src, {1'b0, fl, 24'd0});   // 原图：地址在它自己那条 CI 里
     end
 endtask
 
@@ -196,7 +204,7 @@ task pop_cmd;
         else begin
             // 标准握手：cmd_valid=1 时数据【已经有效】→ 先采样，再拉 cmd_ready 把它弹走
             t = cmd_type; s = cmd_src; d = cmd_dst;
-            w = cmd_w; h = cmd_h; f = cmd_flags; c = cmd_color;
+            w = cmd_w; h = cmd_h; f = cmd_flags; c = cmd_args;
             cmd_ready = 1'b1;
             tick;
             cmd_ready = 1'b0;
@@ -234,6 +242,26 @@ task check_cmd;
                      tag, t, s, d, w, h, f, c);
             $display("      期望    : 类型=%0d 源=%h 目的=%h 宽=%0d 高=%0d flags=%h 颜色=%h",
                      et, es, ed, ew, eh, ef, ec);
+            err_cnt = err_cnt + 1;
+        end
+        else $display("PASS [%0s]", tag);
+    end
+endtask
+
+// 查第 k 张图（k 从 0 起）：多图的组装对不对，就看每根线的第 k 格里是不是那张图的资料
+//   （宽高是几张图共用的，不在里面）
+task check_slot;
+    input integer k;
+    input [31:0] es; input [6:0] ef; input [23:0] ec;
+    input [8*16-1:0] tag;
+    reg [31:0] s; reg [6:0] f; reg [23:0] c;
+    begin
+        s = cmd_src_full  [32*k +: 32];
+        f = cmd_flags_full[ 7*k +:  7];
+        c = cmd_args_full [32*k +: 24];
+        if (s !== es || f !== ef || c !== ec) begin
+            $display("FAIL [%0s]: 第%0d张图 地址=%h flags=%h 参数=%h", tag, k+1, s, f, c);
+            $display("      期望      : 地址=%h flags=%h 参数=%h", es, ef, ec);
             err_cnt = err_cnt + 1;
         end
         else $display("PASS [%0s]", tag);
@@ -305,11 +333,11 @@ initial begin
     check_cmd(3'd1, 32'd0, 32'h0800_4000, 16'd16, 16'd16, 7'h00, 24'h00FF00, "连弹-第二条");
 
     $display("---- 用例5: 孤儿 ARGS ----");
-    push_ci(FID_ARGS, {16'd8, 16'd8}, {1'b0, 7'h00, 24'hFF0000});
+    push_ci(FID_ARGS, 32'h0900_0000, {1'b0, 7'h00, 24'hFF0000});   // 没在收图，白给
     expect_no_cmd(20, "孤儿ARGS不出命令");
 
     $display("---- 用例6: 截断（FILL 没等 ARGS 就来 BLIT）----");
-    push_ci(FID_FILL, 32'd0, 32'h1111_0000);
+    push_ci(FID_FILL, {16'd16, 16'd16}, 32'h1111_0000);   // 只有 op，没等图那几条
     push_blit(32'h0900_0000, 32'h0800_2000, 16'd32, 16'd16, 7'h00);
     check_cmd(3'd2, 32'h0900_0000, 32'h0800_2000, 16'd32, 16'd16, 7'h00, 24'd0, "截断后出BLIT");
 
@@ -322,11 +350,11 @@ initial begin
     $display("---- 用例8: 一直推到写满 ----");
     full_hit = 1'b0; ncmd = 0;
     while (!full_hit && ncmd < 12) begin
-        rty_fid = FID_FILL; rty_in0 = 32'd0; rty_in1 = 32'h0A00_0000 + ncmd*32'h1000;
+        rty_fid = FID_FILL; rty_in0 = {16'd64, 16'd32}; rty_in1 = 32'h0A00_0000 + ncmd*32'h1000;
         push_ci_chk(rty_fid, rty_in0, rty_in1, 40, ok);
         if (!ok) full_hit = 1'b1;
         else begin
-            rty_fid = FID_ARGS; rty_in0 = {16'd64, 16'd32}; rty_in1 = {1'b0, 7'h00, 24'h00FF00};
+            rty_fid = FID_ARGS; rty_in0 = 32'd0; rty_in1 = {1'b0, 7'h00, 24'h00FF00};
             push_ci_chk(rty_fid, rty_in0, rty_in1, 40, ok);
             if (!ok) full_hit = 1'b1; else ncmd = ncmd + 1;
         end
@@ -345,31 +373,62 @@ initial begin
     repeat (40) @(posedge clk); #1;
 
     $display("---- 用例10: 零尺寸 FILL(w=0) ----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_5000);
-    push_ci(FID_ARGS, {16'd0, 16'd32}, {1'b0, 7'h00, 24'h00FF00});
+    push_ci(FID_FILL, {16'd0, 16'd32}, 32'h0800_5000);
+    push_ci(FID_ARGS, 32'd0, {1'b0, 7'h00, 24'h00FF00});
     expect_no_cmd(20, "w=0不出命令");
 
     $display("---- 用例11: 零尺寸 FILL(h=0) ----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_6000);
-    push_ci(FID_ARGS, {16'd64, 16'd0}, {1'b0, 7'h00, 24'h00FF00});
+    push_ci(FID_FILL, {16'd64, 16'd0}, 32'h0800_6000);
+    push_ci(FID_ARGS, 32'd0, {1'b0, 7'h00, 24'h00FF00});
     expect_no_cmd(20, "h=0不出命令");
 
     $display("---- 用例12: 零尺寸之后紧跟一条正常命令 ----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_7000);
-    push_ci(FID_ARGS, {16'd0, 16'd0}, {1'b0, 7'h00, 24'h00FF00});
+    push_ci(FID_FILL, {16'd0, 16'd0}, 32'h0800_7000);
+    push_ci(FID_ARGS, 32'd0, {1'b0, 7'h00, 24'h00FF00});
     push_fill(32'h0800_8000, 16'd8, 16'd8, 24'h0000FF, 7'h00);
     check_cmd(3'd1, 32'd0, 32'h0800_8000, 16'd8, 16'd8, 7'h00, 24'h0000FF, "零尺寸后正常命令");
 
     $display("---- 用例13: 零尺寸之后跟一条孤儿 ARGS（幽灵命令陷阱）----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_9000);
-    push_ci(FID_ARGS, {16'd0, 16'd16}, {1'b0, 7'h00, 24'h11_2233});
-    push_ci(FID_ARGS, {16'd77, 16'd88}, {1'b0, 7'h00, 24'h44_5566});
+    push_ci(FID_FILL, {16'd0, 16'd16}, 32'h0800_9000);
+    push_ci(FID_ARGS, 32'h0900_0000, {1'b0, 7'h00, 24'h11_2233});   // 结束词（零尺寸 ⇒ 不发）
+    push_ci(FID_ARGS, 32'h0900_1000, {1'b0, 7'h00, 24'h44_5566});   // 孤儿
     expect_no_cmd(20, "零尺寸后孤儿ARGS不出幽灵命令");
 
     $display("---- 用例14: FENCE 打断没拼完的命令 ----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_A000);       // 只有 op，没有 ARGS
+    push_ci(FID_FILL, {16'd16, 16'd16}, 32'h0800_A000);   // 只有 op，没有图
     push_ci(FID_FENCE, 32'hDEAD_BEEF, 32'h1234_5678);
     check_cmd(3'd3, 32'd0, 32'd0, 16'd0, 16'd0, 7'd0, 24'd0, "FENCE打断截断命令");
+
+    //==========================================================================
+    //  ★ 用例15~17：一条命令能画几张图（N = IMAGE_NUM，合成就是 2 张）
+    //     几张图 = 几条参数 CI；几条 CI 只是"一条装不下"，命令还是只有一条
+    //==========================================================================
+    $display("---- 用例15: 两张图（op 给宽高+目的，两条 ARGS 各给一张图）----");
+    push_ci(FID_BLIT, {16'd16, 16'd8}, 32'h0800_D000);             // 共用：宽高 + 目的
+    push_ci(FID_ARGS, 32'h0000_1000, {1'b1, 7'h09, 24'h000008});   // 图1（原图）  more=1
+    //   图2 = 特效图：地址 + { 跨距 12 | 强度 8 | 特效模式 4 } + flags（和图1同一套）+ more=0
+    //   args[23:20]=4'b0011（色调模式=1(红) + 垫在底图下面）, [19:12]=8'h80（强度 128）,
+    //   [11:0]=12'h168（360 字行跨距）; flags=7'h0A（ALPHA + PRAM源 + MX）
+    push_ci(FID_ARGS, 32'h0A00_0000, {1'b0, 7'h0A, 24'h38_0168});   // 图2（特效图）more=0
+    check_cmd(3'd2, 32'h0000_1000, 32'h0800_D000, 16'd16, 16'd8, 7'h09, 24'h000008,
+              "case15-image1");
+    check_slot(1, 32'h0A00_0000, 7'h0A, 24'h38_0168, "case15-image2-fx");
+    expect_no_cmd(20, "case15-no-extra");
+
+    $display("---- 用例16: 三张图（超过 N=2）⇒ 整条丢掉，不许截断 ----");
+    push_ci(FID_BLIT, {16'd8, 16'd4}, 32'h0800_D800);
+    push_ci(FID_ARGS, 32'h0000_3000, {1'b1, 7'h09, 24'h000008});   // 图1 more=1
+    push_ci(FID_ARGS, 32'h0000_4000, {1'b1, 7'h2A, 24'hABCDEF});   // 图2 more=1
+    push_ci(FID_ARGS, 32'h0000_5000, {1'b0, 7'h15, 24'h123456});   // 图3 ⇒ 没格子了
+    expect_no_cmd(30, "case16-over-limit-dropped");
+
+    $display("---- 用例17: 没给结束词（图2 还是 more=1）⇒ 先不发；下一条 op 重同步 ----");
+    push_ci(FID_BLIT, {16'd16, 16'd16}, 32'h0800_E000);
+    push_ci(FID_ARGS, 32'h0000_6000, {1'b1, 7'h09, 24'h000008});   // 图1 more=1
+    push_ci(FID_ARGS, 32'h0000_7000, {1'b1, 7'h2A, 24'hABCDEF});   // 图2 more=1（还没完）
+    expect_no_cmd(20, "case17-unfinished-no-cmd");
+    push_blit(32'h0000_8000, 32'h0800_E800, 16'd8, 16'd8, 7'h00);  // 重同步：新命令照常出
+    check_cmd(3'd2, 32'h0000_8000, 32'h0800_E800, 16'd8, 16'd8, 7'h00, 24'd0, "case17-resync");
 
     $display("---- 结果 ----");
     if (ci_fire_cnt !== rsp_fire_cnt) begin

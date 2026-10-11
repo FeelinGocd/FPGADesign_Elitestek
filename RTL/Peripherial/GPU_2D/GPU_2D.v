@@ -1,6 +1,11 @@
 //==============================================================================
 //  GPU_2D.v —— 2D 加速器 + 显示通道的功能层顶层
 //------------------------------------------------------------------------------
+//  上一级是谁
+//      RTL/GamingPlayUnit_Top.v —— 顶层只把本模块接进 SoC：
+//      CI 八根接 cpu0_customInstruction_*、APB 寄存器格子、m_AXI_* 接 Axi_Mux、tmds_* 接引脚。
+//      本层只做"广播 + 接线"，不摆逻辑。
+//
 //  功能
 //      CPU 用 CI 发一条命令，本模块把它变成对 DDR 的读/写搬运；
 //      同时带着显示通道，把 DDR 里的帧缓存扫成 HDMI 时序送出去。
@@ -37,7 +42,8 @@ module GPU_2D #(
     parameter AXI_STRB_WIDTH= AXI_DATA_WIDTH/8,
     parameter AXI_ID_WIDTH  = 8,                    // 与 Axi_Mux 的 SLAVE_ID_WIDTH 一致
     parameter AXI_LEN_WIDTH = 8,
-    parameter AXI_ID        = {AXI_ID_WIDTH{1'b0}}
+    parameter AXI_ID        = {AXI_ID_WIDTH{1'b0}},
+    parameter IMAGE_NUM     = 2                     // 一条命令几张图（★ 与 CIUnpack/CmdExec 一致）
 )(
     //==================== 时钟 / 复位 ====================
     input  wire                     clk_ci,         //(I) CI 侧时钟（= CPU 时钟）
@@ -47,7 +53,7 @@ module GPU_2D #(
     input  wire                     clk_HDMI_x1,    //(I) 显示像素时钟 @148.5MHz（显示通道用）
     input  wire                     rst_hdmi_n,     //(I) 显示通道复位（顶层算好：axi_rst_n & pll_HDMI_locked）
 
-    //==================== CI 端口（接 SoC 的 cpu0_customInstruction_*）====================
+    //==================== CI 端口（接 SoC 的 cpu0_customInstruction_*）  ====================
     input  wire                     ci_cmd_valid,   //(I) CPU 有命令要发
     output wire                     ci_cmd_ready,   //(O) 我们收下了
     input  wire [9:0]               ci_function_id, //(I) {funct7[6:0], funct3[2:0]}
@@ -111,7 +117,7 @@ module GPU_2D #(
     input  wire                     m_AXI_RVALID,
     output wire                     m_AXI_RREADY,
 
-    //==================== APB 寄存器侧（槽 2；总线层在 APB0_Interconnect 里）====================
+    //==================== APB 寄存器侧（槽 2；总线层在 APB0_Interconnect 里）  ↔ APB0_GPU_2D（总线层寄存器格子）  ====================
     //   ★ APB0_gpu2d（总线层）例化在 APB0_Interconnect 里 ⇒ 本模块【没有 APB 从口】，
     //     只留"已经翻译好的寄存器值"这组功能侧端口（名字和 APB0_gpu2d 的端口一致）。
     //   ★ 地址（绝对 = 0xf8102000 + 槽内偏移，子块位 = PADDR[6]）：
@@ -198,33 +204,66 @@ module GPU_2D #(
 //==============================================================================
 // wire：子模块之间的内部连线
 //==============================================================================
-// ---- 行任务（CmdChannel 广播给三个下游）----
+// ---- 行任务（CmdChannel 广播给各下游）----
+//   ★ 源地址 / 模式 / 参数这三根【每张图一格】（第 1 格 = 图一，第 2 格 = 图二…）；
+//     目的地址 / 宽 / start 是几张图共用的
 wire                        line_start;
 wire [31:0]                 line_dst_addr;
-wire [31:0]                 line_src_addr;
 wire [15:0]                 line_w;
-wire [6:0]                  line_flags;
-wire [23:0]                 line_param;
+wire                        line_fx_en;                     // 本命令有没有第二张图（合成）
+wire [32*IMAGE_NUM-1:0]     line_src_addr;
+wire [7*IMAGE_NUM-1:0]      line_flags;
+wire [24*IMAGE_NUM-1:0]     line_param;
 wire                        line_done;
 wire                        line_buffer_free;               // 下游还能不能接下一行（Factory 汇总后回给 CmdExec）
 
+//   ★ "看最后一格"的三根：背景（DDR 源）、合成器、写侧看的都是【最终结果】那一步的模式
+//     —— 合成时就是第 2 张图那格，单图命令第 2 格是空的。
+//   ★ 这个选择在 CmdExec 里做（广播归它所有），本层只是把线接过去：
+//     顶层只连线，不摆逻辑。
+wire [31:0]                 line_src_addr_last;
+wire [6:0]                  line_flags_last;
+wire [23:0]                 line_param_last;
+
 // ---- 源① 的像素流（DDRSource → Compositor）----
 //   一拍 = 4 个 RGB888 像素 = 96 位；★ 存的是【像素】不是字节拍（见 DDRSource 的文件头）
+//   ★ DDR 源那一侧（→ 加工面的 src0_*）
+wire [95:0]                 pixel_rd_data;
+wire                        pixel_rd_valid;
+wire                        pixel_rd_en;
+
 wire [95:0]                 src0_data;
 wire                        src0_valid;
 wire                        src0_rd_en;
-// ---- 源②：调色板素材源的像素流（→ Factory 的 src1_*，选路在合成器里）----
-wire [95:0]                 src1_data;
-wire [11:0]                 src1_mask;           // ★ ck 掩码：和 src1_data 同拍（1 位/字节）
-wire [31:0]                 src1_alpha;          // ★ α：每像素 8 位，和 src1_data 同拍（旁路，不进像素流）
+// ---- 源②：调色板素材源的像素流（→ Factory 的 src1_*）----
+//   ★ 2026-10：图片合成级（imageCombine）和合成之后的 ck 都挪进 Compositor 了 ——
+//     它是"多路进一路出"的那个处理器，合成/混合本来就该在它里面做。
+//     所以顶层这条路上【素材源直接进 Factory】，和以前一样；只是多带了两根：
+//         line_image_next → 合成级用它划"图一到此为止"
+//         line_fx_en → 本命令有没有第二张图（合成）
+//   ★ ck（颜色键控）判在【合成之前】：素材源每一趟各自拿自己那格 flags[4] 判，
+//     键色 ckey_color 只到 PaletteSource → PaletteDecoder，合成级只看掩码。
+//   ★ 两侧各一根线：名字各按【自己那一侧的端口】来，连线关系写在下面的 assign 段里
+wire [95:0]                 palette_data;        // 素材源那一侧（→ 加工面的 src1_data）
+wire [11:0]                 palette_mask;        // 素材源那一侧（→ src1_mask）
+wire [31:0]                 palette_alpha;       // 素材源那一侧（→ src1_alpha）
+wire                        palette_valid;       // 素材源那一侧（→ src1_valid）
+wire                        palette_ready;       // 素材源那一侧（← src1_rd_en）
+
+wire [95:0]                 src1_data;           // 素材源出来的流（先图一、后图二）
+wire [11:0]                 src1_mask;           // ★ 素材给的字节掩码（ck 判在源里），合成级按它选图层
+wire [31:0]                 src1_alpha;          // ★ α：每像素 8 位，和像素同拍（旁路）
 wire                        src1_valid;
-wire                        src1_rd_en;
-wire                        src1_free;
-wire                        src_free;
+wire                        src1_rd_en;          // 取源② 一拍（= Compositor 里合成级的 in_ready）
+wire                        line_src1_free;
+wire                        line_src0_free;
+wire                        line_image_next;          // ★ 单拍：图一的流到此为止，后面是图二
+
+//   ★ ck 和图片合成都在 Compositor 里（见 factory/Compositor.v）
 
 //   合成器 → 打包器 → 写控制器 的内部连线（像素流 / AXI 写拍 / 两路 free 相与）
 //   现在都封在 factory/Factory.v 里面，顶层不再出现 ——
-//   这一层对外只有"行任务 + 像素流入口 + AXI 写口 + line_done + buf_free"
+//   这一层对外只有"行任务 + 像素流入口 + AXI 写口 + line_done + line_buf_free"
 
 // ---- 读命令 / 读数据（DDRSource ↔ AXIMastersHandler）----
 wire                        rd_cmd_valid;
@@ -290,6 +329,20 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
 end
 
 //==============================================================================
+// assign：模块之间的连线
+//   ★ 每一行 = 一条连线；两侧的线名各按【自己那一侧的端口】取，
+//     谁连谁只在这几行里看，不用去翻例化
+//==============================================================================
+assign src0_data        = pixel_rd_data;     // DDR 源 → 加工面（源①）
+assign src0_valid       = pixel_rd_valid;
+assign pixel_rd_en      = src0_rd_en;
+assign src1_data        = palette_data;      // 素材源 → 加工面（源②）
+assign src1_mask        = palette_mask;
+assign src1_alpha       = palette_alpha;
+assign src1_valid       = palette_valid;
+assign palette_ready    = src1_rd_en;        // 加工面 → 素材源（取数）
+
+//==============================================================================
 // 例化
 //==============================================================================
 //------------------------------------------------------------------------------
@@ -317,10 +370,14 @@ CmdChannel #(
 
     .line_start                     (line_start),
     .line_dst_addr                  (line_dst_addr),
-    .line_src_addr                  (line_src_addr),
     .line_w                         (line_w),
+    .line_fx_en                     (line_fx_en),
+    .line_src_addr                  (line_src_addr),
     .line_flags                     (line_flags),
     .line_param                     (line_param),
+    .line_src_addr_last             (line_src_addr_last),   // ★ 最后一格的三根（CmdExec 选好的）
+    .line_flags_last                (line_flags_last),
+    .line_param_last                (line_param_last),
     .line_done                      (line_done),
     .line_buffer_free               (line_buffer_free),
 
@@ -342,15 +399,15 @@ DDRSource #(
     .rst_n                          (rst_acc_n),
 
     .line_start                     (line_start),
-    .line_src_addr                  (line_src_addr),
+    .line_src_addr                  (line_src_addr_last),   // ★ 看最后一格（合成时背景是最后一步的事）
     .line_dst_addr                  (line_dst_addr),        // alpha(bg_rd) 时它就是读数的行地址；其余场合不用
-    .line_flags                     (line_flags),           // ★ 自己看模式：要不要动、读源行还是读目的
+    .line_flags                     (line_flags_last),      // ★ 自己看模式：要不要动、读源行还是读目的
     .line_w                         (line_w),
 
-    .pixel_rd_en                    (src0_rd_en),
-    .pixel_rd_data                  (src0_data),
-    .pixel_rd_valid                 (src0_valid),
-    .src_free                       (src_free),
+    .pixel_rd_en                    (pixel_rd_en),
+    .pixel_rd_data                  (pixel_rd_data),
+    .pixel_rd_valid                 (pixel_rd_valid),
+    .line_src0_free                       (line_src0_free),
 
     .rd_cmd_valid                   (rd_cmd_valid),
     .rd_cmd_ready                   (rd_cmd_ready),
@@ -381,25 +438,30 @@ PaletteSource #(
 
     .line_start                     (line_start),
 
-    .line_src_addr                  (line_src_addr),
-    .line_dst_addr                  (line_dst_addr),        // 只用低 4 位算"本行要覆盖多少字节"
+    .line_src_addr                  (line_src_addr),    // ★ 每图一格：内部先读第 1 格、再读第 2 格
+    .line_dst_addr                  (line_dst_addr),    // 只用低 4 位算"本行要覆盖多少字节"
     .line_w                         (line_w),
+    .line_fx_en                     (line_fx_en),       // 本行有没有第二张图
+    .line_flags                     (line_flags),       // ★ 每图一格：模式位/MX
 
-    .palette_ready                  (src1_rd_en),
-    .key_color                      (ckey_color),       // ★ 颜色键控的键色(APB 0x2078)
-    .line_flags                     (line_flags),       // ★ [5] = MX 水平镜像(倒着读字)
-    .palette_data                   (src1_data),
-    .palette_mask                   (src1_mask),        // ★ 颜色键控掩码，和像素同拍
-    .palette_alpha                  (src1_alpha),       // ★ α 旁路：调色板高 8 位，直接给合成器
-    .palette_valid                  (src1_valid),
-    .src_free                       (src1_free)
+    .palette_ready                  (palette_ready),    // ★ 取数由 Compositor 里合成级给
+    .key_color                      (ckey_color),       // ★ ck 判在【合成之前】：每张图各判各的
+    .palette_data                   (palette_data),
+    .palette_mask                   (palette_mask),
+    .palette_alpha                  (palette_alpha),     // ★ α 旁路：调色板高 8 位，直接给合成器
+    .palette_valid                  (palette_valid),
+    .line_src1_free                       (line_src1_free),
+    .line_image_next                     (line_image_next)         // ★ 图一那一行读完了
 );
+
+//------------------------------------------------------------------------------
+//   ★ 合成级（imageCombine）在 Compositor 里 —— 见 factory/Compositor.v
 
 //------------------------------------------------------------------------------
 // ③ 加工面：各路像素流 → 合成 → 补齐成 AXI 一拍 → 写回 DDR
 //      ★ 它是"接数据输入 + 接行任务 + 汇总发送节奏"的那一级：
 //        内部三级（Compositor / DDRPacker / WriteController）的握手封在里面，
-//        顶层只见"像素流入口 / AXI 写口 / line_done / buf_free"
+//        顶层只见"像素流入口 / AXI 写口 / line_done / line_buf_free"
 //      ★ 只有它有资格报 line_done（"真的落进 DDR 了"）
 //------------------------------------------------------------------------------
 Factory #(
@@ -415,27 +477,32 @@ Factory #(
     .line_start                     (line_start),
     //   ★ flags 是行任务广播里唯一的"模式"载体：ck（[4]）、镜像（[6:5]）、
     //     合成模式（[2:0]）都在里面。合成器自己解，不需要 CmdExec 再解一份喂给它。
-    .line_flags                     (line_flags),
-    .line_param                     (line_param),
+    //   ★ 这里看【最后一格】：合成器出的是最终结果，所以按最后那一步的模式走
+    .line_flags                     (line_flags_last),
+    .line_param                     (line_param_last),
     .line_dst_addr                  (line_dst_addr),
     .line_w                         (line_w),
     .line_done                      (line_done),
+    //   ★ 图片合成那一路要的两根（透传给里面的 Compositor；ck 现在判在【源里】，
+    //     键色只到 PaletteSource → PaletteDecoder，不再经过这一层）
+    .line_fx_en                     (line_fx_en),
+    .line_image_next                     (line_image_next),
 
     // 像素流入口：源①（DDR 读回的一行）
     .src0_data                      (src0_data),
     .src0_valid                     (src0_valid),
     .src0_rd_en                     (src0_rd_en),
-    .src0_free                      (src_free),
+    .line_src0_free                      (line_src0_free),
     // 像素流入口：源②（调色板素材源）
     .src1_data                      (src1_data),
     .src1_mask                      (src1_mask),
     .src1_alpha                     (src1_alpha),        // ★ α 旁路 → 合成器的混合器
     .src1_valid                     (src1_valid),
     .src1_rd_en                     (src1_rd_en),
-    .src1_free                      (src1_free),
+    .line_src1_free                      (line_src1_free),
 
     // 发送节奏（各源 + 写侧，在这层汇总）→ CmdExec
-    .buf_free                       (line_buffer_free),
+    .line_buffer_free               (line_buffer_free),
 
     // AXI 写命令口 + 写数据口
     .cmd_wr_valid                   (cmd_wr_valid),

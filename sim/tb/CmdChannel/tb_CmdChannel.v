@@ -72,6 +72,10 @@ wire  [31:0] line_dst_addr, line_src_addr;
 wire  [15:0] line_w;
 wire  [6:0]  line_flags;
 wire  [23:0] line_param;
+//   ★ "最后一格"那三根（背景源 / 合成器 / 写侧用）；本 TB 只验透传，接出来免得悬空告警
+wire  [31:0] line_src_addr_last;
+wire  [6:0]  line_flags_last;
+wire  [23:0] line_param_last;
 reg          line_done;
 reg          line_buffer_free;
 
@@ -113,6 +117,9 @@ CmdChannel #(.FIFO_AW(FIFO_AW), .LINE_BYTES(5760)) u_dut (
     .line_w             (line_w),
     .line_flags         (line_flags),
     .line_param         (line_param),
+    .line_src_addr_last (line_src_addr_last),
+    .line_flags_last    (line_flags_last),
+    .line_param_last    (line_param_last),
     .line_done          (line_done),
     .line_buffer_free   (line_buffer_free)
 );
@@ -180,8 +187,8 @@ task push_fill;
     input [31:0] dst; input [15:0] w, h;
     input [23:0] col; input [6:0]  fl;
     begin
-        push_ci(FID_FILL, 32'd0, dst);
-        push_ci(FID_ARGS, {w, h}, {1'b0, fl, col});
+        push_ci(FID_FILL, {w, h}, dst);              // 命令开始：宽高 + 目的
+        push_ci(FID_ARGS, 32'd0, {1'b0, fl, col});   // 第 1 张图（纯色图）：地址填 0
     end
 endtask
 
@@ -189,8 +196,8 @@ endtask
 task push_blit;
     input [31:0] src, dst; input [15:0] w, h; input [6:0] fl; input [23:0] col;
     begin
-        push_ci(FID_BLIT, src, dst);
-        push_ci(FID_ARGS, {w, h}, {1'b0, fl, col});
+        push_ci(FID_BLIT, {w, h}, dst);              // 命令开始：宽高 + 目的
+        push_ci(FID_ARGS, src, {1'b0, fl, col});     // 第 1 张图（原图）：地址在它那条 CI 里
     end
 endtask
 
@@ -291,8 +298,8 @@ initial begin
     expect_line(3'd0, 32'h0800_5000, 32'd0, 16'd16, 7'h00, 24'h00AA55, "FENCE后照走");
 
     $display("---- 用例4: 零尺寸被入口挡掉，且不影响后面的命令 ----");
-    push_ci(FID_FILL, 32'd0, 32'h0800_5800);
-    push_ci(FID_ARGS, {16'd0, 16'd32}, {1'b0, 7'h00, 24'hFF0000});
+    push_ci(FID_FILL, {16'd0, 16'd32}, 32'h0800_5800);
+    push_ci(FID_ARGS, 32'd0, {1'b0, 7'h00, 24'hFF0000});
     expect_no_line(20, "零尺寸不发任务");
     push_fill(32'h0800_6000, 16'd8, 16'd1, 24'h0000FF, {4'd0, MD_FILL});
     expect_line(3'd0, 32'h0800_6000, 32'd0, 16'd8, 7'h00, 24'h0000FF, "零尺寸后照走");
@@ -306,14 +313,25 @@ initial begin
     expect_line(3'd0, 32'h0800_8000, 32'd0, 16'd20, 7'h00, 24'h445566, "分屏B-第0行");
     lineBuffer_mode = 1'b0;
 
+    $display("---- 用例6: 两张图的命令（合成形状）—— 第 2 格先躺着，执行只看第 1 张图 ----");
+    //   第 1 条 = 命令开始（宽高 + 目的）；第 2 条 = 图1（原图）；第 3 条 = 图2（特效图）
+    //   ★ 像素侧还没做合成，所以这一版就该【只按第 1 张图】发 h 个行任务；
+    //     第 2 格（特效的地址/参数）躺在命令里，谁也不看它 —— 这就是要钉的行为
+    push_ci(FID_BLIT, {16'd32, 16'd2}, 32'h0800_9000);
+    push_ci(FID_ARGS, 32'h0900_0000, {1'b1, 7'h01, 24'd0});          // 图1（原图）  more=1
+    push_ci(FID_ARGS, 32'h0A00_0000, {1'b0, 7'h0A, 24'h38_0168});    // 图2（特效图）more=0
+    expect_line(3'd1, 32'h0800_9000, 32'h0900_0000, 16'd32, 7'h01, 24'd0, "两图-第0行(按图1)");
+    expect_line(3'd1, 32'h0800_9000 + STRIDE_FULL, 32'h0900_0000 + STRIDE_FULL,
+                16'd32, 7'h01, 24'd0, "两图-第1行(按图1)");
+
     repeat (20) tick;
 
     $display("---- 结果 ----");
-    if (line_cnt !== 10) begin
-        $display("FAIL: 行任务总数 %0d，期望 10（3+2+0+1+0+1+2+1）", line_cnt);
+    if (line_cnt !== 12) begin
+        $display("FAIL: 行任务总数 %0d，期望 12（3+2+0+1+0+1+2+1+2）", line_cnt);
         err_cnt = err_cnt + 1;
     end
-    else $display("PASS: 行任务总数 %0d 正确（3+2+0+1+0+1+2+1）", line_cnt);
+    else $display("PASS: 行任务总数 %0d 正确（3+2+0+1+0+1+2+1+2）", line_cnt);
 
     if (ci_fire_cnt !== rsp_fire_cnt) begin
         $display("FAIL: 收料 %0d 条，回应答 %0d 个 —— 必须一一对应", ci_fire_cnt, rsp_fire_cnt);

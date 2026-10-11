@@ -31,14 +31,17 @@
 #include "demo_anim.h"       /* 动图 Demo: 双缓冲 + 脏区局部重放 */
 #include "demo_split.h"      /* 分屏对比 Demo: 左半硬件 / 右半纯 CPU (基础要求 3c) */
 #include "demo_glass.h"      /* alpha 玻璃背景 Demo: 玻璃用 alpha 平铺满屏(临时占位) */
+#include "demo_combine.h"    /* 图片合成 Demo: 两张 PRAM 素材图合成一张 */
 
 /*------------------------------------------------------------------------------
  * 跑哪个 Demo(改这一行就切换):
  *   0 = 全屏动图: 一张 sprite 素材左右跑(双缓冲 + 脏区 + ck + 镜像)
  *   1 = 分屏对比: 左半加速器 / 右半纯 CPU, 同一组方块比帧率(基础要求 3c)
  *   2 = alpha 玻璃背景: 玻璃素材用 alpha 混合平铺满屏 + 最左一条 ck 硬边对照
+ *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
+ *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
  *----------------------------------------------------------------------------*/
-#define DEMO_RUN_SEL     2
+#define DEMO_RUN_SEL     2       /* ★ 2 = 全屏玻璃（其中一个移动色块换成了合成图） */
 
 /* LED 点亮极性: 0 = 高电平点亮(写 1 亮) / 1 = 低电平点亮(写 0 亮) */
 #define LED_ACTIVE_LOW   0
@@ -180,6 +183,8 @@ void main(){
         demo_split_run();
 #elif (DEMO_RUN_SEL == 2)
         demo_glass_run();
+#elif (DEMO_RUN_SEL == 3)
+        demo_combine_run();
 #else
         demo_anim_run();
 #endif

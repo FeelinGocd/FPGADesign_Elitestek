@@ -28,7 +28,9 @@
 //      所以连一级 skid 都用不上。（DDRSource 那边要 ping-pong，是因为 DDR 的读延迟
 //      和突发长度都不确定。）
 //
-//  参考：LineBuffer/PingPongBuffer/BlockRAM.v、docs/spec/硬件_加速器.md §4.1
+//  参考：LineBuffer/PingPongBuffer/BlockRAM.v、docs/spec/硬件_加速器.md §4.1//  上一级是谁
+//      pixel/palette/PaletteDecoder.v
+
 //==============================================================================
 `timescale 1ns/100ps
 

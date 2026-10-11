@@ -2,12 +2,12 @@
 //  tb_cmd_ddrsource.v —— CmdExec + DDRSource 联调：看时序
 //------------------------------------------------------------------------------
 //  接法（模仿真实顶层）:
-//      CmdExec.line_buffer_free  <--  DDRSource.src_free   （只有一路源，直接接）
+//      CmdExec.line_buffer_free  <--  DDRSource.line_src0_free   （只有一路源，直接接）
 //      DDRSource 的像素出口由本 TB 一直取走（假扮 Compositor + 写侧）
 //      每行取够"该有的像素字数"后，本 TB 拉一次 line_done（假扮写侧落盘）
 //  看什么:
 //      每行: 行任务地址 -> 读突发(几笔/每笔几拍) -> 像素吐了几拍 -> line_done
-//      src_free 什么时候起来、下一行什么时候发出去
+//      line_src0_free 什么时候起来、下一行什么时候发出去
 //==============================================================================
 `timescale 1ns/100ps
 module tb_cmd_ddrsource;
@@ -23,7 +23,14 @@ reg  [2:0]          cmd_type;
 reg  [31:0]         cmd_src, cmd_dst;
 reg  [15:0]         cmd_w, cmd_h;
 reg  [6:0]          cmd_flags;
-reg  [23:0]         cmd_color;
+reg  [23:0]         cmd_args;
+
+//   ★ N 张图：源地址 / 模式 / 参数 这三根线一张图一格；TB 只驱动第 1 张图（原图）那格，
+//     宽高是几张图共用的，直接接。上面的量和老 TB 一模一样，一个字都不用改
+localparam IMAGE_NUM = 2;
+wire [32*IMAGE_NUM-1:0] cmd_src_bus   = {{(32*(IMAGE_NUM-1)){1'b0}}, cmd_src};
+wire [7*IMAGE_NUM-1:0]  cmd_flags_bus = {{(7*(IMAGE_NUM-1)){1'b0}},  cmd_flags};
+wire [32*IMAGE_NUM-1:0] cmd_args_bus  = {{(32*(IMAGE_NUM-1)){1'b0}}, cmd_args};
 
 // ---- 行任务 ----
 wire                line_start;
@@ -48,7 +55,7 @@ wire                rd_ready;
 reg                 pixel_rd_en;
 wire [95:0]         pixel_rd_data;
 wire                pixel_rd_valid;
-wire                src_free;
+wire                line_src0_free;
 
 localparam          LINE_STRIDE = 5760;       // 全屏一行 1920*3 字节（源、目的共用）
 
@@ -75,12 +82,12 @@ CmdExec #(.LINE_BYTES(5760)) u_exec (
     .cmd_valid          (cmd_valid),
     .cmd_ready          (cmd_ready),
     .cmd_type           (cmd_type),
-    .cmd_src            (cmd_src),
     .cmd_dst            (cmd_dst),
     .cmd_w              (cmd_w),
     .cmd_h              (cmd_h),
-    .cmd_flags          (cmd_flags),
-    .cmd_color          (cmd_color),
+    .cmd_src            (cmd_src_bus),
+    .cmd_flags          (cmd_flags_bus),
+    .cmd_args           (cmd_args_bus),
     .lineBuffer_mode    (1'b0),                 // 全屏 5760
     .line_start         (line_start),
     .line_dst_addr      (line_dst_addr),
@@ -111,7 +118,7 @@ DDRSource #(
     .pixel_rd_en          (pixel_rd_en),
     .pixel_rd_data        (pixel_rd_data),
     .pixel_rd_valid       (pixel_rd_valid),
-    .src_free           (src_free),
+    .line_src0_free           (line_src0_free),
     .rd_cmd_valid       (rd_cmd_valid),
     .rd_cmd_ready       (rd_cmd_ready),
     .rd_cmd_addr        (rd_cmd_addr),
@@ -122,7 +129,7 @@ DDRSource #(
     .rd_ready           (rd_ready)
 );
 
-assign line_buffer_free = src_free;             // 只有一路源，直接接
+assign line_buffer_free = line_src0_free;             // 只有一路源，直接接
 
 initial begin clk = 1'b0; forever #(CLK_HALF) clk = ~clk; end
 
@@ -244,8 +251,8 @@ always @(posedge clk or negedge rst_n) begin
             if ((line_words != 0) && ((pixel_total % line_words) == 0)) begin
                 line_no      = line_no + 1;
                 line_done_r <= 1'b1;                        // 单拍脉冲
-                $display("  [T=%0t] 行 #%0d 数据吐完（累计 %0d 拍）  src_free=%b",
-                         $time, line_no-1, pixel_total, src_free);
+                $display("  [T=%0t] 行 #%0d 数据吐完（累计 %0d 拍）  line_src0_free=%b",
+                         $time, line_no-1, pixel_total, line_src0_free);
             end
         end
     end
@@ -267,7 +274,7 @@ initial begin
     cmd_dst  = 32'h0880_0004;                      // 低 4 位 = 4
     cmd_w    = 16'd200;                            // 200 像素 = 600 字节
     cmd_h    = 16'd3;                              // 3 行
-    cmd_color= 24'd0;
+    cmd_args= 24'd0;
 
     repeat (6) @(posedge clk);
     rst_n = 1'b1;
@@ -313,7 +320,7 @@ initial begin
     cmd_dst   = 32'h0880_0100;              // 低 4 位对齐，免得再拆笔
     cmd_w     = 16'd16;
     cmd_h     = 16'd1;
-    cmd_color = 24'd0;                      // 0 ⇒ 源行跨距退回目的跨距
+    cmd_args = 24'd0;                      // 0 ⇒ 源行跨距退回目的跨距
 
     @(posedge clk); #1;
     cmd_valid = 1'b1;

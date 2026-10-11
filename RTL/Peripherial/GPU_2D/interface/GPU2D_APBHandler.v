@@ -51,7 +51,9 @@
 //      不做"软件清零": 清零寄存器和自增同拍会打架; 软件记快照即可, 值只增不减。
 //
 //  位宽
-//      帧率/拍数/周期数都是 32 位。拍数 @100MHz 约 43 秒回绕一次 —— 观测够用, 不处理。
+//      帧率/拍数/周期数都是 32 位。拍数 @100MHz 约 43 秒回绕一次 —— 观测够用, 不处理。//  上一级是谁
+//      GPU_2D.v（只观测，不影响功能）
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -64,7 +66,7 @@ module GPU2D_APBHandler #(
     input  wire                         rst_n,          //(I) 加速器侧复位(观测计数)
     input  wire                         rst_n_disp,     //(I) 显示侧复位(= lineBuffer_rst_n)
 
-    //==================== 来自 APB 寄存器格子(APB0_gpu2d 显示子块)：静态值 + DONE ====================
+    //==================== 来自 APB 寄存器格子(APB0_gpu2d 显示子块)：静态值 + DONE  ↔ APB0_GPU_2D（总线层寄存器格子）  ====================
     input  wire                         enable,                 //(I) STATUS.ENABLE
     input  wire                         split_pending,          //(I) STATUS.SPLIT(待生效值)
     input  wire [2*ADDR_WIDTH-1:0]      framea_base_addr,       //(I) {左半(acc), 右半(cpu)}
@@ -73,7 +75,7 @@ module GPU2D_APBHandler #(
     input  wire                         done_gpu2d,             //(I) 加速器那半有帧等着显示
     input  wire                         done_cpu,               //(I) CPU 那半有帧等着显示
 
-    //==================== 回给 APB 寄存器格子 ====================
+    //==================== 回给 APB 寄存器格子  ↔ APB0_GPU_2D（总线层寄存器格子）  ====================
     output wire [1:0]                   done_clr,               //(O) {cpu,acc} 翻页消费后清位
     output wire [31:0]                  fps_acc_val,            //(O) 算好的帧率(APB 的格子)
     output wire [31:0]                  fps_cpu_val,
@@ -81,7 +83,7 @@ module GPU2D_APBHandler #(
     //==================== 显示事件：帧边界 ====================
     input  wire                         lineBuffer_frame_start, //(I) 帧起始【写域单拍】
 
-    //==================== 给显示通道 controller（★ 只给显示，不给加速器）====================
+    //==================== 给显示通道 controller（★ 只给显示，不给加速器）  ←→ lineBuffer/lineBuffer  ====================
     output wire                         lineBuffer_enable,      //(O) 使能(不锁存)
     output wire                         lineBuffer_mode,        //(O) 显示侧生效的模式(帧边界锁存)
     output wire [2*ADDR_WIDTH-1:0]      lineBuffer_addr,        //(O) {段0基址, 段1基址}
@@ -93,7 +95,7 @@ module GPU2D_APBHandler #(
     input  wire                         wr_beat_hs,             //(I) 写出一拍(wr_valid & wr_ready)
     input  wire                         rd_beat_hs,             //(I) 读回一拍(rd_valid & rd_ready)
 
-    //==================== 回给 APB 寄存器格子(槽 2：全只读观测) ====================
+    //==================== 回给 APB 寄存器格子(槽 2：全只读观测)  ↔ APB0_GPU_2D（总线层寄存器格子）  ====================
     output wire [31:0]                  busy_val,               //(O) STATUS.BUSY
     output wire [31:0]                  cmd_done_val,           //(O) 已完成命令数
     output wire [31:0]                  frame_done_val,         //(O) 已完成帧数

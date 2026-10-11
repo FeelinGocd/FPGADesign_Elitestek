@@ -38,7 +38,9 @@
 //      · 行上下文（shift）只在 line_start 那一拍有效，本模块自己锁存
 //
 //  参考：LineBuffer/bufferUnpacker.v（同一套累加器写法，契约和粒度按本场合改）
-//        docs/spec/硬件_加速器.md §4
+//        docs/spec/硬件_加速器.md §4//  上一级是谁
+//      pixel/DDR/DDRSource.v —— 源① 的读回数据展开在这一级
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -52,7 +54,7 @@ module DDRUnpacker #(
     input  wire                         clk,
     input  wire                         rst_n,
 
-    //==================== 输入：一拍字节流（接 ping-pong 读口）====================
+    //==================== 输入：一拍字节流（接 ping-pong 读口）  ← AXIMastersHandler ← Axi_Mux  ====================
     input  wire [IN_WIDTH-1:0]          in_data,
     input  wire                         in_valid,
     output wire                         in_ready,

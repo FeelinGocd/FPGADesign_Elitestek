@@ -25,23 +25,40 @@
 #include "riscv.h"              /* cfu_type_R() */
 #include "user_lineBuffer.h"    /* LINEBUFFER_LINE_BYTES / _PIXEL_BYTES */
 
-/* 第 1 条 CI: 操作类型 + 源地址 + 目的地址 */
-static u32 ci_op(u32 fid3, u32 src, u32 dst)
+/* 宽高打包: { 宽[31:16], 高[15:0] }（和 RTL CIUnpack.v 的位序一致） */
+static u32 ci_wh(u32 w, u32 h)
 {
-    if (fid3 == GPU2D_FID_FILL) return (u32)cfu_type_R(0x1, 0x0, src, dst);
-    if (fid3 == GPU2D_FID_BLIT) return (u32)cfu_type_R(0x2, 0x0, src, dst);
-    return (u32)cfu_type_R(0x3, 0x0, src, dst);                 /* FENCE */
+    return ((w & 0xFFFFu) << 16) | (h & 0xFFFFu);
 }
 
-/* 第 2 条 CI: ARGS。
- *   flags 低 3 位 = 合成模式; flags[3] = 源类型; flags[4] = 颜色键控使能;
- *   val = 颜色(或素材源跨距) */
-static u32 ci_args(u32 wh, u32 flags, u32 val)
+/* 第 1 条 CI: 这条命令画多大 + 画到哪 —— 【几张图共用】, 里面不放某一张图的东西 */
+static u32 ci_op(u32 fid3, u32 wh, u32 dst)
 {
-    u32 word1 = (((u32)flags & 0x7Fu) << 24)                   /* more 恒 0 */
+    if (fid3 == GPU2D_FID_FILL) return (u32)cfu_type_R(0x1, 0x0, wh, dst);
+    if (fid3 == GPU2D_FID_BLIT) return (u32)cfu_type_R(0x2, 0x0, wh, dst);
+    return (u32)cfu_type_R(0x3, 0x0, wh, dst);                  /* FENCE: 参数不用 */
+}
+
+/* 第 2 条起 CI: 【一张图的资料】 —— 这条 CI 就是一张图:
+ *     src   = 这张图的源地址（纯色图填 0）
+ *     flags 低 3 位 = 合成模式; flags[3] = 源类型; flags[4] = 颜色键控使能;
+ *             flags[5]/[6] = 镜像
+ *     val   = 这张图自己的参数（FILL 时是纯色, 素材源时是源行跨距）
+ *     more  = 1 后面还有一张图; 0 这条是最后一张（命令结束词, 硬件收到就发命令）
+ *   ★ more 是 inputs_1 的最高位, 必须和 flags/参数一起拼成一个 32 位字 */
+static u32 ci_args_full(u32 src, u32 flags, u32 val, u32 more)
+{
+    u32 word1 = ((more & 1u) << 31)
+              | (((u32)flags & 0x7Fu) << 24)
               | ((u32)val  & 0x00FFFFFFu);
 
-    return (u32)cfu_type_R(0x7, 0x0, wh, word1);
+    return (u32)cfu_type_R(0x7, 0x0, src, word1);
+}
+
+/* 只有一张图时用得最多的那种（more = 0: 这条就是结束词） */
+static u32 ci_args(u32 src, u32 flags, u32 val)
+{
+    return ci_args_full(src, flags, val, 0u);
 }
 
 /* 画布一行的字节数: 跟显示模式走(硬件那边同一套: 全屏 5760 / 分屏 2880) */
@@ -59,9 +76,8 @@ u32 CI_gpu2d_checkId(void)
 
 void CI_gpu2d_fill(u32 dst_addr, u32 w, u32 h, u32 rgb)
 {
-    (void)ci_op(GPU2D_FID_FILL, 0u, dst_addr);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
-                  GPU2D_MODE_FILL, rgb);
+    (void)ci_op(GPU2D_FID_FILL, ci_wh(w, h), dst_addr);
+    (void)ci_args(0u, GPU2D_MODE_FILL, rgb);        /* 纯色图: 地址填 0 */
 }
 
 void CI_gpu2d_fillRect(u32 fb_base, u32 x, u32 y, u32 w, u32 h, u32 rgb)
@@ -75,9 +91,8 @@ void CI_gpu2d_fillRect(u32 fb_base, u32 x, u32 y, u32 w, u32 h, u32 rgb)
 
 void CI_gpu2d_blit(u32 src_addr, u32 dst_addr, u32 w, u32 h)
 {
-    (void)ci_op(GPU2D_FID_BLIT, src_addr, dst_addr);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
-                  GPU2D_MODE_REPLACE, 0u);
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args(src_addr, GPU2D_MODE_REPLACE, 0u);
 }
 
 void CI_gpu2d_blitRect(u32 src_fb, u32 sx, u32 sy,
@@ -93,9 +108,8 @@ void CI_gpu2d_blitRect(u32 src_fb, u32 sx, u32 sy,
 
 void CI_gpu2d_sprite(u32 asset_base, u32 dst_addr, u32 w, u32 h, u32 stride)
 {
-    (void)ci_op(GPU2D_FID_BLIT, asset_base, dst_addr);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
-                  GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE, stride);
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args(asset_base, GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE, stride);
 }
 
 void CI_gpu2d_spriteRect(u32 asset_base, u32 stride,
@@ -111,8 +125,8 @@ void CI_gpu2d_spriteRect(u32 asset_base, u32 stride,
 
 void CI_gpu2d_spriteCK(u32 asset_base, u32 dst_addr, u32 w, u32 h, u32 stride)
 {
-    (void)ci_op(GPU2D_FID_BLIT, asset_base, dst_addr);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args(asset_base,
                   GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN, stride);
 }
 
@@ -141,8 +155,8 @@ void CI_gpu2d_spriteRectCK(u32 asset_base, u32 stride,
 void CI_gpu2d_spriteAlpha(u32 asset_base, u32 dst_addr, u32 w, u32 h,
                           u32 stride, u32 extra)
 {
-    (void)ci_op(GPU2D_FID_BLIT, asset_base, dst_addr);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args(asset_base,
                   GPU2D_MODE_ALPHA | GPU2D_MODE_SPRITE
                   | (extra & GPU2D_MODE_CKEY_EN)
                   | ((extra << 5) & 0x60u),
@@ -169,8 +183,8 @@ void CI_gpu2d_spriteFlip(u32 asset_base, u32 stride, u32 dst_fb,
             + dy * ci_line_bytes()
             + dx * LINEBUFFER_PIXEL_BYTES;
 
-    (void)ci_op(GPU2D_FID_BLIT, asset_base, dst);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst);
+    (void)ci_args(asset_base,
                   GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | ((flip & 0x3u) << 5),
                   stride);
 }
@@ -182,14 +196,43 @@ void CI_gpu2d_spriteFlipCK(u32 asset_base, u32 stride, u32 dst_fb,
             + dy * ci_line_bytes()
             + dx * LINEBUFFER_PIXEL_BYTES;
 
-    (void)ci_op(GPU2D_FID_BLIT, asset_base, dst);
-    (void)ci_args(((w & 0xFFFFu) << 16) | (h & 0xFFFFu),
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst);
+    (void)ci_args(asset_base,
                   GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN
                   | ((flip & 0x3u) << 5),
                   stride);
 }
 
+/*   —— 图片合成：两张 PRAM 素材图合成一张（硬件：process/imageCombine.v）——
+ *   命令 = 3 条 CI:  [命令开始: 宽高+目的] + [图一: 地址+模式+跨距, more=1]
+ *                                    + [图二: 地址+模式+跨距, more=0]
+ *   硬件把两行串行读出来（同一个 PRAM 读口），在合成级缓存图一那一行、与图二逐拍合成，
+ *   掩码按"合成后整张图"给（图二不透明的字节用图二的颜色，否则用图一的）。
+ *   ★ w/h 是【目标矩形】，两张图共用；两张素材都得 ≥ 这个尺寸 */
+void CI_gpu2d_combine(u32 base_addr, u32 base_stride, u32 base_flags,
+                      u32 fx_addr,   u32 fx_stride,   u32 fx_flags,
+                      u32 dst_addr,  u32 w, u32 h)
+{
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args_full(base_addr, base_flags, base_stride, 1u);   /* 图一：后面还有一张 */
+    (void)ci_args     (fx_addr,   fx_flags,   fx_stride);         /* 图二：这条是结束词 */
+}
+
+/* 合成（坐标版）：只有目的要换算地址 */
+void CI_gpu2d_combineRect(u32 base_addr, u32 base_stride, u32 base_flags,
+                          u32 fx_addr,   u32 fx_stride,   u32 fx_flags,
+                          u32 dst_fb, u32 dx, u32 dy, u32 w, u32 h)
+{
+    u32 dst = dst_fb
+            + dy * ci_line_bytes()
+            + dx * LINEBUFFER_PIXEL_BYTES;
+
+    CI_gpu2d_combine(base_addr, base_stride, base_flags,
+                     fx_addr, fx_stride, fx_flags,
+                     dst, w, h);
+}
+
 void CI_gpu2d_fence(void)
 {
-    (void)ci_op(GPU2D_FID_FENCE, 0u, 0u);
+    (void)ci_op(GPU2D_FID_FENCE, 0u, 0u);   /* FENCE: 宽高/地址都不用 */
 }

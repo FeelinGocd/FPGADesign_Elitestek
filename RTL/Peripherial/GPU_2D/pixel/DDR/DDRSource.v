@@ -21,10 +21,12 @@
 //      ★ 本模块因此【不再需要】原来那套字节级重排（keep_mask / pre / phase）—— 全删了。
 //
 //  两根往外/往回的线
-//      src_free ：本行已经交完、而且 ping-pong 已经把块换回来 → 可以让 CmdExec 发下一行
+//      line_src0_free ：本行已经交完、而且 ping-pong 已经把块换回来 → 可以让 CmdExec 发下一行
 //      （合成器按"本行用到哪几路源"相与后，汇成 buf_free 送给 CmdExec）
 //
-//  参考：docs/spec/硬件_加速器.md §4、LineBuffer/bufferUnpacker.v（同一套累加器写法）
+//  参考：docs/spec/硬件_加速器.md §4、LineBuffer/bufferUnpacker.v（同一套累加器写法）//  上一级是谁
+//      GPU_2D.v —— 顶层把它的像素流接到 Factory 的源①口
+
 //==============================================================================
 `timescale 1ns/100ps
 
@@ -41,7 +43,7 @@ module DDRSource #(
     input  wire                     clk,
     input  wire                     rst_n,
 
-    //==================== 行任务入口（接 CmdExec 的广播）====================
+    //==================== 行任务入口（接 CmdExec 的广播）  ====================
     input  wire                     line_start,
     input  wire [31:0]              line_src_addr,
     input  wire [31:0]              line_dst_addr,  //(I) 目的行地址（算相位；alpha 时它就是读数地址）
@@ -54,9 +56,9 @@ module DDRSource #(
     input  wire                     pixel_rd_en,      //(I) Compositor 取走一拍像素
     output wire [BANK_WIDTH-1:0]        pixel_rd_data,    //(O) 一拍 = PIXELS_PER_WORD 个像素
     output wire                     pixel_rd_valid,   //(O) 手上有货（保持到 pixel_rd_en 握手）
-    output wire                     src_free,       //(O) 我能接下一行
+    output wire                     line_src0_free,       //(O) 我能接下一行
 
-    //==================== AXI 读命令口（接 AXIMastersHandler）====================
+    //==================== AXI 读命令口（接 AXIMastersHandler）  ====================
     output wire                     rd_cmd_valid,
     input  wire                     rd_cmd_ready,
     output wire [ADDR_WIDTH-1:0]    rd_cmd_addr,
@@ -200,7 +202,7 @@ assign  unpack_take   = (rd_cnt_r < rd_beats_r);
 assign  rd_ready    = unpack_take & unpack_in_ready;
 
 //   能接下一行：本行块已交出去，且 ping-pong 已经把块换回来
-assign  src_free    = (state == S_IDLE);
+assign  line_src0_free    = (state == S_IDLE);
 
 //==============================================================================
 // 组合输出
