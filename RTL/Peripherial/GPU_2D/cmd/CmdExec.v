@@ -86,7 +86,7 @@ module CmdExec #(
     input  wire [31:0]              cmd_dst,    //(I) 目的地址（块左上角）
     input  wire [15:0]              cmd_w,      //(I) 宽（目标矩形，几张图共用）
     input  wire [15:0]              cmd_h,      //(I) 高（目标矩形，几张图共用）
-    input  wire [7*IMAGE_NUM-1:0]   cmd_flags,  //(I) 每张图的模式位：第 1 格 = 原图
+    input  wire [8*IMAGE_NUM-1:0]   cmd_flags,  //(I) 每张图的模式位：第 1 格 = 原图
     input  wire [32*IMAGE_NUM-1:0]  cmd_args,  //(I) 每张图自己的参数：第 1 格 = 原图（FILL 时是纯色）
 
     //==================== 配置口 ====================
@@ -102,13 +102,13 @@ module CmdExec #(
     output wire                     line_fx_en,         //(O) 本命令有没有第二张图（合成）：给 imageCombine / 旁路用
     //   ★ 下面三根【每张图一格】（和命令侧一个形状）：第 1 格 = 图一，第 2 格 = 图二…
     output wire [32*IMAGE_NUM-1:0]  line_src_addr,  //(O) 每张图那一行的源起始地址；该图不要源时它那格恒 0
-    output wire [7*IMAGE_NUM-1:0]   line_flags,     //(O) 每张图那格的模式位，原样转发
+    output wire [8*IMAGE_NUM-1:0]   line_flags,     //(O) 每张图那格的模式位，原样转发
     output wire [24*IMAGE_NUM-1:0]  line_param,     //(O) 每张图那格的参数：素材源行跨距 / FILL 的填充色
     //   ★ "看最后一格"的三根：背景源 / 合成器 / 写侧用的都是【最终结果】那一步的模式 ——
     //     合成时 = 第 2 张图那格；单图命令第 2 格是空的 ⇒ 用 line_fx_en 选回第 1 格。
     //   ★ 这个选择放在本模块（广播归本模块所有）：顶层 GPU_2D 只连线，不摆逻辑。
     output wire [31:0]              line_src_addr_last,    //(O) 最后一格那张图的源起始地址
-    output wire [6:0]               line_flags_last,       //(O) 最后一格那格的模式位
+    output wire [7:0]               line_flags_last,       //(O) 最后一格那格的模式位
     output wire [23:0]              line_param_last,       //(O) 最后一格那格的参数
     input  wire                     line_done,          //(I) 单拍脉冲：这一行【已经写进 DDR 了】
     input  wire                     line_buffer_free,   //(I) 下游（各源 + 写侧）都还能接下一行（合成器汇总后回传）
@@ -165,7 +165,7 @@ reg  [1:0]                          next_state;
 reg  [15:0]                         cmd_w_r;                        // 宽（像素）
 reg  [15:0]                         cmd_h_r;                        // 高 = 循环次数
 reg                                 line_fx_en_r;                   // 本命令有没有第二张图（取命令那拍算好）
-reg  [7*IMAGE_NUM-1:0]              cmd_flags_r;            // 每张图的模式位（原样转发）
+reg  [8*IMAGE_NUM-1:0]              cmd_flags_r;            // 每张图的模式位（原样转发）
 reg  [24*IMAGE_NUM-1:0]             cmd_param_r;            // 每张图的参数（原样转发）
 reg  [24*IMAGE_NUM-1:0]             cmd_src_stride_r;       // 每张图的源行跨距（取命令那拍算好）
 
@@ -177,7 +177,8 @@ reg  [15:0]                         line_done_cnt_r;                // 已经【
 
 // ---- 判断组合条件 ----
 wire                                take_cmd;                       // 这一拍取走一条命令
-wire                                draw_cmd;                       // 这条命令要画东西（FILL/BLIT 且高不为 0）
+wire                                draw_cmd;                       // ???????????
+wire                                uses_src;                       // 这条命令要画东西（FILL/BLIT 且高不为 0）
 wire                                more_line;                      // 还有行没发出去
 wire                                can_send;                       // 这一拍可以发下一行
 wire                                cmd_finished;                   // 这条命令真的做完了
@@ -210,8 +211,43 @@ assign dst_stride           = lineBuffer_mode ? (LINE_BYTES/2) : LINE_BYTES;
 //     而跨距是素材自己的行跨度 —— 两者是独立的两个量，所以必须由命令带下来。
 //   ★ 为什么按 flags[3] 分而不是按 mode 分：DDR 源那条路已经上板验过，
 //     color 字段对它是"原样转发"，动它就等于改老行为（回归 TB 立刻报错）。
+function [31:0] rot_col_last_addr;
+    input [31:0] base;
+    input [15:0] source_w;
+    reg [31:0] words;
+    begin
+        words = ({16'd0, source_w} - 32'd1) >> 2;
+        rot_col_last_addr = base + words;
+        rot_col_last_addr[31:30] = (source_w - 16'd1) & 16'd3;
+    end
+endfunction
+
+function [31:0] rot_col_next_addr;
+    input [31:0] addr;
+    begin
+        if (addr[31:30] == 2'd3)
+            rot_col_next_addr = {2'd0, addr[29:0]} + 32'd1;
+        else
+            rot_col_next_addr = addr + 32'h4000_0000;
+    end
+endfunction
+
+function [31:0] rot_col_prev_addr;
+    input [31:0] addr;
+    begin
+        if (addr[31:30] == 2'd0)
+            // Keep the word offset at 30 bits.  A 32-bit subtraction here
+            // makes the 34-bit concatenation truncate the lane bits, so
+            // 0x0000000d incorrectly becomes 0x0000000c instead of
+            // 0xc000000c when crossing to the previous word.
+            rot_col_prev_addr = {2'd3, (addr[29:0] - 30'd1)};
+        else
+            rot_col_prev_addr = addr - 32'h4000_0000;
+    end
+endfunction
+
 function [31:0] src_stride_of;
-    input [6:0]  flags;
+    input [7:0]  flags;
     input [23:0] color;
     input [31:0] dst;
     begin
@@ -286,8 +322,8 @@ assign line_fx_en           = line_fx_en_r;
 //   ★ 最后一格的三根：单图命令（line_fx_en = 0）没有第 2 格 ⇒ 取第 1 格
 assign line_src_addr_last   = line_fx_en_r ? line_src_addr[32*(IMAGE_NUM-1) +: 32]
                                            : line_src_addr[31:0];
-assign line_flags_last      = line_fx_en_r ? line_flags[7*(IMAGE_NUM-1) +: 7]
-                                           : line_flags[6:0];
+assign line_flags_last      = line_fx_en_r ? line_flags[8*(IMAGE_NUM-1) +: 8]
+                                           : line_flags[7:0];
 assign line_param_last      = line_fx_en_r ? line_param[24*(IMAGE_NUM-1) +: 24]
                                            : line_param[23:0];
 
@@ -296,8 +332,8 @@ assign line_param_last      = line_fx_en_r ? line_param[24*(IMAGE_NUM-1) +: 24]
 generate
 genvar gi;
     for (gi = 0; gi < IMAGE_NUM; gi = gi + 1) begin : g_lane
-        wire [6:0]  take_flags;
-        assign take_flags = cmd_flags[7*gi  +: 7];
+        wire [7:0]  take_flags;
+        assign take_flags = cmd_flags[8*gi  +: 8];
         wire [31:0] take_addr;
         assign take_addr = cmd_src  [32*gi +: 32];
 
@@ -307,9 +343,9 @@ genvar gi;
         //   ★★ 广播这一侧必须看【锁存的】上下文，不能看端口：
         //      命令队列是 FWFT 预读的 —— CmdExec 取走命令那一拍，端口上立刻换成【下一条命令】，
         //      而行任务要发 h 次。用端口就会把下一条命令的模式位当成这一条的（踩过）
-        assign lane_uses_src[gi]               = (cmd_flags_r[7*gi +: 3] == MODE_REPLACE) |
-                                                (cmd_flags_r[7*gi +: 3] == MODE_ALPHA  ) |
-                                                (cmd_flags_r[7*gi +: 3] == MODE_CKEY   );
+        assign lane_uses_src[gi]               = (cmd_flags_r[8*gi +: 3] == MODE_REPLACE) |
+                                                (cmd_flags_r[8*gi +: 3] == MODE_ALPHA  ) |
+                                                (cmd_flags_r[8*gi +: 3] == MODE_CKEY   );
 
         //   ★ MX（水平镜像）的"倒读起点"在这里算 —— 取出器只负责"每读一个字 −1"。
         //     本图这一行的【行首字】是 line_src_r[gi]，镜像时广播它的【最后一个字】：
@@ -319,10 +355,12 @@ genvar gi;
                                             + {16'd0, (cmd_w_r + 16'd3) >> 2} - 32'd1;
 
         assign line_src_addr[32*gi +: 32] = lane_uses_src[gi]
-                                        ? (cmd_flags_r[7*gi + 5] ? lane_row_last_word[32*gi +: 32]
-                                                                : line_src_r[32*gi +: 32])
+                                        ? (cmd_flags_r[8*gi + 7]
+                                           ? line_src_r[32*gi +: 32]
+                                           : (cmd_flags_r[8*gi + 5] ? lane_row_last_word[32*gi +: 32]
+                                                                   : line_src_r[32*gi +: 32]))
                                         : 32'd0;                       // 这张图不要源就填 0
-        assign line_flags[7*gi +: 7]      = cmd_flags_r[7*gi +: 7];      // 无条件转发
+        assign line_flags[8*gi +: 8]      = cmd_flags_r[8*gi +: 8];      // 无条件转发
         assign line_param[24*gi +: 24]    = cmd_param_r[24*gi +: 24];    // 无条件转发
     end
 endgenerate
@@ -378,7 +416,7 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
         line_done_cnt_r <= 16'd0;
         line_dst_r      <= 32'd0;
         for (i = 0; i < IMAGE_NUM; i = i + 1) begin
-            cmd_flags_r[7*i +: 7]      <= 7'd0;
+            cmd_flags_r[8*i +: 8]      <= 8'd0;
             cmd_param_r[24*i +: 24]    <= 24'd0;
             cmd_src_stride_r[24*i +: 24] <= 24'd0;
             line_src_r[32*i +: 32]     <= 32'd0;
@@ -401,17 +439,21 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                          //   ★ 本命令有没有第二张图（合成）：第 2 格起只要有任何信息就算有
                          //     （单图 / FILL 命令里 CIUnpack 会把第 2 格整段清零 ⇒ 这里是 0）
                          line_fx_en_r <= (cmd_type != CMD_FENCE) &
-                                        (|cmd_flags[7*IMAGE_NUM-1:7] | |cmd_src[32*IMAGE_NUM-1:32]);
+                                        (|cmd_flags[8*IMAGE_NUM-1:8] | |cmd_src[32*IMAGE_NUM-1:32]);
                          for (i = 0; i < IMAGE_NUM; i = i + 1) begin
-                             cmd_flags_r[7*i +: 7]         <= cmd_flags[7*i +: 7];
+                             cmd_flags_r[8*i +: 8]         <= cmd_flags[8*i +: 8];
                              cmd_param_r[24*i +: 24]       <= cmd_args [32*i +: 24];
                              cmd_src_stride_r[24*i +: 24]  <= lane_take_stride[24*i +: 24];
                              //   ★ MY（垂直镜像）：这张图的源地址从【最后一行】开始，
                              //     之后每行往回走一个跨距。目的地址照旧正向推进。
                              //     (h−1)×stride 每条命令、每张图只算一次（不是每像素）。
-                             line_src_r[32*i +: 32]        <= cmd_flags[7*i + 6]
-                                                            ? (cmd_src[32*i +: 32] + lane_take_last_row[40*i +: 32])
-                                                            :  cmd_src[32*i +: 32];
+                             line_src_r[32*i +: 32]        <= cmd_flags[8*i + 7]
+                                                            ? (cmd_flags[8*i + 6]
+                                                               ? rot_col_last_addr(cmd_src[32*i +: 32], cmd_h)
+                                                               : cmd_src[32*i +: 32])
+                                                            : (cmd_flags[8*i + 6]
+                                                               ? (cmd_src[32*i +: 32] + lane_take_last_row[40*i +: 32])
+                                                               : cmd_src[32*i +: 32]);
                          end
                      end
 
@@ -424,11 +466,15 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                          //      （Compositor 拿它当常量色用）⇒ 那一格【不递推】，每行都得是同一个颜色。
                          //      递推了的话第 2 行起颜色就变了（症状：闪红一行一个色、越往下越怪）。
                          for (i = 0; i < IMAGE_NUM; i = i + 1)
-                             line_src_r[32*i +: 32] <= (cmd_flags_r[7*i +: 3] == MODE_CKEY)
+                             line_src_r[32*i +: 32] <= (cmd_flags_r[8*i +: 3] == MODE_CKEY)
                                                      ?  line_src_r[32*i +: 32]
-                                                     : (cmd_flags_r[7*i + 6]
-                                                        ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
-                                                        : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]}));
+                                                     : (cmd_flags_r[8*i + 7]
+                                                        ? (cmd_flags_r[8*i + 6]
+                                                           ? rot_col_prev_addr(line_src_r[32*i +: 32])
+                                                           : rot_col_next_addr(line_src_r[32*i +: 32]))
+                                                        : (cmd_flags_r[8*i + 6]
+                                                           ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
+                                                           : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]})));
                      end
             default: ;
         endcase

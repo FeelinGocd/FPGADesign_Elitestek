@@ -212,7 +212,7 @@ wire [31:0]                 line_dst_addr;
 wire [15:0]                 line_w;
 wire                        line_fx_en;                     // 本命令有没有第二张图（合成）
 wire [32*IMAGE_NUM-1:0]     line_src_addr;
-wire [7*IMAGE_NUM-1:0]      line_flags;
+wire [8*IMAGE_NUM-1:0]      line_flags;
 wire [24*IMAGE_NUM-1:0]     line_param;
 wire                        line_done;
 wire                        line_buffer_free;               // 下游还能不能接下一行（Factory 汇总后回给 CmdExec）
@@ -222,7 +222,7 @@ wire                        line_buffer_free;               // 下游还能不�
 //   ★ 这个选择在 CmdExec 里做（广播归它所有），本层只是把线接过去：
 //     顶层只连线，不摆逻辑。
 wire [31:0]                 line_src_addr_last;
-wire [6:0]                  line_flags_last;
+wire [7:0]                  line_flags_last;
 wire [23:0]                 line_param_last;
 
 // ---- 源① 的像素流（DDRSource → Compositor）----
@@ -443,6 +443,7 @@ PaletteSource #(
     .line_w                         (line_w),
     .line_fx_en                     (line_fx_en),       // 本行有没有第二张图
     .line_flags                     (line_flags),       // ★ 每图一格：模式位/MX
+    .line_param                     (line_param),
 
     .palette_ready                  (palette_ready),    // ★ 取数由 Compositor 里合成级给
     .key_color                      (ckey_color),       // ★ ck 判在【合成之前】：每张图各判各的

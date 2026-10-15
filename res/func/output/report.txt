@@ -1,30 +1,42 @@
-﻿输入目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\num, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\alpha, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\logo
+﻿输入目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character\bigfish, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\num, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\alpha, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet\effect, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\accessory
 输出目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\func\output
-最大边   : 256   调色板: 256 色   实际用到: 26
-PRAM     : 每字 4 个索引, 共 12870 字 = 50.3 KB
+最大边   : 256   调色板: 256 色   实际用到: 80
+PRAM     : 每字 4 个索引, 共 10784 字 = 42.1 KB
 
   #  文件                          宽    高    跨距      字数      基址      透明      不透明纯白
-  0  run_left_00_contact.pn     63   89    16    1424       0    2718          0
-  1  run_left_01_passing.pn     65   86    17    1462    1424    2598          0
-  2  num0.png                   32   48     8     384    2886     704          0
-  3  num1.png                   32   48     8     384    3270     840          0
-  4  num2.png                   32   48     8     384    3654     744          0
-  5  num3.png                   32   48     8     384    4038     981          0
-  6  num4.png                   32   48     8     384    4422    1025          0
-  7  num5.png                   32   48     8     384    4806     826          0
-  8  num6.png                   32   48     8     384    5190     924          0
-  9  num7.png                   32   48     8     384    5574    1035          0
- 10  num8.png                   32   48     8     384    5958     825          0
- 11  num9.png                   32   48     8     384    6342     914          0
- 12  minecraft_glass.png        32   32     8     256    6726     740          0
- 13  competition_logo.png      256   92    64    5888    6982   18357          0
+  0  bigfish_Get_accessory.     56   88    14    1232       0    2767          0
+  1  bigfish_walkDown_00_st     56   88    14    1232    1232    2302          0
+  2  bigfish_walkDown_02_ri     56   88    14    1232    2464    2108          0
+  3  bigfish_walkRight_00_s     56   88    14    1232    3696    2631          0
+  4  bigfish_walkRight_01_r     56   88    14    1232    4928    2511          0
+  5  bigfish_walkUp_00_stan     56   88    14    1232    6160    2653          0
+  6  bigfish_walkUp_01_righ     56   88    14    1232    7392    2664          0
+  7  num0_16x24.png             16   24     4      96    8624     144          0
+  8  num1_16x24.png             16   24     4      96    8720     205          0
+  9  num2_16x24.png             16   24     4      96    8816     162          0
+ 10  num3_16x24.png             16   24     4      96    8912     170          0
+ 11  num4_16x24.png             16   24     4      96    9008     206          0
+ 12  num5_16x24.png             16   24     4      96    9104     168          0
+ 13  num6_16x24.png             16   24     4      96    9200     197          0
+ 14  num7_16x24.png             16   24     4      96    9296     223          0
+ 15  num8_16x24.png             16   24     4      96    9392     144          0
+ 16  num9_16x24.png             16   24     4      96    9488     197          0
+ 17  minecraft_glass.png        32   32     8     256    9584     740          0
+ 18  bullet_type_A.png          24   24     6     144    9840     368          0
+ 19  bullet_type_B_chiliFri     24   24     6     144    9984     401          0
+ 20  effect_fire.png            24   24     6     144   10128     453          0
+ 21  accessory_base.png         32   32     8     256   10272     852          0
+ 22  accessory_chili.png        32   32     8     256   10528     813          0
 
 ck(键色=白): 不透明纯白必须为 0, 否则那些像素会被抠掉。
 
 alpha 混合: palette.hex 一项 = AARRGGBB(α 在高字节), α 取该索引下所有像素的最大 α;
             索引 0 是键色(白), 它的 α 强制为 0。
-  α 档位: [0, 128, 255]    半透明(0/255 之外)的索引: 2 个
+  α 档位: [0, 128, 255]    半透明(0/255 之外)的索引: 7 个
 
-同一个颜色占了多个索引(拆出来的 2 项):
-    #fcfcfc   索引 18 → 1   α=128
-    #c1f5fe   索引 103 → 2   α=128
+同一个颜色占了多个索引(拆出来的 5 项):
+    #fcfcfc   索引 17 → 1   α=128
+    #c1f5fe   索引 24 → 2   α=128
+    #d4632f   索引 104 → 3   α=128
+    #fcb100   索引 66 → 4   α=128
+    #fcf500   索引 43 → 5   α=128

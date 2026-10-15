@@ -114,6 +114,16 @@ localparam  [31:0]              TN_COLOR = 32'h00_FF_00_00;     // {A,R,G,B} = �
 localparam  [31:0]              DST10_OFF = 32'h0896_000F;      // 低 4 位 = 15（最不齐的那种）
 localparam  [15:0]              CMB_H48   = 16'd48;
 
+//   ---- 第十一段：硬件 90° 旋转（ROT90）—— 用角色素材（56×88）转成 88×56 --------------
+//     ★ 旋转位走 param[23]（不是 flags 位）：param = stride | 0x800000（= 驱动里的 sprite_param）。
+//     ★ 软件要把 w/h 交换：这里发 w=88（= 源高）、h=56（= 源宽）。
+//     ★ 这一段回答两件事：① 转出来对不对 ② 到底顺/逆时针（4 种映射各撞一遍，谁 0 错谁对）。
+localparam  [31:0]              DST11_OFF = 32'h0898_0000;
+localparam  [15:0]              ROT_W     = 16'd88;              // = 源高（角色 88）
+localparam  [15:0]              ROT_H     = 16'd56;              // = 源宽（角色 56）
+localparam  [6:0]               ROT_FLAGS = 7'h09;               // REPLACE(1)|SPRITE(8)，★ 不开 ck：整块都写，好比对
+localparam  [31:0]              ROT_PARAM = 32'h0000_000E | 32'h0080_0000;   // stride=14 字 | ROT90
+
 localparam  [9:0]               FID_BLIT = 10'h002;     // funct3=2
 localparam  [9:0]               FID_FILL = 10'h001;     // funct3=1
 localparam  [9:0]               FID_ARGS = 10'h007;     // funct3=7 参数 CI（命令结束词）
@@ -137,6 +147,8 @@ integer                 tn_ls0, tn_ld0;                                     // �
 reg  [7:0]              t_lo, t_up, t_d, t_q;                               // 颜色合成段的逐字节金标准（照抄 RTL 的算式）
 reg  [15:0]             t_q16;
 integer                 ti;                                                 // 色调用例循环
+integer                 r_ls0, r_ld0;                                       // 旋转段快照
+integer                 rot_e0, rot_e1, rot_e2, rot_e3;                      // 4 种候选映射的错字节数
 integer                 t_s9;                                               // 饱和加的中间量
 reg  [2:0]              tm;                                                 // 本用例的色调模式
 reg  [7:0]              tk;                                                 // 本用例的浓度
@@ -1072,6 +1084,80 @@ initial begin
     $display("==== 不齐合成段: 错字节 %0d, 露图一 %0d, 底色 %0d, 图二赢 %0d ====",
              err_bytes, n_expose_img1, n_bgcolor, n_img2_pix);
     if (err_bytes != 0) err_cnt = err_cnt + 1;
+
+    //--------------------------------------------------------------------------
+    // 第十一段: 硬件 90° 旋转（ROT90）
+    //   源：角色素材 bigfish_walkDown_00_standUp（基址 0、56×88、行跨距 14 字）
+    //   命令：w=88（=锁源高）h=56（=源宽）+ param[23]=1，不开 ck（整块都写，好逐字节比）
+    //   ★ 输出尺寸是 88×56；用 4 种映射各比一遍，谁是 0 错就是硬件实际的方向
+    //--------------------------------------------------------------------------
+    $display("==== 第十一段: 旋转 ROT90（56x88 -> 88x56）到 0x%08h ====", DST11_OFF);
+    for (line = 0; line < ROT_H; line = line + 1)
+        for (i = 0; i < ROT_W*3 + 16; i = i + 1)
+            poke_byte(DST11_OFF + line*STRIDE + i, 8'h5A);          // 哨兵
+
+    r_ls0 = line_start_cnt;
+    r_ld0 = line_done_cnt;
+    ci_send(FID_BLIT, {ROT_W, ROT_H}, DST11_OFF);
+    ci_send(FID_ARGS, 32'd0, {1'b0, ROT_FLAGS, ROT_PARAM[23:0]});
+    repeat (400000) @(posedge clk);
+
+    $display("==== 旋转段: line_start %0d / line_done %0d (期望 %0d / %0d) ====",
+             line_start_cnt - r_ls0, line_done_cnt - r_ld0, ROT_H, ROT_H);
+    if ((line_done_cnt - r_ld0) != ROT_H) begin
+        err_cnt = err_cnt + 1;
+        $display("  !! 旋转段没跑完: 只落盘 %0d 行(链路挂住了) —— 旋转路卡死", line_done_cnt - r_ld0);
+    end
+
+    //   ★ 输出是 88 宽 × 56 高；源是 56 宽 × 88 高。四种候选（x = 源列、y = 源行）：
+    //       C1 转置        : out(o_x,o_y) = src(x = o_y,        y = o_x)
+    //       C2 列序反      : out(o_x,o_y) = src(x = 55 - o_y,   y = o_x)
+    //       C3 列内反      : out(o_x,o_y) = src(x = o_y,        y = 87 - o_x)
+    //       C4 双反        : out(o_x,o_y) = src(x = 55 - o_y,   y = 87 - o_x)
+    rot_e0 = 0; rot_e1 = 0; rot_e2 = 0; rot_e3 = 0;
+    for (row_y = 0; row_y < ROT_H; row_y = row_y + 1)             // o_y
+        for (col_x = 0; col_x < ROT_W; col_x = col_x + 1) begin   // o_x
+            pix_img1 = asset_pix(32'd0, 16'd14, row_y,      col_x);        // C1
+            pix_img2 = asset_pix(32'd0, 16'd14, 55-row_y,   col_x);        // C2
+            pix_exp  = asset_pix(32'd0, 16'd14, row_y,      87-col_x);      // C3
+            for (c = 0; c < 3; c = c + 1) begin
+                got_b = peek_byte(DST11_OFF + row_y*STRIDE + col_x*3 + c);
+                exp_b = ((c == 0) ? pix_img1[7:0] : (c == 1) ? pix_img1[15:8] : pix_img1[23:16]);
+                if (got_b !== exp_b) rot_e0 = rot_e0 + 1;
+                exp_b = ((c == 0) ? pix_img2[7:0] : (c == 1) ? pix_img2[15:8] : pix_img2[23:16]);
+                if (got_b !== exp_b) rot_e1 = rot_e1 + 1;
+                exp_b = ((c == 0) ? pix_exp[7:0] : (c == 1) ? pix_exp[15:8] : pix_exp[23:16]);
+                if (got_b !== exp_b) rot_e2 = rot_e2 + 1;
+                pix_exp = asset_pix(32'd0, 16'd14, 55-row_y, 87-col_x);      // C4
+                exp_b = ((c == 0) ? pix_exp[7:0] : (c == 1) ? pix_exp[15:8] : pix_exp[23:16]);
+                if (got_b !== exp_b) rot_e3 = rot_e3 + 1;
+            end
+        end
+    begin : dump_rot_blk
+        integer                 fd_rot;
+        reg [23:0]              got_rot;
+        fd_rot = $fopen("rot_dump.txt", "w");
+        for (row_y = 0; row_y < ROT_H; row_y = row_y + 1) begin
+            for (col_x = 0; col_x < ROT_W; col_x = col_x + 1) begin
+                got_rot = {peek_byte(DST11_OFF + row_y*STRIDE + col_x*3 + 2),
+                           peek_byte(DST11_OFF + row_y*STRIDE + col_x*3 + 1),
+                           peek_byte(DST11_OFF + row_y*STRIDE + col_x*3 + 0)};
+                $fwrite(fd_rot, "%06h ", got_rot);
+            end
+            $fwrite(fd_rot, "\n");
+        end
+        $fclose(fd_rot);
+    end
+
+    $display("==== 旋转段: 错字节  C1 转置=%0d  C2 x反=%0d  C3 y反=%0d  C4 双反=%0d  (全块 %0d 字节) ====",
+             rot_e0, rot_e1, rot_e2, rot_e3, ROT_W*ROT_H*3);
+    if ((rot_e0 != 0) && (rot_e1 != 0) && (rot_e2 != 0) && (rot_e3 != 0)) begin
+        err_cnt = err_cnt + 1;
+        $display("  !! 旋转段: 4 种映射都对不上 —— 旋转结果不是任何一种转置");
+    end else if (rot_e0 == 0) $display("  >> 旋转方向 = 直接转置（输出行 y = 源列 y，行内按源行序）：out(x,y) = src(x=y, y=x)");
+      else if (rot_e1 == 0)   $display("  >> 旋转方向 = C2 列序反：out(o_x,o_y) = src(x=55-o_y, y=o_x)");
+      else if (rot_e2 == 0)   $display("  >> 旋转方向 = C3 列内反：out(o_x,o_y) = src(x=o_y, y=87-o_x)");
+      else                    $display("  >> 旋转方向 = C4 双反：out(o_x,o_y) = src(x=55-o_y, y=87-o_x)");
 
     $display("==== 结束: line_start %0d 次 / line_done %0d 次, AR %0d 笔, AW %0d 笔, R 收 %0d 拍, W 收 %0d 拍, err=%0d ====",
              line_start_cnt, line_done_cnt, rd_bursts, wr_bursts, r_beats, w_beats, err_cnt);

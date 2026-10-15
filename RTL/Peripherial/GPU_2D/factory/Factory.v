@@ -53,7 +53,7 @@ module Factory #(
     //==================== 行任务口（CmdExec 广播）  ====================
     input  wire                             line_start,     //(I) 单拍脉冲：这一行的任务在这拍有效
 
-    input  wire [6:0]                       line_flags,     //(I) 命令 flags：[4] = 颜色键控(ck) 使能
+    input  wire [7:0]                       line_flags,     //(I) 命令 flags：[4] = 颜色键控(ck) 使能
     input  wire [23:0]                      line_param,     //(I) FILL 的填充色
     input  wire [31:0]                 line_src_addr_last, //(I) 最后一格的源地址（纯色层时 = 颜色）
     input  wire                        line_fx_en,     //(I) 本命令有没有第二层（合成）

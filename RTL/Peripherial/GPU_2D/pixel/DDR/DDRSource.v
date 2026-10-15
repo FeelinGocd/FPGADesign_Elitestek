@@ -47,7 +47,7 @@ module DDRSource #(
     input  wire                     line_start,
     input  wire [31:0]              line_src_addr,
     input  wire [31:0]              line_dst_addr,  //(I) 目的行地址（算相位；alpha 时它就是读数地址）
-    input  wire [6:0]               line_flags,     //(I) 合成模式（整个命令期间稳定）—— 我自己判断要不要动
+    input  wire [7:0]               line_flags,     //(I) 合成模式（整个命令期间稳定）—— 我自己判断要不要动
     input  wire [15:0]              line_w,
 
     //==================== 像素流出口（标准 valid/ready）→ Compositor ====================

@@ -72,7 +72,7 @@ module PaletteDecoder #(
 
     //==================== 颜色键控(ck) 的键色（静态配置，不随行变）====================
     input  wire [COLOR_WIDTH-1:0]                   key_color,      //(I) 键色(APB 0x2078, 复位默认白)
-    input  wire [6:0]                               line_flags,     //(I) [5] = MX 水平镜像
+    input  wire [7:0]                               line_flags,     //(I) [5] = MX 水平镜像
 
     //==================== 索引字入口（接 PaletteSource 的素材 RAM 读口）  ====================
     input  wire [INDEXES_PER_WORD*INDEX_WIDTH-1:0]  index_data,     //(I) 一个字 = 4 个索引

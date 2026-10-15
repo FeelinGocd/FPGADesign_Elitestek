@@ -72,7 +72,7 @@ module Compositor #(
     //==================== cmd 口：行任务（CmdExec 广播）  ====================
     //   行任务的字段只在 line_start 那一拍有效 → 本模块自己锁存要用的
     input  wire                                     line_start,     //(I) 单拍脉冲：这一行的任务在这拍有效
-    input  wire [6:0]                               line_flags,     //(I) [2:0] = 合成模式，[4] = 颜色键控(ck) 使能
+    input  wire [7:0]                               line_flags,     //(I) [2:0] = 合成模式，[4] = 颜色键控(ck) 使能
     input  wire                                     line_done,      //(I) 单拍脉冲：本行的写侧已经完成（写控制器给的）
     input  wire [23:0]                              line_param,     //(I) FILL 的填充色
     input  wire [31:0]                              line_src_addr_last, //(I) 最后一格那格的源地址；纯色层时它就是颜色 {A,R,G,B}  <- CmdExec
@@ -152,7 +152,7 @@ wire [PIXEL_BYTES-1:0]              blend_mask;
 // wire / reg：本模块内部
 //==============================================================================
 // ---- 行上下文（line_start 那一拍采一次）----
-reg  [6:0]                          flags_r;        // 本行的 flags（模式 + ck）—— 行任务那拍锁存
+reg  [7:0]                          flags_r;        // 本行的 flags（模式 + ck）—— 行任务那拍锁存
 reg  [1:0]                          src_en_r;       // 这一行要哪几路源（★ 从 flags_r 自己解出来的）
 reg  [23:0]                         color_r;        // FILL 的填充色
 reg  [31:0]                         fx_color_r;     // 纯色层颜色 {A,R,G,B}（line_src_addr 第 2 格）

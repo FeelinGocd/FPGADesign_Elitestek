@@ -60,11 +60,11 @@ module CmdChannel #(
     output wire                     line_fx_en,         //(O) 本命令有没有第二张图（合成）
     //   ★ 下面三根【每张图一格】（第 1 格 = 图一，第 2 格 = 图二…）
     output wire [32*IMAGE_NUM-1:0]  line_src_addr,  //(O) 每张图那一行的源起始地址
-    output wire [7*IMAGE_NUM-1:0]   line_flags,     //(O) 每张图那格的模式位
+    output wire [8*IMAGE_NUM-1:0]   line_flags,     //(O) 每张图那格的模式位
     output wire [24*IMAGE_NUM-1:0]  line_param,     //(O) 每张图那格的参数
     //   ★ "看最后一格"的三根（背景源 / 合成器 / 写侧用的都是最终结果那一步的模式）
     output wire [31:0]              line_src_addr_last,    //(O) 最后一格那张图的源起始地址
-    output wire [6:0]               line_flags_last,       //(O) 最后一格那格的模式位
+    output wire [7:0]               line_flags_last,       //(O) 最后一格那格的模式位
     output wire [23:0]              line_param_last,       //(O) 最后一格那格的参数
     input  wire                     line_done,          //(I) 这一行已经写进 DDR   ← Factory
     input  wire                     line_buffer_free,   //(I) 各源 + 写侧都还能接下一行 ← Factory
@@ -85,7 +85,7 @@ wire [31:0]                         cmd_dst;
 wire [15:0]                         cmd_w;
 wire [15:0]                         cmd_h;
 wire [32*IMAGE_NUM-1:0]             cmd_src;
-wire [7*IMAGE_NUM-1:0]              cmd_flags;
+wire [8*IMAGE_NUM-1:0]              cmd_flags;
 wire [32*IMAGE_NUM-1:0]             cmd_args;
 
 //==============================================================================

@@ -25,7 +25,7 @@
 //          cmd_src   [32*IMAGE_NUM-1:0]  每张图的源地址（32 位一格）
 //          cmd_args  [32*IMAGE_NUM-1:0]  每张图自己的参数（就是原来那根 color 线：
 //                                        FILL 时是纯色，其它指令下看指令自己怎么定义）
-//          cmd_flags [7*IMAGE_NUM-1:0]   每张图的模式位
+//          cmd_flags [8*IMAGE_NUM-1:0]   每张图的模式位
 //      ★ 并排是按【图】并排：第 k 格 = 第 k 张图（第 1 张 = 原图，第 2 张 = 特效图）。
 //      ★ 于是"多条 CI"不用另立一套名字，也不用把参数揉成一根大字：
 //        地址还是地址那根线，数据还是数据那几根线，只是每根线多留了几格。
@@ -132,7 +132,7 @@ module CIUnpack #(
     output wire [31:0]              cmd_dst,    //(O) 目的地址（几张图共用一份）
     output wire [15:0]              cmd_w,      //(O) 宽（目标矩形，共用一份）
     output wire [15:0]              cmd_h,      //(O) 高（目标矩形，共用一份）
-    output wire [7*IMAGE_NUM-1:0]   cmd_flags,  //(O) 每张图的模式位：一格 = 一张图
+    output wire [8*IMAGE_NUM-1:0]   cmd_flags,  //(O) 每张图的模式位：一格 = 一张图
     output wire [32*IMAGE_NUM-1:0]  cmd_args   //(O) 每张图自己的参数：一格 = 一张图
 );
 
@@ -191,7 +191,7 @@ reg  [31:0]                         cmd_dst_r;          // 目的地址
 reg  [15:0]                         cmd_w_r;            // 宽（一张命令共用）
 reg  [15:0]                         cmd_h_r;            // 高（一张命令共用）
 reg  [32*IMAGE_NUM-1:0]             cmd_src_r;          // 每张图的源地址
-reg  [7*IMAGE_NUM-1:0]              cmd_flags_r;        // 每张图的模式位
+reg  [8*IMAGE_NUM-1:0]              cmd_flags_r;        // 每张图的模式位
 reg  [32*IMAGE_NUM-1:0]             cmd_args_r;         // 每张图自己的参数
 
 // ---- 收图用的计数器 ----
@@ -308,7 +308,7 @@ always @(posedge clk or negedge rst_n) begin
         cmd_w_r         <= 16'd0;
         cmd_h_r         <= 16'd0;
         cmd_src_r       <= {(32*IMAGE_NUM){1'b0}};
-        cmd_flags_r     <= {(7*IMAGE_NUM){1'b0}};
+        cmd_flags_r     <= {(8*IMAGE_NUM){1'b0}};
         cmd_args_r      <= {(32*IMAGE_NUM){1'b0}};
         args_count_r    <= 2'd0;
         args_overflow_r <= 1'b0;
@@ -325,7 +325,7 @@ always @(posedge clk or negedge rst_n) begin
                              args_count_r    <= 2'd0;
                              args_overflow_r <= 1'b0;
                              cmd_src_r       <= {(32*IMAGE_NUM){1'b0}};
-                             cmd_flags_r     <= {(7*IMAGE_NUM){1'b0}};
+                             cmd_flags_r     <= {(8*IMAGE_NUM){1'b0}};
                              cmd_args_r      <= {(32*IMAGE_NUM){1'b0}};
                              //   op：类型 = 功能号，宽高 + 目的地址 = 这条 CI 的两个参数
                              //   FENCE：自己就是一条完整命令，其余线一律 0
@@ -337,7 +337,7 @@ always @(posedge clk or negedge rst_n) begin
                          else if (fill_slot) begin
                              //   ---- 第几张图就填第几格（每根线各填一格，互不干扰）----
                              cmd_src_r  [32*args_count_r +: 32] <= in_inputs_0;
-                             cmd_flags_r[ 7*args_count_r +:  7] <= in_inputs_1[INPUTS1_FLAGS_LSB +:  7];
+                             cmd_flags_r[ 8*args_count_r +:  8] <= {in_inputs_1[23], in_inputs_1[INPUTS1_FLAGS_LSB +:  7]};
                              cmd_args_r [32*args_count_r +: 24] <= in_inputs_1[INPUTS1_ARGS_LSB  +: 24];
                              // 计数器饱和（不回绕）
                              if (args_count_r != IMAGE_NUM) args_count_r <= args_count_r + 2'd1;

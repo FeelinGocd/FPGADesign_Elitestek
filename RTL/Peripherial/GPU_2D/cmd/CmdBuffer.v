@@ -77,7 +77,7 @@ module CmdBuffer #(
     output wire [15:0]              cmd_w,      //(O) 宽（目标矩形，共用）
     output wire [15:0]              cmd_h,      //(O) 高（目标矩形，共用）
     output wire [32*IMAGE_NUM-1:0]  cmd_src,    //(O) 每张图的源地址：一格 = 一张图
-    output wire [7*IMAGE_NUM-1:0]   cmd_flags,  //(O) 每张图的模式位：一格 = 一张图
+    output wire [8*IMAGE_NUM-1:0]   cmd_flags,  //(O) 每张图的模式位：一格 = 一张图
     output wire [32*IMAGE_NUM-1:0]  cmd_args   //(O) 每张图自己的参数：一格 = 一张图（32 位）
 );
 
@@ -85,7 +85,7 @@ module CmdBuffer #(
 // localparam
 //==============================================================================
 //   存进 BlockRAM 的那一根宽字（只是存法，接口上还是分开的几根线）
-localparam  CMD_W       = 3 + 32 + 16 + 16 + (32 + 7 + 32)*IMAGE_NUM;   // 有效位
+localparam  CMD_W       = 3 + 32 + 16 + 16 + (32 + 8 + 32)*IMAGE_NUM;   // 有效位
 localparam  FIFO_W      = ((CMD_W + 7) / 8) * 8;                        // 补到整字节
 localparam  RSP_CNT_MAX = 3'd7;             // 欠响应计数上限（防溢出；实际到不了）
 localparam  CI_ID       = 32'h434D4431;     // "CMD1"：v1 的固定返回标识
@@ -101,7 +101,7 @@ wire [31:0]                         dec_dst;
 wire [15:0]                         dec_w;
 wire [15:0]                         dec_h;
 wire [32*IMAGE_NUM-1:0]             dec_src;
-wire [7*IMAGE_NUM-1:0]              dec_flags;
+wire [8*IMAGE_NUM-1:0]              dec_flags;
 wire [32*IMAGE_NUM-1:0]             dec_args;
 
 // FIFO 接口

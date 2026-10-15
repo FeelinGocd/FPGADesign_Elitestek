@@ -67,10 +67,12 @@ PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #   ★ 顺序 = 素材编号顺序：**新素材一律加在最后**，这样已有素材的编号不动。
 #   ★ res/pic/_原始图/ 放的是没缩过的原图，**故意不列在这里**（不参与打包）。
 PIC_DIRS_DEFAULT = [
-    PIC_DIR / "character",          # 0, 1   角色跑动帧
-    PIC_DIR / "base" / "num",       # 2..11  数字 0-9（HUD / 菜单）
-    PIC_DIR / "alpha",              # 12     带 α 的素材（玻璃等）
-    PIC_DIR / "logo",               # 13     比赛 logo（256×92，带透明）
+    PIC_DIR / "character" / "bigfish",          # 0..2  角色跑动帧
+    PIC_DIR / "base" / "num",       # 3..12 数字 0-9（HUD / 菜单）
+    PIC_DIR / "alpha",              # 13     带 α 的素材（玻璃等）
+    PIC_DIR / "sprite" / "bullet", # 15     Token 子弹本体
+    PIC_DIR / "sprite" / "bullet" / "effect", # 16  Token 效果层
+    PIC_DIR / "sprite" / "accessory", # 17     道具底座与道具图层
 ]
 OUT_DIR     = ROOT / "res" / "func" / "output"         # 产物（归档 + 给 C 用）
 #   ★ Efinity 综合时，$readmemh 的相对路径是按【工程目录】解析的 —— 工程里 SoC 自己
@@ -108,6 +110,17 @@ TRANS_TH    = 128          # 原图 α 小于它就当"透明像素"：落成索
 THUMB       = 64           # 训练调色板时每张图缩到多大（越小越快，够用就行）
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+SKIP_ASSET_NAMES = set()
+
+
+def is_mirrored_character_left(name: str) -> bool:
+    """Left-facing bigfish frames are generated at draw time with FLIP_X.
+
+    Keep the canonical right-facing PNG in PRAM only.  The explicit name
+    check is limited to the character directory so unrelated assets ending
+    in ``_left`` are not silently removed.
+    """
+    return name.startswith("bigfish_") and name.endswith("_left.png")
 
 
 def fit(im: Image.Image, max_w: int, max_h: int) -> Image.Image:
@@ -192,7 +205,10 @@ def main():
     #     不能分几次跑(后一次会把前一次覆盖掉)。
     files = []
     for d in pic_dirs:
-        files += sorted(p for p in d.iterdir() if p.suffix.lower() in IMG_EXT)
+        files += sorted(p for p in d.iterdir()
+                        if p.suffix.lower() in IMG_EXT
+                        and p.name not in SKIP_ASSET_NAMES
+                        and not is_mirrored_character_left(p.name))
     if not files:
         sys.exit("这些目录里没有图片（支持 " + ", ".join(sorted(IMG_EXT)) + "）："
                  + ", ".join(str(d) for d in pic_dirs))
@@ -221,6 +237,8 @@ def main():
         im.load()
         alpha.load()
         raw.append((p.name, im, alpha))
+        # 子弹/特效只保存一份横向原图；竖向显示由 GPU2D_ROT90 在硬件中完成。
+        # 这样旋转方向不会额外占用 PRAM，也避免生成的 _up 素材与源图不同步。
 
     pal_img = build_palette([im for _, im, _ in raw])
     #   ★ ck 是"比纯白"，所以调色板第 0 项【钉死成 ffffff】，透明像素全部指到它。
@@ -325,7 +343,7 @@ def main():
         base += len(words)
 
     total = base
-    print(f"输入 {len(files)} 张，最大边 {args.max}，调色板 {PAL_ENTRIES} 色")
+    print(f"输入 {len(files)} 张，生成 {len(raw)} 张（旋转方向由 GPU2D_ROT90 完成），最大边 {args.max}，调色板 {PAL_ENTRIES} 色")
     print(f"{'#':>3}  {'文件':<22} {'尺寸':>10} {'跨距':>5} {'字数':>7} {'基址':>7}  {'占用':>8}")
     for i, a in enumerate(assets):
         print(f"{i:>3}  {a['name'][:20]:<22} {a['w']:>4}x{a['h']:<5} {a['stride_word']:>5} "
@@ -387,8 +405,11 @@ def main():
     #     "被 ck 抠掉"和"α=0 透明"因此是同一批像素。
     #   ★ 这项改动必须和 RTL 的 32 位调色板【同时上】：还是一行 6 位的话，
     #     $readmemh 会把高 8 位读成 0 ⇒ 所有像素 α=0、整屏透明（规格 §9 末尾那条警告）。
-    pal = pal_img.getpalette()[:PAL_ENTRIES * 3]
-    pal += [0] * (PAL_ENTRIES * 3 - len(pal))
+    # 第 2 遍为同色不同 alpha 拆出了新索引，RGB 已经写入 pal_rgb。
+    # 这里必须使用它；重新从 pal_img 取会把拆分索引的 RGB 写回旧的近白色。
+    pal = pal_rgb
+    for old_ix, new_ix, _ in splits:
+        assert pal[old_ix*3:old_ix*3+3] == pal[new_ix*3:new_ix*3+3]
     pal_alpha[PAD_INDEX] = 0
     with open(OUT_DIR / "palette.hex", "w", encoding="ascii") as f:
         for i in range(PAL_ENTRIES):
@@ -415,9 +436,22 @@ def main():
                     f"\"{a['safe']}\" }},\n")
         f.write("};\n")
 
+        #   ★ 素材名 -> 下标：加/删素材会让后面所有下标整体平移，代码里写数字必炸
+        #     （2026-10-12 换角色素材时踩过一次：数字/玻璃的下标全跟着挪）。
+        #     一律用这里的名字，别在 C 里写数字。
+        f.write("/* asset name -> index. ALWAYS use these names in C, never raw numbers:\n"
+                " * (adding/removing an asset shifts every later index). */\n")
+        f.write("enum {\n")
+        for i, a in enumerate(assets):
+            ident = "ASSET_" + a["safe"].replace("-", "_")
+            f.write(f"    {ident} = {i},\n")
+        f.write("};\n")
+
     # ---- 预览图 + 账本 ----
     for i, a in enumerate(assets):
-        a["q"].convert("RGB").save(OUT_DIR / f"preview_{i}_{a['safe']}.png")
+        q_preview = a["q"].copy()
+        q_preview.putpalette(pal)
+        q_preview.convert("RGB").save(OUT_DIR / f"preview_{i}_{a['safe']}.png")
 
     with open(OUT_DIR / "report.txt", "w", encoding="utf-8-sig") as f:
         f.write("输入目录 : " + ", ".join(str(d) for d in pic_dirs) + "\n")
@@ -466,6 +500,16 @@ def main():
     print(f"[OK] 产物写好了：{OUT_DIR}")
     for n in ("assets.hex", "palette.hex", "assets_desc.h", "report.txt"):
         print(f"    {n}")
+
+    #   ★★ 素材动过之后必须做的三件事（漏一件就是"板上还是旧的"）
+    #      —— 2026-10-14 就踩过：C 代码改了、固件没重编，板上跑的少一段逻辑。
+    print("")
+    print("=" * 72)
+    print("!! 素材已经变了 —— 下面三件事一件都不能省：")
+    print("   1) 重新综合（assets.hex / palette.hex 是 BRAM 初值，不重新综合板上还是旧素材）")
+    print("   2) 重新编译固件（assets_desc.h 的下标/尺寸变了，C 里用的是生成的名字）")
+    print("   3) 固件和比特流【一起】烧（只烧一个 = 两边对不上）")
+    print("=" * 72)
 
 
 if __name__ == "__main__":
