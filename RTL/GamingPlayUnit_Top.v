@@ -802,6 +802,9 @@ key #(
 GPU_2D #(
     .FIFO_AW                            (9),
     .LINE_BYTES                         (5760),
+    .FRAME_LINES                        (720),
+    .DISPLAY_LINE_BYTES                (3840),
+    .DISPLAY_ROW_STRIDE                (5760),
     .AXI_ADDR_WIDTH                     (32),
     .AXI_DATA_WIDTH                     (128),
     .AXI_STRB_WIDTH                     (16),

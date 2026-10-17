@@ -68,6 +68,7 @@
  *   ★ MY 对两类源都成立；MX 目前只支持 PRAM 精灵源（DDR 源的行缓冲是 FIFO，倒着取不了）。 */
 #define GPU2D_FLIP_X   0x1u
 #define GPU2D_FLIP_Y   0x2u
+#define GPU2D_ROT90    0x4u   /* screen CW 90deg: right-facing source -> down; add FLIP_Y for up */
 
 /* 硬件对每条 CI 回的固定标识("CMD1"), 必须和 CmdBuffer.v 的 CI_ID 一致 */
 #define GPU2D_CI_ID        0x434D4431u
@@ -163,4 +164,22 @@ void CI_gpu2d_combineRect(u32 base_addr, u32 base_stride, u32 base_flags,
 
 /* 帧结束: 单独一条 CI。硬件把前面所有绘制都落盘后置 DONE_ACC,
  * 显示端在下一个帧边界翻页并清掉它 —— 一帧发一次。 */
+/*   —— 颜色合成（图片合成 + 色调）：第 2 层不给素材，给一个纯色（argb + 强度 + 色调模式）——
+ *   一条命令 = 3 条 CI，和 combine 一模一样，只是第 2 格换成了"颜色"而不是"素材地址"：
+ *        inputs_0 = {A,R,G,B}（A 不用，填 0）
+ *        flags    = REPLACE | SPRITE | CKEY_EN | 3   ← 3 = flags[2:0]，"纯色层"
+ *        param    = (色调模式 << 21) | (强度 << 12)  ；色调模式 0 = 关，1 插值染色 2 加光 3 乘系数 4 正片叠底
+ *   · 结果：底色那张图的不透明处，按浓度往这个颜色偏；透明处【不动】（ck 掩码说了算）
+ *     ⇒ 拿来当"撞击闪红 / 上色 / 高亮"最省事。
+ *   · strength=0 等价于不开（硬件直通），255 = 全是这个颜色（插值模式下差 1 个色阶）。
+ *   · 见 docs/spec/硬件_加速器.md §1.3.1 / §5.6。 */
+void CI_gpu2d_combineTint(u32 base_addr, u32 base_stride, u32 base_flags,
+                          u32 argb, u32 strength, u32 tone,
+                          u32 dst_addr, u32 w, u32 h);
+
+/* 颜色合成的坐标版（只有目的要换算地址） */
+void CI_gpu2d_combineTintRect(u32 base_addr, u32 base_stride, u32 base_flags,
+                              u32 argb, u32 strength, u32 tone,
+                              u32 dst_fb, u32 dx, u32 dy, u32 w, u32 h);
+
 void CI_gpu2d_fence(void);

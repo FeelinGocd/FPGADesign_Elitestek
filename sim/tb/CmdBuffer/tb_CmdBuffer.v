@@ -54,7 +54,7 @@ wire [31:0]             cmd_dst;              // 共用
 wire [15:0]             cmd_w;                // 共用
 wire [15:0]             cmd_h;                // 共用
 wire [32*IMAGE_NUM-1:0] cmd_src_full;         // 每张图一格
-wire [7*IMAGE_NUM-1:0]  cmd_flags_full;       // 每张图一格
+wire [8*IMAGE_NUM-1:0]  cmd_flags_full;       // 每张图一格（flags 已加宽到 8 位：bit7 = ROT90）
 wire [32*IMAGE_NUM-1:0] cmd_args_full;        // 每张图一格
 
 //   下面的断言只看第 1 张图（原图那格）；第 2 张图用 check_slot 单独查
@@ -252,12 +252,12 @@ endtask
 //   （宽高是几张图共用的，不在里面）
 task check_slot;
     input integer k;
-    input [31:0] es; input [6:0] ef; input [23:0] ec;
+    input [31:0] es; input [7:0] ef; input [23:0] ec;
     input [8*16-1:0] tag;
-    reg [31:0] s; reg [6:0] f; reg [23:0] c;
+    reg [31:0] s; reg [7:0] f; reg [23:0] c;
     begin
         s = cmd_src_full  [32*k +: 32];
-        f = cmd_flags_full[ 7*k +:  7];
+        f = cmd_flags_full[ 8*k +:  8];
         c = cmd_args_full [32*k +: 24];
         if (s !== es || f !== ef || c !== ec) begin
             $display("FAIL [%0s]: 第%0d张图 地址=%h flags=%h 参数=%h", tag, k+1, s, f, c);
@@ -412,7 +412,7 @@ initial begin
     push_ci(FID_ARGS, 32'h0A00_0000, {1'b0, 7'h0A, 24'h38_0168});   // 图2（特效图）more=0
     check_cmd(3'd2, 32'h0000_1000, 32'h0800_D000, 16'd16, 16'd8, 7'h09, 24'h000008,
               "case15-image1");
-    check_slot(1, 32'h0A00_0000, 7'h0A, 24'h38_0168, "case15-image2-fx");
+    check_slot(1, 32'h0A00_0000, 8'h0A, 24'h38_0168, "case15-image2-fx");
     expect_no_cmd(20, "case15-no-extra");
 
     $display("---- 用例16: 三张图（超过 N=2）⇒ 整条丢掉，不许截断 ----");

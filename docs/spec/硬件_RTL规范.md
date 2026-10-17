@@ -154,7 +154,7 @@ assign src1_data = palette_data;
 9. **`case` 里不许出现重复的 case 项**：仿真取第一个命中，综合工具不保证 ⇒ "仿真过、板上不对"。
 10. **一拍 N 个字节 × M 种模式的运算，乘法器要 mux 着共用**：一个式子一个乘法器就是 `N×M` 个
     （颜色合成四档式子一开始各写一个 ⇒ 12 字节 ×4 = **48 个 DSP**，整机 68/160）。
-    把"被乘数 / 乘数"按模式 mux 好再乘一次 ⇒ **12 个**，整机回到 32。
+    把"被乘数 / 乘数"按模式 mux 好再乘一次 ⇒ **12 个**（整机 DSP 68 → 32；现在含旋转那一版是 **34**）。
     ★ 顺带一条 Verilog 坑：**移位不把上下文宽度传给左操作数** —— `(a*b)>>8` 会先把乘积截成 8 位，
       必须先落到 `wire [15:0]` 再取高位。
 11. **文档同步**：接口位定义只写 `硬件_加速器.md` §1（唯一定稿）；C 侧用法写 `软件_驱动与API.md`；数字进 `实测数据.md`（带日期）；过时内容不留正文。
@@ -163,11 +163,57 @@ assign src1_data = palette_data;
 
 ## 5. 现状（谁已经过完一遍）
 
+> 文件清单与"哪些是自研 / 哪些是拿来的"见 §6 —— 改之前先确认自己动的是哪一类。
+
 | 范围 | 状态 |
 |---|---|
 | `GPU_2D.v` + `cmd/*` + `pixel/*` + `process/*` + `factory/*` + `interface/*` | ✅ 命名/文件头/端口组标注/顶层连线已按本规范过完（19 个模块） |
 | `lineBuffer` 那一支 | ✅ 本来就是基准，未改动 |
 | 端口注释 | 🚧 少数"时钟/复位""参数"组不需要对端，未标；个别括号描述待并进箭头写法 |
-| TB 老红 | ⬜ `tb_WriteController`(err=11)、`tb_gpu2d_apb`/`tb_lineBuffer`(TB 引用旧端口名 `done_acc`)、`tb_async_PingPongBuffer`(需 `-TbTop tb_Async_PingPongBuffer`)、`Combine/tb_combine`(废件) |
-| 端到端那一条 | ✅ `tb_m2loopback` 现在 **10 段 / 880 行**（BLIT / FILL / alpha / 图片合成 / 合成+ck / 单图 / 合成无 ck / 镜像+ck / 颜色合成 9 用例 / 不齐合成），最近一次 err=0 |
+| TB | ✅ 2026-10-17：**18 项里 17 项 PASS**（含端到端 `tb_m2loopback` 的 **11 段 / 936 行任务**、err=0）；只剩 `tb_lineBuffer` 的期望模型还停在 1080p（`实测数据.md` §6）。`Combine/tb_combine` 是废件，已从 `run_regress.ps1` 移除 |
 | 综合 | ✅ `--flow map` PASS（只剩一条 SoC 自带的 `rsp_error has no driver` 老警告） |
+
+---
+
+## 6. 文件清单与分类（自研 / 拿来的）
+
+改之前先确认动的是哪一类：**自研模块按本规范写**；**拿来的模块保持原样**（只做参数配置）。
+
+### 6.1 自研（本规范适用）
+
+| 路径 | 模块 | 干什么 |
+|---|---|---|
+| `GamingPlayUnit_Top.v` | `GamingPlayUnit_Top` | 顶层：只连线 |
+| `Peripherial/GPU_2D/GPU_2D.v` | `GPU_2D` | 加速器顶层：四个域拼装 + 行模式锁存 |
+| `Peripherial/GPU_2D/cmd/*` | `CIUnpack` / `CmdBuffer` / `CmdChannel` / `CmdExec` | 命令域：CI 收下 → 拼命令 → FIFO → 逐行推进 |
+| `Peripherial/GPU_2D/pixel/DDR/*` | `DDRSource` / `DDRUnpacker` | 源①：DDR 读 + 拆像素 |
+| `Peripherial/GPU_2D/pixel/palette/*` | `PaletteRAM` / `PaletteLUT` / `PaletteDecoder` / `PaletteSource` | 源②：片上素材 + 调色板 + 镜像 / 旋转 |
+| `Peripherial/GPU_2D/process/*` | `colorKey` / `alphaBlending` / `imageCombine` | 像素运算：ck / α / 合成 + 色调 |
+| `Peripherial/GPU_2D/factory/*` | `Factory` / `Compositor` / `DDRPacker` / `WriteController` | 选路 → 打包 → 写 |
+| `Peripherial/GPU_2D/interface/*` | `AXIMastersHandler` / `GPU2D_APBHandler` | AXI 主口 + APB 寄存器 |
+| `Peripherial/GPU_2D/lineBuffer/*` | `lineBuffer` / `bufferControler` / `bufferUnpacker` | 显示通道（**本规范的基准样板**） |
+| `Peripherial/GPU_2D/lineBuffer/PingPongBuffer/*` | `async_PingPongBuffer` / `async_fifo` / `BlockRAM` | 跨域双 bank |
+| `Peripherial/APB0/*` | `APB0_Decoder` / `APB0_Interconnect` / `APB0_GPU_2D` / `APB0_key` | APB 子系统 |
+| `Peripherial/AXI4/Master/*` | `AXI4_Master` / `AXI4_Master_Read` / `AXI4_Master_Write` | AXI4 主口 |
+
+### 6.2 拿来的（保持原样）
+
+| 路径 | 来源 | 备注 |
+|---|---|---|
+| `Peripherial/GPU_2D/lineBuffer/HDMI/*` | 官方 HDMI 例程 | 只在 `pixel_timing.v` 用 `define` 选分辨率；`TMDS/*` 一个字节没动（**像素通路靠综合，不许碰**） |
+| `Peripherial/AXI4/Axi_Mux.v` | 官方多主汇聚 IP | ★ **登记为规范例外**：全文是 `wire x = y;` 一行一根线的写法，按本规范重排等于重写，风险大于收益 |
+| `ddr3_controller/**` | 官方 DDR3 控制器 | 只做参数配置，不进去改 |
+| `template/APBX_InterfaceTemp.v` | 官方 APB 从设备模板 | **不参与综合**，当参考样例留着 |
+
+> ★ 判据：**综合报告里出现、并且被 `GamingPlayUnit.xml` 列进设计文件**的才守本规范；
+> 拿来的只守两条 —— ① 不改内部；② 只在顶层做参数配置。
+
+---
+
+## 7. 版本
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v1.2 | 2026-10-17 | 新增 §6 文件清单与分类（自研 / 拿来的 / 规范例外 `Axi_Mux`）；§5 状态更新到 17/18 TB 全绿 |
+| v1.1 | 2026-10-11 | §4 纪律补 5 条（TB 过 ≠ 能综合、别用脚本批量改 RTL、`case` 不许重复项、乘法器要 mux 共用、按趟选不能用旧 `pass_r`）|
+| v1.0 | 2026-10-11 | 建立：命名 / 文件结构 / 顶层只连线 / 改 RTL 的纪律 |

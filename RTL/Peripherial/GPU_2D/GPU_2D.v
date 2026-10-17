@@ -36,7 +36,10 @@
 
 module GPU_2D #(
     parameter FIFO_AW       = 9,                    // 命令队列深度 = 2^9 = 512 条
-    parameter LINE_BYTES    = 5760,                 // 单段行宽（全屏 1920×3）
+    parameter LINE_BYTES    = 5760,                 // GPU 写入的物理行跨度
+    parameter FRAME_LINES   = 1080,                 // 可见帧行数（720p 窗口为 720）
+    parameter DISPLAY_LINE_BYTES = 3840,            // 显示每行实际读取的字节数（1280×3）
+    parameter DISPLAY_ROW_STRIDE = 5760,            // 显示 DDR 下一行地址步进
     parameter AXI_ADDR_WIDTH= 32,
     parameter AXI_DATA_WIDTH= 128,
     parameter AXI_STRB_WIDTH= AXI_DATA_WIDTH/8,
@@ -679,7 +682,10 @@ lineBuffer #(
     .AXI_STRB_WIDTH                     (AXI_STRB_WIDTH),
     .AXI_ID_WIDTH                       (AXI_ID_WIDTH  ),
     .AXI_LEN_WIDTH                      (AXI_LEN_WIDTH ),
-    .AXI_ID                             (8'h00)
+    .AXI_ID                             (8'h00),
+    .LINE_BYTES                         (DISPLAY_LINE_BYTES),
+    .ROW_STRIDE_BYTES                   (DISPLAY_ROW_STRIDE),
+    .FRAME_LINES                        (FRAME_LINES)
 ) u_lineBuffer (
     .clk                                (clk_acc),
     .clk_HDMI_x1                        (clk_HDMI_x1),

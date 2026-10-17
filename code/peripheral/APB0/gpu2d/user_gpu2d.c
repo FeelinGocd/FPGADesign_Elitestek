@@ -126,7 +126,7 @@ void gpu2d_exclusive_begin(void)
 /** @brief 大块绘制收尾: 等画完, 再放开显示(取数从帧边界重新对齐)。 */
 int gpu2d_exclusive_end(u32 target)
 {
-    int r = gpu2d_waitCmdDone(target, 500000);   /* 等这一批真的画完 */
+    int r = gpu2d_waitCmdDone(target, 3000000);   /* 等这一批真的画完 */
     lineBuffer_enable(1);                        /* 再放开显示 */
     return r;
 }

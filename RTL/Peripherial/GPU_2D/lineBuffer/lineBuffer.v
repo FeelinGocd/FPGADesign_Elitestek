@@ -25,7 +25,10 @@ module lineBuffer #(
     parameter AXI_STRB_WIDTH    = AXI_DATA_WIDTH/8,
     parameter AXI_ID_WIDTH      = 8,
     parameter AXI_LEN_WIDTH     = 8,
-    parameter AXI_ID            = {AXI_ID_WIDTH{1'b0}}
+    parameter AXI_ID            = {AXI_ID_WIDTH{1'b0}},
+    parameter LINE_BYTES        = 3840,
+    parameter ROW_STRIDE_BYTES  = 5760,
+    parameter FRAME_LINES       = 1080
 )(
     input  wire                         clk,
     input  wire                         clk_HDMI_x1,
@@ -227,7 +230,10 @@ assign  lineBuffer_frame_start = (rd_frame_start_flip_dd != wr_frame_start_r);
 bufferControler # (
     .AXI_ADDR_WIDTH             (AXI_ADDR_WIDTH),
     .AXI_DATA_WIDTH             (AXI_DATA_WIDTH),
-    .AXI_LEN_WIDTH              (AXI_LEN_WIDTH)
+    .AXI_LEN_WIDTH              (AXI_LEN_WIDTH),
+    .LINE_BYTES                 (LINE_BYTES),
+    .ROW_STRIDE_BYTES           (ROW_STRIDE_BYTES),
+    .FRAME_LINES                (FRAME_LINES)
   ) u_bufferControler (
     .clk                        (clk),
     .rst_n                      (rst_n_wr),

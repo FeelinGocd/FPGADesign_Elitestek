@@ -11,7 +11,7 @@
 * @brief 显示通道 lineBuffer 外设 —— 对外 API(实现见 user_lineBuffer.c)。
 *
 * DDR 里放几块帧缓存, FPGA 自己按行取数 -> 跨时钟双 bank 缓冲 -> 24bit 像素
-* -> 真 1080p60 TMDS 到 HDMI。CPU 只管: 定基址 / 交帧(写 DONE) / 开使能 / 看帧率。
+ * -> 真 1280x720 TMDS 到 HDMI。CPU 只管: 定基址 / 交帧(写 DONE) / 开使能 / 看帧率。
 *
 * 地址: APB0 窗口 0xf8100000 的槽 2 内【显示子块】0x2040 ~ 0x206F(显示侧 PADDR[6]=1):
 *   0x2040 ID(RO 恒 0x4C423031) | 0x2044~0x2050 A/B 半幅基址 x4 | 0x2054/0x2058 C/D 全屏基址
@@ -19,7 +19,7 @@
 *   0x2070 IRQ_FRAME_EVT | 0x2074 IRQ_FRAME_EN | 0x2078 CKEY_COLOR(颜色键控的键色)
 *   同槽 0x2000 ~ 0x201F 是加速器观测寄存器(user_gpu2d.h)。
 *
-* 帧缓存格式(最容易写错的地方): 1920 x 1080, 每像素 3 字节, 行距固定 5760, 行间无 padding。
+ * 帧缓存格式: 可见窗口 1280 x 720；物理行距仍固定 5760 字节，行间无 padding。
 *   字节顺序是【B, G, R】—— 地址最低那个字节是"蓝"(RTL: TMDS 把 [23:16] 当红)。
 *   红蓝反了、或者整体偏几列, 基本都是这里写错了。
 *
@@ -44,13 +44,13 @@
 #define LINEBUFFER_ST_SPLIT     0x00000002u     /* bit1 分屏(帧边界才生效) */
 
 /*------------------------------------------------------------------------------
- * 帧缓存几何(和 RTL 里写死的 5760/1080 必须一致)
+ * 帧缓存几何（可见宽高与 RTL 的 720 行一致；物理行距仍为 5760）
  *----------------------------------------------------------------------------*/
-#define LINEBUFFER_WIDTH        1920u
-#define LINEBUFFER_HEIGHT       1080u
+#define LINEBUFFER_WIDTH        1280u
+#define LINEBUFFER_HEIGHT       720u
 #define LINEBUFFER_LINE_BYTES   5760u                                   /* 1920 * 3 */
 #define LINEBUFFER_PIXEL_BYTES  3u
-#define LINEBUFFER_FRAME_BYTES  (LINEBUFFER_LINE_BYTES * LINEBUFFER_HEIGHT)  /* 6220800 */
+#define LINEBUFFER_FRAME_BYTES  (LINEBUFFER_LINE_BYTES * LINEBUFFER_HEIGHT)  /* 4147200 */
 /* 分屏半幅: 每幅 960 列, 行距 2880 字节, 一块约 2.97MB */
 #define LINEBUFFER_HALF_WIDTH       960u
 #define LINEBUFFER_HALF_LINE_BYTES  2880u                               /* 960 * 3 */

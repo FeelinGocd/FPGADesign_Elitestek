@@ -226,7 +226,7 @@ GPU2D_APBHandler #(
     .framea_base_addr           (framea_base_addr),
     .frameb_base_addr           (frameb_base_addr),
     .frame_full_base_addr       (frame_full_base_addr),
-    .done_acc                   (done_acc),
+    .done_gpu2d                 (done_acc),          // 端口已改名 done_acc -> done_gpu2d
     .done_cpu                   (done_cpu),
 
     .done_clr                   (done_clr),

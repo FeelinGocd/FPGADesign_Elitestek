@@ -158,6 +158,7 @@ WriteController u_dut (
     .cmd_wr_len     (cmd_wr_len),
     .cmd_wr_done    (cmd_wr_done),
     .cmd_wr_err     (cmd_wr_err),
+    .packer_mask       (16'hFFFF),          // 不开 ck：掩码全 1 = 改造前行为
     .packer_data       (packer_data),
     .packer_valid      (packer_valid),
     .wr_data        (wr_data),

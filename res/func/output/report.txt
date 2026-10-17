@@ -1,32 +1,66 @@
-﻿输入目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character\bigfish, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\num, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\alpha, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet\effect, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\accessory
+﻿输入目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character\bigfish, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\character\TheBoss, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\num, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\Eng, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\alpha, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\background, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\base\specialEffect, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\bullet\effect, E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\pic\sprite\accessory
 输出目录 : E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek\res\func\output
-最大边   : 256   调色板: 256 色   实际用到: 80
-PRAM     : 每字 4 个索引, 共 10784 字 = 42.1 KB
+最大边   : 256   调色板: 256 色   实际用到: 91
+PRAM     : 每字 4 个索引, 共 20032 字 = 78.2 KB
 
   #  文件                          宽    高    跨距      字数      基址      透明      不透明纯白
-  0  bigfish_Get_accessory.     56   88    14    1232       0    2767          0
-  1  bigfish_walkDown_00_st     56   88    14    1232    1232    2302          0
-  2  bigfish_walkDown_02_ri     56   88    14    1232    2464    2108          0
-  3  bigfish_walkRight_00_s     56   88    14    1232    3696    2631          0
-  4  bigfish_walkRight_01_r     56   88    14    1232    4928    2511          0
-  5  bigfish_walkUp_00_stan     56   88    14    1232    6160    2653          0
-  6  bigfish_walkUp_01_righ     56   88    14    1232    7392    2664          0
-  7  num0_16x24.png             16   24     4      96    8624     144          0
-  8  num1_16x24.png             16   24     4      96    8720     205          0
-  9  num2_16x24.png             16   24     4      96    8816     162          0
- 10  num3_16x24.png             16   24     4      96    8912     170          0
- 11  num4_16x24.png             16   24     4      96    9008     206          0
- 12  num5_16x24.png             16   24     4      96    9104     168          0
- 13  num6_16x24.png             16   24     4      96    9200     197          0
- 14  num7_16x24.png             16   24     4      96    9296     223          0
- 15  num8_16x24.png             16   24     4      96    9392     144          0
- 16  num9_16x24.png             16   24     4      96    9488     197          0
- 17  minecraft_glass.png        32   32     8     256    9584     740          0
- 18  bullet_type_A.png          24   24     6     144    9840     368          0
- 19  bullet_type_B_chiliFri     24   24     6     144    9984     401          0
- 20  effect_fire.png            24   24     6     144   10128     453          0
- 21  accessory_base.png         32   32     8     256   10272     852          0
- 22  accessory_chili.png        32   32     8     256   10528     813          0
+  0  bigfish_Get_accessory.     56   72    14    1008       0    1571          0
+  1  bigfish_Get_hurt.png       56   72    14    1008    1008    1658          0
+  2  bigfish_walkDown_00_st     56   72    14    1008    2016    1748          0
+  3  bigfish_walkDown_01_Ri     56   72    14    1008    3024    1629          0
+  4  bigfish_walkRight_00_s     56   72    14    1008    4032    2024          0
+  5  bigfish_walkRight_01_r     56   72    14    1008    5040    1896          0
+  6  bigfish_walkRight_02_l     56   72    14    1008    6048    1870          0
+  7  bigfish_walkUp_00_stan     56   72    14    1008    7056    2056          0
+  8  bigfish_walkUp_01_righ     56   72    14    1008    8064    1994          0
+  9  TheBoss_00_StandUp.png     80   96    20    1920    9072    4390          0
+ 10  TheBoss_01_StandUp.png     80   96    20    1920   10992    4764          0
+ 11  TheBoss_02_StandUp.png     80   96    20    1920   12912    5031          0
+ 12  num0_16x24.png             16   24     4      96   14832     144          0
+ 13  num1_16x24.png             16   24     4      96   14928     205          0
+ 14  num2_16x24.png             16   24     4      96   15024     162          0
+ 15  num3_16x24.png             16   24     4      96   15120     170          0
+ 16  num4_16x24.png             16   24     4      96   15216     206          0
+ 17  num5_16x24.png             16   24     4      96   15312     168          0
+ 18  num6_16x24.png             16   24     4      96   15408     197          0
+ 19  num7_16x24.png             16   24     4      96   15504     223          0
+ 20  num8_16x24.png             16   24     4      96   15600     144          0
+ 21  num9_16x24.png             16   24     4      96   15696     197          0
+ 22  English_A.png              16   24     4      96   15792     228          0
+ 23  English_B.png              16   24     4      96   15888     152          0
+ 24  English_C.png              16   24     4      96   15984     222          0
+ 25  English_D.png              16   24     4      96   16080     174          0
+ 26  English_E.png              16   24     4      96   16176     176          0
+ 27  English_F.png              16   24     4      96   16272     216          0
+ 28  English_G.png              16   24     4      96   16368     198          0
+ 29  English_H.png              16   24     4      96   16464     184          0
+ 30  English_I.png              16   24     4      96   16560     216          0
+ 31  English_J.png              16   24     4      96   16656     226          0
+ 32  English_K.png              16   24     4      96   16752     204          0
+ 33  English_L.png              16   24     4      96   16848     256          0
+ 34  English_M.png              16   24     4      96   16944     210          0
+ 35  English_N.png              16   24     4      96   17040     159          0
+ 36  English_O.png              16   24     4      96   17136     216          0
+ 37  English_P.png              16   24     4      96   17232     206          0
+ 38  English_Q.png              16   24     4      96   17328     202          0
+ 39  English_R.png              16   24     4      96   17424     168          0
+ 40  English_S.png              16   24     4      96   17520     204          0
+ 41  English_T.png              16   24     4      96   17616     256          0
+ 42  English_U.png              16   24     4      96   17712     226          0
+ 43  English_V.png              16   24     4      96   17808     270          0
+ 44  English_W.png              16   24     4      96   17904     234          0
+ 45  English_X.png              16   24     4      96   18000     225          0
+ 46  English_Y.png              16   24     4      96   18096     259          0
+ 47  English_Z.png              16   24     4      96   18192     216          0
+ 48  minecraft_glass.png        32   32     8     256   18288     740          0
+ 49  minecraft_wood.png         32   32     8     256   18544       0          0
+ 50  SpecialEffect_health.p     24   24     6     144   18800     402          0
+ 51  SpecialEffect_subtract     24   24     6     144   18944     456          0
+ 52  bullet_type_A.png          24   24     6     144   19088     368          0
+ 53  bullet_type_B_chiliFri     24   24     6     144   19232     401          0
+ 54  effect_fire.png            24   24     6     144   19376     453          0
+ 55  accessory_base.png         32   32     8     256   19520     770          0
+ 56  accessory_chili.png        32   32     8     256   19776     766          0
 
 ck(键色=白): 不透明纯白必须为 0, 否则那些像素会被抠掉。
 
@@ -34,9 +68,11 @@ alpha 混合: palette.hex 一项 = AARRGGBB(α 在高字节), α 取该索引下
             索引 0 是键色(白), 它的 α 强制为 0。
   α 档位: [0, 128, 255]    半透明(0/255 之外)的索引: 7 个
 
-同一个颜色占了多个索引(拆出来的 5 项):
-    #fcfcfc   索引 17 → 1   α=128
-    #c1f5fe   索引 24 → 2   α=128
-    #d4632f   索引 104 → 3   α=128
-    #fcb100   索引 66 → 4   α=128
-    #fcf500   索引 43 → 5   α=128
+同一个颜色占了多个索引(拆出来的 7 项):
+    #fcfcfc   索引 18 → 1   α=128
+    #df7126   索引 120 → 2   α=128
+    #fcf500   索引 54 → 3   α=128
+    #d6f3fe   索引 30 → 5   α=128
+    #effbf0   索引 47 → 6   α=128
+    #d5642d   索引 121 → 7   α=128
+    #fcb100   索引 78 → 8   α=128

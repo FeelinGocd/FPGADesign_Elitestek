@@ -61,6 +61,11 @@ static u32 ci_args(u32 src, u32 flags, u32 val)
     return ci_args_full(src, flags, val, 0u);
 }
 
+static u32 sprite_param(u32 stride, u32 rotate90)
+{
+    return (stride & 0xFFFu) | (rotate90 ? 0x00800000u : 0u);
+}
+
 /* 画布一行的字节数: 跟显示模式走(硬件那边同一套: 全屏 5760 / 分屏 2880) */
 static u32 ci_line_bytes(void)
 {
@@ -155,12 +160,13 @@ void CI_gpu2d_spriteRectCK(u32 asset_base, u32 stride,
 void CI_gpu2d_spriteAlpha(u32 asset_base, u32 dst_addr, u32 w, u32 h,
                           u32 stride, u32 extra)
 {
-    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    u32 rot = (extra & GPU2D_ROT90) != 0u;
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(rot ? h : w, rot ? w : h), dst_addr);
     (void)ci_args(asset_base,
                   GPU2D_MODE_ALPHA | GPU2D_MODE_SPRITE
                   | (extra & GPU2D_MODE_CKEY_EN)
                   | ((extra << 5) & 0x60u),
-                  stride);
+                  sprite_param(stride, rot));
 }
 
 void CI_gpu2d_spriteAlphaRect(u32 asset_base, u32 stride, u32 dst_fb,
@@ -179,14 +185,14 @@ void CI_gpu2d_spriteAlphaRect(u32 asset_base, u32 stride, u32 dst_fb,
 void CI_gpu2d_spriteFlip(u32 asset_base, u32 stride, u32 dst_fb,
                          u32 dx, u32 dy, u32 w, u32 h, u32 flip)
 {
-    u32 dst = dst_fb
-            + dy * ci_line_bytes()
-            + dx * LINEBUFFER_PIXEL_BYTES;
-
-    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst);
+    u32 dst = dst_fb + dy * ci_line_bytes() + dx * LINEBUFFER_PIXEL_BYTES;
+    u32 rot = (flip & GPU2D_ROT90) != 0u;
+    u32 out_w = rot ? h : w;
+    u32 out_h = rot ? w : h;
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(out_w, out_h), dst);
     (void)ci_args(asset_base,
                   GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | ((flip & 0x3u) << 5),
-                  stride);
+                  sprite_param(stride, rot));
 }
 
 void CI_gpu2d_spriteFlipCK(u32 asset_base, u32 stride, u32 dst_fb,
@@ -196,11 +202,12 @@ void CI_gpu2d_spriteFlipCK(u32 asset_base, u32 stride, u32 dst_fb,
             + dy * ci_line_bytes()
             + dx * LINEBUFFER_PIXEL_BYTES;
 
-    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst);
+    u32 rot = (flip & GPU2D_ROT90) != 0u;
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(rot ? h : w, rot ? w : h), dst);
     (void)ci_args(asset_base,
                   GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN
                   | ((flip & 0x3u) << 5),
-                  stride);
+                  sprite_param(stride, rot));
 }
 
 /*   —— 图片合成：两张 PRAM 素材图合成一张（硬件：process/imageCombine.v）——
@@ -235,4 +242,41 @@ void CI_gpu2d_combineRect(u32 base_addr, u32 base_stride, u32 base_flags,
 void CI_gpu2d_fence(void)
 {
     (void)ci_op(GPU2D_FID_FENCE, 0u, 0u);   /* FENCE: 宽高/地址都不用 */
+}
+
+/*   —— 图片合成 + 色调（颜色合成）：第 2 层不给素材图，改给一个颜色 ARGB ——
+ *   命令还是 3 条 CI，区别只在那一条"特效层"的 ARGS：
+ *       inputs_0        = 颜色 ARGB（A 可以不用，A=0）
+ *       flags[2:0]      = 3（纯色层）| flags[3]=1，再加需要的 ck/镜像位
+ *       param[23:21]    = 色调模式：1 插值染色 / 2 加光（饱和）/ 3 乘系数 / 4 正片叠底
+ *       param[20]       = 0（特效层在上）
+ *       param[19:12]    = 强度（0~255，浓度）
+ *       param[11:0]     = 0（纯色层不读素材，没有行跨距）
+ *   见 docs/spec/硬件_加速器.md §1.3.1 / §5.6 */
+void CI_gpu2d_combineTint(u32 base_addr, u32 base_stride, u32 base_flags,
+                          u32 argb, u32 strength, u32 tone,
+                          u32 dst_addr, u32 w, u32 h)
+{
+    /*   ★★ ck 位（flags[4]）必须【开着】：命令级 ck 开关取自最后一格（就是这一格），
+     *      而"到底写不写"由【下层那张图】的 ck 掩码说话（纯色层自己不带掩码）。
+     *      不开 ck 的话出口掩码恒 1 ⇒ 整块矩形（连精灵四周的透明处）都被染上色，
+     *      症状是"闪红闪出一个红方块、把背景擦掉"。*/
+    u32 fx_flags = GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN | 3u;
+    u32 fx_param = ((tone & 7u) << 21) | ((strength & 0xFFu) << 12);
+
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(w, h), dst_addr);
+    (void)ci_args_full(base_addr, base_flags, base_stride, 1u);   /* 底图：后面还有一层 */
+    (void)ci_args_full(argb, fx_flags, fx_param, 0u);             /* 纯色层（结束词） */
+}
+
+/* 合成 + 色调的坐标版（只有目的要换算地址） */
+void CI_gpu2d_combineTintRect(u32 base_addr, u32 base_stride, u32 base_flags,
+                              u32 argb, u32 strength, u32 tone,
+                              u32 dst_fb, u32 dx, u32 dy, u32 w, u32 h)
+{
+    u32 dst = dst_fb
+            + dy * ci_line_bytes()
+            + dx * LINEBUFFER_PIXEL_BYTES;
+
+    CI_gpu2d_combineTint(base_addr, base_stride, base_flags, argb, strength, tone, dst, w, h);
 }

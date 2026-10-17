@@ -68,8 +68,12 @@ PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #   ★ res/pic/_原始图/ 放的是没缩过的原图，**故意不列在这里**（不参与打包）。
 PIC_DIRS_DEFAULT = [
     PIC_DIR / "character" / "bigfish",          # 0..2  角色跑动帧
+    PIC_DIR / "character" / "TheBoss",          # Boss 动画帧
     PIC_DIR / "base" / "num",       # 3..12 数字 0-9（HUD / 菜单）
-    PIC_DIR / "alpha",              # 13     带 α 的素材（玻璃等）
+    PIC_DIR / "base" / "Eng",
+    PIC_DIR / "base" / "alpha",              # 13     带 α 的素材（玻璃等）
+    PIC_DIR / "base" / "background", # 房间地面/墙体材质
+    PIC_DIR / "base" / "specialEffect", # 受伤/状态特效
     PIC_DIR / "sprite" / "bullet", # 15     Token 子弹本体
     PIC_DIR / "sprite" / "bullet" / "effect", # 16  Token 效果层
     PIC_DIR / "sprite" / "accessory", # 17     道具底座与道具图层
@@ -110,7 +114,7 @@ TRANS_TH    = 128          # 原图 α 小于它就当"透明像素"：落成索
 THUMB       = 64           # 训练调色板时每张图缩到多大（越小越快，够用就行）
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
-SKIP_ASSET_NAMES = set()
+SKIP_ASSET_NAMES = {"TheBoss.png"}  # 设定原图，不进入游戏 PRAM
 
 
 def is_mirrored_character_left(name: str) -> bool:
@@ -120,6 +124,10 @@ def is_mirrored_character_left(name: str) -> bool:
     check is limited to the character directory so unrelated assets ending
     in ``_left`` are not silently removed.
     """
+    # The right-walk animation has authored left/right poses and both frames
+    # must stay in PRAM.  Down/up left poses continue to use FLIP_X.
+    if name == "bigfish_walkRight_02_left.png":
+        return False
     return name.startswith("bigfish_") and name.endswith("_left.png")
 
 

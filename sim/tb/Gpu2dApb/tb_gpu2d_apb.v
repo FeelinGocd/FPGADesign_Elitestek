@@ -81,7 +81,7 @@ APB0_gpu2d #(
     .framea_base_addr           (framea_base_addr),
     .frameb_base_addr           (frameb_base_addr),
     .frame_full_base_addr       (frame_full_base_addr),
-    .done_acc                   (done_acc),
+    .done_gpu2d                 (done_acc),          // 端口已改名 done_acc -> done_gpu2d（语义没变）
     .done_cpu                   (done_cpu),
     .busy_val                   (busy_val),
     .cmd_done_val               (cmd_done_val),
@@ -162,7 +162,7 @@ initial begin
 
     // ---- 2) 子块内的洞 ----
     apb_read(12'h020);  check("0x2020 报错    ", {31'd0, err}, 32'd1);
-    apb_read(12'h070);  check("0x2070 报错    ", {31'd0, err}, 32'd1);
+    apb_read(12'h07C);  check("0x207C 是洞, 报错", {31'd0, err}, 32'd1);   // 0x2070 早就是 IRQ_FRAME_EVT, 洞挪到 0x207C
 
     // ---- 3) 高位非零: 不许别名 ----
     apb_read(12'h080);  check("0x2080 报错    ", {31'd0, err}, 32'd1);

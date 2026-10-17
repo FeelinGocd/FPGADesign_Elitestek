@@ -51,6 +51,7 @@ module bufferControler #(
     parameter AXI_DATA_WIDTH    = 128,
     parameter AXI_LEN_WIDTH     = 8,
     parameter LINE_BYTES        = 5760,
+    parameter ROW_STRIDE_BYTES  = LINE_BYTES,
     parameter FRAME_LINES       = 1080,
     parameter LINE_WIDTH        = 11,
     parameter LINE_BEATS        = LINE_BYTES/(AXI_DATA_WIDTH/8)
@@ -100,8 +101,8 @@ module bufferControler #(
 localparam  BEAT_BYTES      = AXI_DATA_WIDTH/8;                     // 16
 localparam  SEG_BEATS_ALL   = LINE_BEATS;                           // 全屏: 360 拍
 localparam  SEG_BEATS_HALF  = LINE_BEATS/2;                         // 分屏: 180 拍
-localparam  SEG_STRIDE_ALL  = LINE_BYTES;                           // 全屏行距 5760
-localparam  SEG_STRIDE_HALF = LINE_BYTES/2;                         // 分屏行距 2880
+localparam  SEG_STRIDE_ALL  = ROW_STRIDE_BYTES;                     // 物理行距
+localparam  SEG_STRIDE_HALF = ROW_STRIDE_BYTES/2;                   // 分屏段使用各自半帧行距
 localparam  BEATS_W         = 10;                                   // 拍数位宽(≤512)
 localparam  ONE_BEAT        = {{(BEATS_W-1){1'b0}}, 1'b1};          // 拍数比较用的"1"
 

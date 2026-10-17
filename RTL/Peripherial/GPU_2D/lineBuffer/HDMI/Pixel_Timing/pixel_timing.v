@@ -1,9 +1,10 @@
 `timescale 1ns / 1ps
 
-`define VIDEO_1920_1080
+// 1280x720 game viewport; DDR physical row stride remains 5760 bytes.
+`define VIDEO_1280_720
+// `define VIDEO_1920_1080
 // `define VIDEO_1680_1050
 // `define VIDEO_1280_1024
-// `define VIDEO_1280_720
 // `define VIDEO_1024_768
 // `define VIDEO_800_600
 // `define VIDEO_640_480

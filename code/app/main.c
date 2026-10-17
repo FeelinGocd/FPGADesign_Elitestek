@@ -28,10 +28,8 @@
 #include "user_lineBuffer.h"
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"      /* APB 槽 2: 命令完成计数 / 带宽观测 */
-#include "demo_anim.h"       /* 动图 Demo: 双缓冲 + 脏区局部重放 */
-#include "demo_split.h"      /* 分屏对比 Demo: 左半硬件 / 右半纯 CPU (基础要求 3c) */
-#include "demo_glass.h"      /* alpha 玻璃背景 Demo: 玻璃用 alpha 平铺满屏(临时占位) */
-#include "demo_combine.h"    /* 图片合成 Demo: 两张 PRAM 素材图合成一张 */
+#include "compare_demo.h"      /* 分屏对比 Demo: 左半硬件 / 右半纯 CPU (基础要求 3c) */
+#include "game_demo.h"      /* alpha 玻璃背景 Demo: 玻璃用 alpha 平铺满屏(临时占位) */
 
 /*------------------------------------------------------------------------------
  * 跑哪个 Demo(改这一行就切换):
@@ -41,7 +39,7 @@
  *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
  *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
  *----------------------------------------------------------------------------*/
-#define DEMO_RUN_SEL     2       /* ★ 2 = 全屏玻璃（其中一个移动色块换成了合成图） */
+#define DEMO_RUN_SEL     2       /* 1 = GPU/CPU 分屏对比；2 = 游戏 demo */
 
 /* LED 点亮极性: 0 = 高电平点亮(写 1 亮) / 1 = 低电平点亮(写 0 亮) */
 #define LED_ACTIVE_LOW   0
@@ -88,7 +86,7 @@ void crash(){
 ////////////////////////////////////////////////////////////////////////////////
 // 主流程:
 //   ① 初始化自测: 读回 4 个外设 ID, 一次把【APB 总线 / 槽位译码 / CI】三条通路查完
-//   ② 动图 Demo : 显示通道初始化 + demo_anim_run()
+//   Demo 入口：GPU/CPU 对比或游戏 demo
 //   之后进主循环: 按键控制显示 / LED 反映状态
 //   (原来那 7 种上板自测的代码已移除, 留档在 docs/spec/软件_驱动与API.md §7)
 ////////////////////////////////////////////////////////////////////////////////
@@ -179,79 +177,13 @@ void main(){
          *   1) 分屏对比: 左半硬件/右半 CPU(基础要求 3c) —— 它会自己切到 split
          *   2) alpha 玻璃背景: 玻璃用 alpha 平铺满屏, 最左一条用 ck 做对照
          *   ★ 演示期间别按 KEY0(切分屏会换翻页几何) / KEY3(会把显示关掉) */
-#if   (DEMO_RUN_SEL == 1)
-        demo_split_run();
-#elif (DEMO_RUN_SEL == 2)
-        demo_glass_run();
-#elif (DEMO_RUN_SEL == 3)
-        demo_combine_run();
+#if (DEMO_RUN_SEL == 1)
+        compare_demo_run();
 #else
-        demo_anim_run();
+        game_demo_run();
 #endif
     }
 
-    /* ================= ③ 按键 + LED =================
-     *   KEY0 = 全屏/分屏(下一个帧边界换几何, 不该撕裂)
-     *   KEY1/KEY2 = 交帧 acc/cpu(下一个帧边界翻页, 画面整体一次换完)
-     *   KEY3 = ENABLE 开关(关掉立刻停在当前行, 屏上保持最后一帧不动)
-     *   LED3 = ENABLE, LED2 = SPLIT(其余两位不用) */
-    bsp_printf("\r\n按键: KEY0=全屏/分屏  KEY1=交帧(acc)  KEY2=交帧(cpu)  KEY3=ENABLE开关\r\n");
-    bsp_printf("LED: LED3=ENABLE  LED2=SPLIT\r\n");
-
-    gpio_setOutputEnable(GPIO0, 0xF);
-
-    u32 last = 0xFFFFFFFF;      // 给个不可能的值,保证第一次一定打印
-    while(1){
-        u32 st   = key_getData();
-        u32 down = st & ~last;  // 软件做沿检测: 只认"刚按下"那一下
-
-        if(down & 0x1u){                            /* KEY0: 切全屏/分屏 */
-            u32 spl = lineBuffer_isSplit() ? 0u : 1u;
-            lineBuffer_setSplit(spl);
-            bsp_printf("KEY0 -> split=%d (下一个帧边界生效)\r\n", spl);
-
-            /* ★ 必须等硬件把新模式锁进去再画: isSplit() 读的是【待生效】值, setSplit() 后
-             *   软件立刻是新值, 而硬件要到【下一个帧边界】才换几何; 中间这十几毫秒两边跨距
-             *   不一致, 软件按新跨距算地址、硬件按旧跨距逐行递推, 块会被抹成两列错行。
-             *   等 20ms > 一帧(16.7ms) 即可。 */
-            bsp_uDelay(20000);
-
-            /* 切完模式按【新模式】重画一块, 验"加速器跟着显示模式走": 基址是软件给的、硬件
-             *   只补跨距(5760 <-> 2880), 所以必须软件重画才看得出对错。判据: 分屏下跨距若
-             *   对不上, 块会被抹成斜条纹而不是矩形。
-             * 两个候选缓冲都画, 不用管当前显示哪一块; 全屏那支不画任何东西 —— 标记块会被
-             * 动图当成"花屏残留"(脏区永远碰不到它), 所以没有 else。 */
-            if(spl){
-                CI_gpu2d_fillRect(LB_A_L, 300u, 200u, 200u, 100u, 0x0000FF00u);
-                CI_gpu2d_fillRect(LB_B_L, 300u, 200u, 200u, 100u, 0x0000FF00u);
-            }
-        }
-        if(down & 0x2u){                            /* KEY1: 交帧(acc) */
-            lineBuffer_doneGpu2d();
-            bsp_printf("KEY1 -> doneGpu2d, 0x206C 立刻回读=%d\r\n", lineBuffer_getDoneGpu2d());
-        }
-        if(down & 0x4u){                            /* KEY2: 原功能=交帧(cpu) */
-            /* ★ 暂时屏蔽: 动图 Demo 现在用 KEY2 做"暂停/继续", 这条先关掉。
-             *   要恢复就把下面两行解开。 */
-            /* lineBuffer_doneCpu();
-               bsp_printf("KEY2 -> doneCpu\r\n"); */
-        }
-        if(down & 0x8u){                            /* KEY3: 开关使能 */
-            u32 en = lineBuffer_isEnabled() ? 0u : 1u;
-            lineBuffer_enable(en);
-            bsp_printf("KEY3 -> enable=%d\r\n", en);
-        }
-
-        // LED: 高两位常显状态
-        gpio_setOutput(GPIO0, LED_DRIVE((lineBuffer_isEnabled() ? 0x8u : 0x0u) |
-                                        (lineBuffer_isSplit()   ? 0x4u : 0x0u)));
-
-        // 按键状态变了就在串口打一行(保留原来的观测)
-        if(st != last){
-            bsp_printf("  key = 0x%x\r\n", st);
-            last = st;
-        }
-
-        bsp_uDelay(POLL_US);
-    }
+    /* Demo owns the game controls.  No legacy frame-switch loop follows. */
+    while(1) bsp_uDelay(1000000u);
 }

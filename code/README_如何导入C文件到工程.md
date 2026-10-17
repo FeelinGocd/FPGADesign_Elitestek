@@ -36,7 +36,7 @@ code/                        ← 给「最终工程」逐步积累
 
 res/example/<编号>_<名字>/    ← 里程碑快照（换台设备能复现）
 ├── RTL/                     该里程碑的 RTL
-├── Code/                    main.c / userDef.h / makefile
+├── Code/                    main.c / userDef.h / game_demo.* / compare_demo.* / makefile
 └── project/project.peri.xml 该里程碑的引脚约束
 ```
 
@@ -44,7 +44,7 @@ res/example/<编号>_<名字>/    ← 里程碑快照（换台设备能复现）
 |---|---|
 | `code/peripheral/` | `<工程>/peripheral/`（**保持同构**） |
 | 新增一个外设目录之后 | 在工程 `makefile` 的 `INC` 列表补一行 `-Iperipheral/APB0/<名字>`（`SRCS` 是 wildcard，`.c` 会自动收进来） |
-| 应用代码 main.c / userDef.h | `<工程>/src/` |
+| 应用代码（`main.c` / `userDef.h` / `IRQ_frame.*` / `game_demo.*` / `compare_demo.*`） | `<工程>/src/` |
 | makefile 模板 | `<工程>/makefile` |
 
 > **应用代码从哪来？**
