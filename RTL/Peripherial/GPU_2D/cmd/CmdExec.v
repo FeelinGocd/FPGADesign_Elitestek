@@ -130,7 +130,7 @@ localparam  CMD_FENCE       = 3'd3;
 localparam  MODE_FILL       = 3'd0;             // 纯色：不要源
 localparam  MODE_REPLACE    = 3'd1;             // 覆盖：源①（DDR 读回的那一路）
 localparam  MODE_ALPHA      = 3'd2;             // ★ alpha 混合：源①(读回的目的) + 源②(调色板精灵)
-localparam  MODE_CKEY       = 3'd3;             // 颜色键控：同 alpha —— 以后
+localparam  MODE_CKEY       = 3'd3;             // 纯色层标记（颜色合成的第 2 层）
 
 //   本模块现在只用【第 1 格】（= 第 1 条参数 = 原图那一份），
 //   所以格宽就是下面的字面位数，第 2 格（特效）等合成做的时候从 cmd_*[31:16] 之类取

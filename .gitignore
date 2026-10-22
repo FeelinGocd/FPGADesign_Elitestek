@@ -15,15 +15,25 @@ docs/spec/_归档/
 #     ★ project/ 整个不入库：它读的是 RTL/，本身可以由工程向导重建
 project/
 *.lock
+# ★ 例外：uv 的锁文件要入库（别人 clone 下来是同一套依赖）
+!uv.lock
 
 # ── 官方参考工程大压缩包（约 1.3 GB）────────────────────────────────────────
 docs/易灵思资料/参考工程包/Demo
 docs/易灵思资料/参考工程包/Ti60F225_DemoBoard_v4
+docs/比赛汇报
 
 res/pic/character/_基础设定
 res/pic/character/_preview
+res/func/output
 # ── 仿真：TB 源码要入库，只忽略 ModelSim 的生成物和临时目录 ─────────────────
 sim
+
+# ── Python 环境（uv 建的虚拟环境 + 缓存；pyproject.toml / uv.lock 入库）──────
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
 
 # ── 压缩包一律不入库（大文件 / 参考包 / 工具包，走群文件或网盘）─────────────
 *.zip

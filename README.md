@@ -44,7 +44,8 @@ FPGADesign_Elitestek/
 │  │  ├─ GamingPlayUnit.xml      设计文件表（指向仓库 ../../RTL/）
 │  │  ├─ hex/                    ★ 素材初值（assets.hex / palette.hex，$readmemh 按工程目录找）
 │  │  └─ embedded_sw/.../standalone/GamingPlayUnit/
-│  │        src/                 应用（main.c / game_demo / compare_demo / IRQ_frame）
+│  │        src/                 应用入口（main.c / game_demo.h / compare_demo / IRQ_frame）
+│  │        game/                ★ 游戏 demo 按功能拆分（game.h + 状态/世界/HUD/角色/子弹/Boss/道具/主循环）
 │  │        peripheral/          驱动（APB0 的 key / lineBuffer / gpu2d，CInstruction）
 │  │        makefile              这份是模板版（★ IDE 向导生成的那份不含 peripheral/）
 │  └─ verified/                  已验证工程归档（不再改动）
@@ -98,8 +99,13 @@ FPGADesign_Elitestek/
 ## 素材怎么加（`res/func/pic2pram.py`）
 
 ```
-python res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（新目录要加进脚本的 PIC_DIRS_DEFAULT）
+uv sync                                # 第一次 / 换机器：建 .venv 并装依赖（pyserial / pillow）
+uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（新目录要加进脚本的 PIC_DIRS_DEFAULT）
 ```
+
+> PC 侧的 Python 工具统一用 **uv** 管理：依赖声明在仓库根的 `pyproject.toml`，锁文件 `uv.lock` 入库。
+> 编辑器（VS Code）请把解释器选成 **`.venv\Scripts\python.exe`**（`.vscode/settings.json` 里已经配好默认值），
+> 否则 `import serial` / `from PIL import Image` 会报"无法解析导入"。
 
 产物：`assets.hex`（PRAM 初值）、`palette.hex`（一项 = `AARRGGBB`）、`assets_desc.h`（C 侧素材表，用 `ASSET_*` 名字）、
 `report.txt`（这次转换的账）、`preview_*.png`（量化后的预览）。脚本会顺手把这些放到：
@@ -119,7 +125,7 @@ python res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 4. **不透明区里不许有纯白**（键色是白，会被 ck 抠掉）—— 脚本会自检，不合格直接报错。
 5. **朝左的帧不用画**：命名带 `_left` 的会被跳过，要用时开 `FLIP_X`。
 
-当前用量：**57 张素材、PRAM 20032 / 32768 字（61%）、调色板 91 / 256 项**（`res/func/output/report.txt`）。
+当前用量：**75 张素材、PRAM 24032 / 32768 字（73%）、调色板 143 / 256 项**（`res/func/output/report.txt`，2026-10-22 新增 shop 门与 MagicCard 后重跑）。
 
 ---
 
@@ -146,9 +152,10 @@ python res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 | OpenOCD | 0.11.0+dev | IDE 自带 | `EfinityRISCV\openocd` |
 | ModelSim | SE-64 10.5 | 本机 | `sim/tb/run_tb.ps1 -TbDir <目录> -TbTop <顶层>` |
 | 开发板驱动 / 下载工具 | — | 群文件 | 见 `tools/JTAG_UART_驱动问题排查.md` |
+| **uv**（PC 侧 Python 工具） | 0.11.x | astral.sh | 依赖看 `pyproject.toml`；`uv sync` 后 `uv run <脚本>` |
 
 > 命令行编固件：在 app 目录下 `make all BSP=efinix/EfxSapphireSoc`（工具链与 build_tools 要在 PATH 里），产物在 `build/`；
-> 烧 Flash 用 `build/<工程名>.hex`（当前约 40 KB，RAM 用 ~38 KB / 124 KB）。
+> 烧 Flash 用 `build/<工程名>.hex`（当前固件 ~66 KB，RAM 用 ~88 KB / 124 KB，约 69%）。
 > 仓库根有 `.vscode/`（编译器路径 / 头文件路径 / 编 . 清 . 打包任务），VS Code 打开仓库根就能直接跳转和编译。
 
 ---

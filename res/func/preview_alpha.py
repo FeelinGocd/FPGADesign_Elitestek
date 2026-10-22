@@ -1,7 +1,6 @@
-
 # -*- coding: utf-8 -*-
 """把一张素材按硬件那条公式叠在棋盘格上, 出几张不同 alpha 的对比预览。
-用法: python res/func/preview_alpha.py <png> [alpha1 alpha2 ...]
+用法: uv run res/func/preview_alpha.py <png> [alpha1 alpha2 ...]
 公式和硬件一致: out = bg + (fg - bg) * a / 255   (每通道, 整数, 四舍五入用 (p+1+(p>>8))>>8 同款)
 """
 import sys

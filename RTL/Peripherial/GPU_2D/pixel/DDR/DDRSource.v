@@ -174,7 +174,8 @@ wire [4:0]      shift;
 wire        my_line;
 assign      my_line  = (line_flags[2:0] == 3'd2)                      // ALPHA：要背景（读回目的自己）
                      | ((line_flags[2:0] == 3'd1) & ~line_flags[3]);  // REPLACE 且源是 DDR 帧：也要
-//   ★ mode 3 现在 = 【纯色层】（颜色合成的上层）：背景由下面那张图提供，读回目的没意义 ⇒ 不要。
+//   ★ mode 3 = CK 精灵 / 纯色层：**不要**读回目的行。
+//     它是"直写"模式，读回只会让每个精灵多一趟 DDR 读，帧内写不完就撕裂。
 //   ★ 模式表改动要三处一起改：本处 / PaletteSource（要 bit1）/ Compositor（要两位）。
 //   ★ 读哪一行：
 //       普通 BLIT = line_src_addr（命令给的源行）

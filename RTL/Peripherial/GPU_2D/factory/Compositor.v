@@ -127,6 +127,9 @@ function [1:0] src_en_of;
             MODE_REPLACE : src_en_of = pal_src ? 2'b10 : 2'b01;
             MODE_ALPHA   : src_en_of = 2'b11;
             MODE_CKEY    : src_en_of = 2'b10;   // ★ 纯色层（第 2 层 flags[2:0]=3）：只要源②，上层由合成级造
+                                                //   ★★【不要改成 2'b11】：mode 3 同时也是所有 CK 精灵的模式，
+                                                //      改成两路会让每个精灵都多读回一次目的行 —— 帧内写不完
+                                                //      ⇒ 画面撕裂/抽搐（2026-10-20 踩过，别再来一次）
             default      : src_en_of = 2'b00;
         endcase
     end

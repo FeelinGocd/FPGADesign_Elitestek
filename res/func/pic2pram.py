@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+#   用法（本仓库用 uv，依赖在仓库根的 pyproject.toml 里）：uv run res/func/pic2pram.py
 """
 pic2pram.py —— 把 res/pic 里的图片转成 2D 加速器【素材源】要用的初值文件
 
@@ -67,16 +68,17 @@ PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #   ★ 顺序 = 素材编号顺序：**新素材一律加在最后**，这样已有素材的编号不动。
 #   ★ res/pic/_原始图/ 放的是没缩过的原图，**故意不列在这里**（不参与打包）。
 PIC_DIRS_DEFAULT = [
-    PIC_DIR / "character" / "bigfish",          # 0..2  角色跑动帧
-    PIC_DIR / "character" / "TheBoss",          # Boss 动画帧
-    PIC_DIR / "base" / "num",       # 3..12 数字 0-9（HUD / 菜单）
+    PIC_DIR / "character" / "bigFish",         # 角色跑动帧
+    PIC_DIR / "character" / "TheBoss",         # Boss 动画帧
+    PIC_DIR / "base" / "num",       # 数字 0-9（HUD / 菜单）
     PIC_DIR / "base" / "Eng",
-    PIC_DIR / "base" / "alpha",              # 13     带 α 的素材（玻璃等）
-    PIC_DIR / "base" / "background", # 房间地面/墙体材质
+    PIC_DIR / "base" / "alpha",              # 带 α 的素材（玻璃等）
+    PIC_DIR / "base" / "background", # 房间地面/墙体材质（corner/doors/bedrock/wood 保持原编号）
     PIC_DIR / "base" / "specialEffect", # 受伤/状态特效
-    PIC_DIR / "sprite" / "bullet", # 15     Token 子弹本体
-    PIC_DIR / "sprite" / "bullet" / "effect", # 16  Token 效果层
-    PIC_DIR / "sprite" / "accessory", # 17     道具底座与道具图层
+    PIC_DIR / "character" / "bullet", # Token 子弹本体 / 效果层
+    PIC_DIR / "accessory", # 道具底座与道具图层
+    PIC_DIR / "character" / "mobs",   # 小怪（slime 2 帧）
+    PIC_DIR / "base" / "background_interact", # 新背景装饰：不挤占原有地砖/墙的编号
 ]
 OUT_DIR     = ROOT / "res" / "func" / "output"         # 产物（归档 + 给 C 用）
 #   ★ Efinity 综合时，$readmemh 的相对路径是按【工程目录】解析的 —— 工程里 SoC 自己
@@ -110,7 +112,7 @@ PRAM_WORDS  = 32768        # PRAM = 128KB = 32768 字 × 4 字节（BlockRAM: 32
 PIX_PER_WORD = 4           # 一个字装 4 个索引（32 位 / 8 位）
 PAL_ENTRIES = 256          # 调色板项数（8bpp）
 PAD_INDEX   = 0            # 行尾补齐用什么索引（0 = 调色板第 0 项 = 白且 α=0，天然透明）
-TRANS_TH    = 128          # 原图 α 小于它就当"透明像素"：落成索引 0（白 + α=0）
+TRANS_TH    = 1            # 只有原图 α=0 才进入透明索引；α=1..255 全部保留
 THUMB       = 64           # 训练调色板时每张图缩到多大（越小越快，够用就行）
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}

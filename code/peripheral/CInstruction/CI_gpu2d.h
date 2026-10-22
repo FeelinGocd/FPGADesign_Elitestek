@@ -48,7 +48,7 @@
 #define GPU2D_MODE_FILL     0
 #define GPU2D_MODE_REPLACE  1
 #define GPU2D_MODE_ALPHA    2           /* alpha 混合: 已实现, 见 docs/spec/硬件_加速器.md §5.3 */
-#define GPU2D_MODE_CKEY     3           /* 未实现 */
+#define GPU2D_MODE_CKEY     3           /* 纯色层标记（颜色合成的第 2 层就是它） */
 
 /* flags[3] = 源类型: 0 = DDR 里的 RGB888 帧, 1 = 片上 PRAM 的调色板素材。
  * 选 1 时颜色字段的含义换成【源行跨距】(单位: 字, 一个字 4 个索引)。 */

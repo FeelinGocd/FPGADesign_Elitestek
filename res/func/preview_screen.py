@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """按【真实生成的 assets.hex + palette.hex】离线渲染 demo_glass 会画出来的画面。
 产物:

@@ -28,18 +28,17 @@
 #include "user_lineBuffer.h"
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"      /* APB 槽 2: 命令完成计数 / 带宽观测 */
-#include "compare_demo.h"      /* 分屏对比 Demo: 左半硬件 / 右半纯 CPU (基础要求 3c) */
-#include "game_demo.h"      /* alpha 玻璃背景 Demo: 玻璃用 alpha 平铺满屏(临时占位) */
+#include "compare_demo.h"   /* 分屏对比 Demo: 左半加速器 / 右半纯 CPU（基础要求 3c） */
+#include "game_demo.h"      /* 游戏 demo: 四方向移动 + 子弹池 + Boss 弹幕 + 道具 + GUI */
 
 /*------------------------------------------------------------------------------
- * 跑哪个 Demo(改这一行就切换):
- *   0 = 全屏动图: 一张 sprite 素材左右跑(双缓冲 + 脏区 + ck + 镜像)
- *   1 = 分屏对比: 左半加速器 / 右半纯 CPU, 同一组方块比帧率(基础要求 3c)
- *   2 = alpha 玻璃背景: 玻璃素材用 alpha 混合平铺满屏 + 最左一条 ck 硬边对照
- *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
- *   3 = 图片合成: 两张 PRAM 素材图合成一张(图一底图 + 图二特效), 四格对照 + 读回自检
+ * 跑哪个 Demo（改这一行就切换，现在只有两个）:
+ *   1 = 分屏对比（compare_demo.c）: 左半加速器 / 右半纯 CPU，同一组方块比帧率（基础要求 3c）
+ *   2 = 游戏 demo（game_demo.c）: 四方向移动 + 子弹池 + Boss 弹幕 + 道具拾取 + 脏区重画 + GUI
+ *   ★ 2026-10-17：老的 demo_anim（动图）/ demo_combine（图片合成）已删除 —— 它们的功能
+ *     都被游戏 demo 覆盖（动图→游戏动画、合成→道具/角色叠层），留着只占 flash。
  *----------------------------------------------------------------------------*/
-#define DEMO_RUN_SEL     2       /* 1 = GPU/CPU 分屏对比；2 = 游戏 demo */
+#define DEMO_RUN_SEL     2       /* 1 = 分屏对比；2 = 游戏 demo */
 
 /* LED 点亮极性: 0 = 高电平点亮(写 1 亮) / 1 = 低电平点亮(写 0 亮) */
 #define LED_ACTIVE_LOW   0
@@ -162,26 +161,26 @@ void main(){
         /* --- 开"帧起始"中断: 让 CPU 在硬件帧边界那一刻被叫醒 -------------------
          *   这一版 ISR 先【只计数】: 用来确认"中断确实每个显示帧来一次"。
          *   确认之后再把这帧的绘制搬进 ISR。 */
-#if IRQ_FRAME_USE
-        IRQ_frame_init();
-        bsp_printf("IRQ: 帧起始中断已开(PLIC 号 %d), 先只看计数\r\n",
-                   SYSTEM_PLIC_USER_INTERRUPT_A_INTERRUPT);
-#else
-        bsp_printf("IRQ: 帧起始中断【关闭】(IRQ_FRAME_USE=0):\r\n");
-        bsp_printf("     0x2070/0x2074 是新 bitstream 才有的寄存器, 现在碰它会总线错误起不来。\r\n");
-        bsp_printf("     重新综合并烧好 FPGA 之后, 把 IRQ_frame.h 里的 IRQ_FRAME_USE 改成 1。\r\n");
-#endif
+        #if IRQ_FRAME_USE
+                IRQ_frame_init();
+                bsp_printf("IRQ: 帧起始中断已开(PLIC 号 %d), 先只看计数\r\n",
+                        SYSTEM_PLIC_USER_INTERRUPT_A_INTERRUPT);
+        #else
+                bsp_printf("IRQ: 帧起始中断【关闭】(IRQ_FRAME_USE=0):\r\n");
+                bsp_printf("     0x2070/0x2074 是新 bitstream 才有的寄存器, 现在碰它会总线错误起不来。\r\n");
+                bsp_printf("     重新综合并烧好 FPGA 之后, 把 IRQ_frame.h 里的 IRQ_FRAME_USE 改成 1。\r\n");
+        #endif
 
-        /* --- Demo(见文件头的 DEMO_RUN_SEL 开关) ---------------------------
-         *   0) 全屏动图: 双缓冲 + 脏区"局部重放"(规范 docs/spec/软件_驱动与API.md §6)
-         *   1) 分屏对比: 左半硬件/右半 CPU(基础要求 3c) —— 它会自己切到 split
-         *   2) alpha 玻璃背景: 玻璃用 alpha 平铺满屏, 最左一条用 ck 做对照
-         *   ★ 演示期间别按 KEY0(切分屏会换翻页几何) / KEY3(会把显示关掉) */
-#if (DEMO_RUN_SEL == 1)
-        compare_demo_run();
-#else
-        game_demo_run();
-#endif
+                /* --- Demo(见文件头的 DEMO_RUN_SEL 开关) ---------------------------
+                *   0) 全屏动图: 双缓冲 + 脏区"局部重放"(规范 docs/spec/软件_驱动与API.md §6)
+                *   1) 分屏对比: 左半硬件/右半 CPU(基础要求 3c) —— 它会自己切到 split
+                *   2) alpha 玻璃背景: 玻璃用 alpha 平铺满屏, 最左一条用 ck 做对照
+                *   ★ 演示期间别按 KEY0(切分屏会换翻页几何) / KEY3(会把显示关掉) */
+        #if (DEMO_RUN_SEL == 1)
+                compare_demo_run();
+        #else
+                game_demo_run();
+        #endif
     }
 
     /* Demo owns the game controls.  No legacy frame-switch loop follows. */
