@@ -311,8 +311,8 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
             g_assets[ASSET_bullet_type_A_base].base_word,
             g_assets[ASSET_bullet_type_A_base].stride_word,
             fb, (u32)b->x, (u32)b->y, BW, BH,
-            0x00FF4040u,   /* 红色 */
-            160u,          /* 浓度 0..255 */
+            0x00FF0000u,   /* 纯红 */
+            255u,          /* 浓度拉满：base 的白/蓝底不再透出来 */
             1u,            /* 插值染色 */
             bullet_flip(b, ASSET_bullet_type_A_base));
     } else {
