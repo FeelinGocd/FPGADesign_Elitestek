@@ -1,14 +1,14 @@
 //==============================================================================
-//  game_mob.c —— 当前房间的小怪（slime，2 帧动画）
+//  game_mob.c —— 当前房间的小怪（slime 2 帧 / bug 4 步）
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · 换房时 reset；第一次进房 spawn 2 只；2 帧循环、慢慢朝玩家跳。
-//    · 玩家子弹命中：扣 1 HP，3 发打死；清完后发房间清理奖励（0~5 coin）。
+//    · 换房时 reset；第一次进房生成 slime + bug；各自追玩家、接触扣血。
+//    · 玩家子弹命中：扣 1 HP；清完后发房间清理奖励（0~5 coin）。
 //    · 有怪时房间门锁死（game_room_door_open 查 game_mobs_alive）。
 //  上一级是谁  : game/game_main.c（每帧）、game/game_state.c（进房生成 / 清房奖励）
 //  接口契约    :
 //    · 固定 N_MOBS 槽；只服务【当前房间】，换房时整个池子清空。
-//    · 2 帧动画直接从 ms 时钟取，不占额外字段。
+//    · slime：2 帧 = 蹲/跳；bug：4 步 = 0, 1, 对称1, 0（第 3 帧用 FLIP_X）。
 //==============================================================================
 #include "game.h"
 #include "CI_gpu2d.h"
@@ -17,10 +17,17 @@
 #define MOB_W          32
 #define MOB_H          32
 #define MOB_HP         3
+#define BUG_HP         2
 #define MOB_BODY_X     5
 #define MOB_BODY_Y     12
 #define MOB_BODY_W     22
 #define MOB_BODY_H     18
+
+#define MOB_SLIME      0
+#define MOB_BUG        1
+
+#define BUG_MOVE_MS    30u          /* bug 每 30 ms 走 1 px */
+#define BUG_FRAME_MS   120u         /* bug 每 120 ms 换一帧 */
 
 static u32 s_seed;
 static int s_spawned;               /* 本房间已经生成过 slime（用于触发一次清房奖励） */
@@ -58,11 +65,36 @@ void game_mobs_spawn(int count)
 
         if (m->active) continue;
         m->active = 1;
+        m->type = MOB_SLIME;
         m->hp = MOB_HP;
+        m->frame = 0;
         m->x = (short)(ARENA_X0 + 64 + (int)(mob_rand() % (u32)(ARENA_X1 - ARENA_X0 - 128 - MOB_W)));
         m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
         m->move_next = game_ms() + 250u + (mob_rand() % 350u);
         m->hop_until = 0u;
+        ++n;
+    }
+    s_spawned = 1;
+}
+
+void game_mobs_spawn_bug(int count)
+{
+    int i, n = 0;
+
+    if (count <= 0) return;
+
+    for (i = 0; i < N_MOBS && n < count; ++i) {
+        mob_t *m = &g.mobs[i];
+
+        if (m->active) continue;
+        m->active = 1;
+        m->type = MOB_BUG;
+        m->hp = BUG_HP;
+        m->frame = 0;
+        m->x = (short)(ARENA_X0 + 64 + (int)(mob_rand() % (u32)(ARENA_X1 - ARENA_X0 - 128 - MOB_W)));
+        m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
+        m->move_next = game_ms() + 100u + (mob_rand() % 200u);
+        m->hop_until = game_ms() + BUG_FRAME_MS;
         ++n;
     }
     s_spawned = 1;
@@ -107,28 +139,56 @@ void game_mobs_step(u32 now)
 
         if (!m->active) continue;
 
-        /*  一跳：起跳瞬间真正位移 12 px，然后 180 ms 腾空（帧 1 + 抬升 6 px），
-         *    再落回帧 0 蹲 520~840 ms。2 帧因此是"蹲 → 跳"而不是原地蠕动。  */
-        if ((int)(now - m->move_next) >= 0) {
-            px = g.x + PW / 2;
-            py = g.y + PH / 2;
-            mx = m->x + MOB_W / 2;
-            my = m->y + MOB_H / 2;
-            dx = px - mx;
-            dy = py - my;
+        if (m->type == MOB_BUG) {
+            /*  bug：每 30 ms 朝玩家走 1 px；4 步动画 0, 1, 对称1, 0 */
+            if ((int)(now - m->move_next) >= 0) {
+                px = g.x + PW / 2;
+                py = g.y + PH / 2;
+                mx = m->x + MOB_W / 2;
+                my = m->y + MOB_H / 2;
+                dx = px - mx;
+                dy = py - my;
 
-            if (dx < 0) m->x -= 12;
-            else if (dx > 0) m->x += 12;
-            if (dy < 0) m->y -= 12;
-            else if (dy > 0) m->y += 12;
+                if (dx < -2) m->x -= 1;
+                else if (dx > 2) m->x += 1;
+                if (dy < -2) m->y -= 1;
+                else if (dy > 2) m->y += 1;
 
-            if (m->x < ARENA_X0) m->x = ARENA_X0;
-            if (m->x > ARENA_X1 - MOB_W) m->x = ARENA_X1 - MOB_W;
-            if (m->y < ARENA_Y0) m->y = ARENA_Y0;
-            if (m->y > ARENA_Y1 - MOB_H) m->y = ARENA_Y1 - MOB_H;
+                if (m->x < ARENA_X0) m->x = ARENA_X0;
+                if (m->x > ARENA_X1 - MOB_W) m->x = ARENA_X1 - MOB_W;
+                if (m->y < ARENA_Y0) m->y = ARENA_Y0;
+                if (m->y > ARENA_Y1 - MOB_H) m->y = ARENA_Y1 - MOB_H;
 
-            m->hop_until = now + 180u;
-            m->move_next = now + 520u + (mob_rand() % 320u);
+                m->move_next = now + BUG_MOVE_MS;
+            }
+            if ((int)(now - m->hop_until) >= 0) {
+                m->frame = (unsigned char)((m->frame + 1u) & 3u);
+                m->hop_until = now + BUG_FRAME_MS;
+            }
+        } else {
+            /*  一跳：起跳瞬间真正位移 12 px，然后 180 ms 腾空（帧 1 + 抬升 6 px），
+             *    再落回帧 0 蹲 520~840 ms。2 帧因此是"蹲 → 跳"而不是原地蠕动。  */
+            if ((int)(now - m->move_next) >= 0) {
+                px = g.x + PW / 2;
+                py = g.y + PH / 2;
+                mx = m->x + MOB_W / 2;
+                my = m->y + MOB_H / 2;
+                dx = px - mx;
+                dy = py - my;
+
+                if (dx < 0) m->x -= 12;
+                else if (dx > 0) m->x += 12;
+                if (dy < 0) m->y -= 12;
+                else if (dy > 0) m->y += 12;
+
+                if (m->x < ARENA_X0) m->x = ARENA_X0;
+                if (m->x > ARENA_X1 - MOB_W) m->x = ARENA_X1 - MOB_W;
+                if (m->y < ARENA_Y0) m->y = ARENA_Y0;
+                if (m->y > ARENA_Y1 - MOB_H) m->y = ARENA_Y1 - MOB_H;
+
+                m->hop_until = now + 180u;
+                m->move_next = now + 520u + (mob_rand() % 320u);
+            }
         }
 
         /*  接触伤害：只看 slime 的身体 vs 玩家肚子  */
@@ -163,7 +223,8 @@ static void mob_draw_one(u32 fb, u32 now, int buf, int i)
     g.old_mob[buf][i].y = m->y;
     if (!m->active) return;
 
-    /*  帧 1 只在腾空时显示；抛物线抬升最多 6 px。  */
+    /*  slime：帧 1 只在腾空时显示；抛物线抬升最多 6 px。
+     *  bug：4 步 0, 1, 对称1, 0；第 3 步用 FLIP_X 画 frame 1 的镜像。  */
     jumping = (int)(m->hop_until - now) > 0;
     if (jumping) {
         u32 t = 180u - (m->hop_until - now);      /* 0..180：这一跳已经过了多久 */
@@ -171,9 +232,27 @@ static void mob_draw_one(u32 fb, u32 now, int buf, int i)
         if (hop > 6u) hop = 6u;
     }
 
-    a = &g_assets[jumping ? ASSET_mobs_slime_01 : ASSET_mobs_slime_00];
-    CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
-                             (u32)m->x, (u32)((int)m->y - (int)hop), MOB_W, MOB_H, 0u);
+    if (m->type == MOB_BUG) {
+        u32 flip = 0u;
+        unsigned char f = (unsigned char)(m->frame & 3u);
+
+        if (f == 0u) {
+            a = &g_assets[ASSET_mobs_bug_00_standUp];
+        } else if (f == 1u) {
+            a = &g_assets[ASSET_mobs_bug_01_Right];
+        } else if (f == 2u) {
+            a = &g_assets[ASSET_mobs_bug_01_Right];
+            flip = GPU2D_FLIP_X;
+        } else {
+            a = &g_assets[ASSET_mobs_bug_00_standUp];
+        }
+        CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
+                                 (u32)m->x, (u32)m->y, MOB_W, MOB_H, flip);
+    } else {
+        a = &g_assets[jumping ? ASSET_mobs_slime_01 : ASSET_mobs_slime_00];
+        CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
+                                 (u32)m->x, (u32)((int)m->y - (int)hop), MOB_W, MOB_H, 0u);
+    }
 }
 
 void game_mobs_submit(void)

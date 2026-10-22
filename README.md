@@ -125,7 +125,7 @@ uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 4. **不透明区里不许有纯白**（键色是白，会被 ck 抠掉）—— 脚本会自检，不合格直接报错。
 5. **朝左的帧不用画**：命名带 `_left` 的会被跳过，要用时开 `FLIP_X`。
 
-当前用量：**75 张素材、PRAM 24032 / 32768 字（73%）、调色板 143 / 256 项**（`res/func/output/report.txt`，2026-10-22 新增 shop 门与 MagicCard 后重跑）。
+当前用量：**79 张素材、PRAM 24608 / 32768 字（75%）、调色板 145 / 256 项**（`res/func/output/report.txt`，2026-10-22 加 bug 敌怪后重跑）。
 
 ---
 
@@ -155,7 +155,7 @@ uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 | **uv**（PC 侧 Python 工具） | 0.11.x | astral.sh | 依赖看 `pyproject.toml`；`uv sync` 后 `uv run <脚本>` |
 
 > 命令行编固件：在 app 目录下 `make all BSP=efinix/EfxSapphireSoc`（工具链与 build_tools 要在 PATH 里），产物在 `build/`；
-> 烧 Flash 用 `build/<工程名>.hex`（当前固件 ~66 KB，RAM 用 ~88 KB / 124 KB，约 69%）。
+> 烧 Flash 用 `build/<工程名>.hex`（当前固件 ~68 KB，RAM 用 ~90 KB / 124 KB，约 71%）。
 > 仓库根有 `.vscode/`（编译器路径 / 头文件路径 / 编 . 清 . 打包任务），VS Code 打开仓库根就能直接跳转和编译。
 
 ---

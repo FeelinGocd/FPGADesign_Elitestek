@@ -54,7 +54,7 @@
 
 //==================== 玩法参数 ====================
 #define N_BULLETS 256
-#define N_MOBS     16                       /* 当前房间的小怪（slime） */
+#define N_MOBS     16                       /* 当前房间的小怪（slime / bug） */
 #define N_COINS    16                       /* 当前房间的清理奖励金币 */
 #define N_WEBS     8                        /* 普通房间的蜘蛛网（减速） */
 #define N_STONES   8                        /* 房间里的可交互石头（阻挡，不破坏） */
@@ -248,9 +248,11 @@ typedef struct { short x, y; unsigned char active; unsigned char type; } item_t;
 typedef struct {
     unsigned char active;
     unsigned char hp;
+    unsigned char type;         /* 0 = slime / 1 = bug */
+    unsigned char frame;        /* bug 动画 0..3：0,1,对称1,0 */
     short x, y;
-    u32 move_next;              /* 下一次起跳的时间 */
-    u32 hop_until;              /* 这一跳腾空到什么时候（帧 1 / 抬升都看它） */
+    u32 move_next;              /* 下一次起跳 / 下一次移动的时间 */
+    u32 hop_until;              /* slime：这一跳腾空到什么时候；bug：下一帧的时间 */
 } mob_t;
 typedef struct { unsigned char active; short x, y; } coin_t;
 typedef struct { unsigned char active; short x, y; } web_t;
@@ -560,7 +562,8 @@ void game_bullets_perf_fill(int count);
 //==================== 小怪 / 金币（game_mob.c / game_coin.c）====================
 void game_mobs_reset(void);                         /* 换房时清空当前房间的小怪 */
 void game_mobs_spawn(int count);                    /* 生成 count 只 slime */
-void game_mobs_step(u32 now);                        /* 2 帧动画 / 追玩家 / 接触扣血 / 清房 */
+void game_mobs_spawn_bug(int count);                /* 生成 count 只 bug（0,1,对称1,0 动画） */
+void game_mobs_step(u32 now);                        /* 动画 / 追玩家 / 接触扣血 / 清房 */
 void game_mobs_submit(void);
 int  game_mobs_alive(void);
 int  game_mobs_try_hit(int cx, int cy);              /* 玩家子弹命中一只 slime；1 = 命中 */

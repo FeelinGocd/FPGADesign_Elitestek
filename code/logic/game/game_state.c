@@ -211,7 +211,8 @@ void game_flow_enter_room(void)
     case ROOM_EMPTY:
         g.phase = PHASE_EXPLORE;
         if (!game_room_is_spawned(id) && !game_room_is_cleared(id)) {
-            game_mobs_spawn(2);             /* 每间普通房 2 只 slime */
+            game_mobs_spawn(1);             /* 普通房：1 只 slime */
+            game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
         }
         game_web_spawn(1 + (int)(game_ms() % 2u));   /* 普通房 1~2 张网 */
@@ -226,7 +227,8 @@ void game_flow_enter_room(void)
             /*  ★ 道具房：这一轮第一次进来才随机挑一个，放在【房间中心】 */
             game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
                                    (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
-            game_mobs_spawn(2);             /* 道具房也有 2 只 slime */
+            game_mobs_spawn(1);             /* 道具房：1 只 slime */
+            game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
             bsp_printf("ROOM: item (random #%d)\r\n", g.item.type);
         } else {
