@@ -167,21 +167,25 @@ wire [4:0]      shift;
 //   ★ 这一行要不要我 —— 我自己看 flags 决定（模式表见 硬件_加速器.md §1.3）：
 //       1 = REPLACE 且 flags[3]=0（源是 DDR 帧）      → 要
 //       2 = ALPHA（两路同时用）                       → 要（我是背景那一路）
+//       4 = TINT_ALPHA（纯色层 tint + AB）             → 要（我是背景那一路）
 //       3 = 纯色层（颜色合成的上层，见 §1.3.1）        → 不要（用不到背景读回）
 //       0 = FILL / 未定义模式 / REPLACE 但源是 PRAM    → 不要
 //     ★ 同一份判断在 PaletteSource（要 bit1）和 Compositor（要两位）各有一份，
 //       改模式表要一起改。
 wire        my_line;
 assign      my_line  = (line_flags[2:0] == 3'd2)                      // ALPHA：要背景（读回目的自己）
+                     | (line_flags[2:0] == 3'd4)                      // TINT_ALPHA：也要背景
                      | ((line_flags[2:0] == 3'd1) & ~line_flags[3]);  // REPLACE 且源是 DDR 帧：也要
 //   ★ mode 3 = CK 精灵 / 纯色层：**不要**读回目的行。
 //     它是"直写"模式，读回只会让每个精灵多一趟 DDR 读，帧内写不完就撕裂。
+//   ★ mode 4 是独立的新模式：只要纯色层 tint + AB 这两件事同时要，才读回背景。
 //   ★ 模式表改动要三处一起改：本处 / PaletteSource（要 bit1）/ Compositor（要两位）。
 //   ★ 读哪一行：
 //       普通 BLIT = line_src_addr（命令给的源行）
 //       alpha     = line_dst_addr（【目的自己】：读回现有像素去混合）
+//       tint_alpha = line_dst_addr（同上，tint 后再和背景 AB）
 //     两路的相位算法完全一样，所以只在这一处换地址，后面一个字都不用改。
-wire        bg_rd    = (line_flags[2:0] == 3'd2);
+wire        bg_rd    = (line_flags[2:0] == 3'd2) | (line_flags[2:0] == 3'd4);
 wire [31:0] row_addr = bg_rd ? line_dst_addr : line_src_addr;
 
 assign shift = row_addr[3:0];

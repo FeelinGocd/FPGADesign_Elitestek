@@ -45,6 +45,7 @@
 | `CI_gpu2d_spriteFlip(...)` / `spriteFlipCK(...)` | 带**镜像**：`flip` = bit0(MX 水平) \| bit1(MY 垂直) | 已有 |
 | `CI_gpu2d_spriteAlpha(base,dst,w,h,stride,extra)` | **alpha 混合**：把精灵按调色板里的 α 混到目的现有像素上 | **已有** |
 | `CI_gpu2d_spriteAlphaRect(base,stride,fb,x,y,w,h,extra)` | 同上，坐标版 | **已有** |
+| `CI_gpu2d_spriteAlphaTint(base,stride,dst,w,h,argb,strength,tone,extra)` / `spriteAlphaTintRect(...)` | **tint + alpha**：base 先按 argb/strength/tone 上色，再按 base 的 α 混到背景；运行时换色（MODE=4，3 CI） | **新增** |
 | `CI_gpu2d_combine(base_a,str_a,flags_a, fx_a,str_b,flags_b, dst,w,h)` / `combineRect(...)` | **图片合成**：两张 PRAM 素材合成一张再写进目的（图二在上、掩码相或） | **已有** |
 | `CI_gpu2d_combineTint(base_a,str_a,flags_a, argb,strength,tone, dst,w,h)` / `combineTintRect(...)` | **颜色合成**：第 2 层不是素材、是【一个颜色】⇒ 染色 / 加光 / 乘系数 / 正片叠底（见 §2.2） | **已有** |
 | `CI_gpu2d_fence()` | 提交点：一帧画完发一条，让"画完了没"可以被等待 | 已有 |
@@ -73,6 +74,23 @@ CI_gpu2d_spriteAlphaRect(asset_base_word, stride_word, fb_back, x, y, w, h, extr
 
 **和 ck 的关系**：两者可以**同时开**（`extra |= GPU2D_MODE_CKEY_EN`），硬件把两个掩码**相与** ——
 ck 管"这个像素整个不写"，α 管"按比例写"。素材若全是硬边（α 只有 0 / 255），两者效果等价。
+
+### 2.1.1 tint + alpha（MODE=4，运行时换色）
+
+```c
+CI_gpu2d_spriteAlphaTintRect(asset_base_word, stride_word, fb_back,
+                             x, y, w, h,
+                             0x00FF4040,   /* ARGB，A 不用 */
+                             160,          /* strength 0..255 */
+                             1,            /* tone: 1 插值 / 2 加光 / 3 乘系数 / 4 正片叠底 */
+                             extra);       /* 同 alpha：flip / ROT90 / ck */
+```
+
+- 3 条 CI：`BLIT` + `base` + `tint`；
+- base 的 ROT90 在 **base 格**，tone/strength 在 **tint 格**，互不抢 `param[23]`；
+- base 的 α **完整保留**（0/128/255）：`imageCombine` 先上色，`alphaBlending` 再用 base α 和背景混合；
+- 和 `combineTint` 的区别：`combineTint` 是 MODE=3 **REPLACE**，会丢掉 α=128 软边；这个走 MODE=4，软边保留；
+- 典型用法：敌方 A 弹 = `ASSET_bullet_type_A_base` + 红色 tint，不再需要预染的 `bullet_type_A_enemy`。
 
 ---
 
@@ -634,6 +652,7 @@ uv run tools/game_pad.py -p COM5       # 连上，W/A/S/D 或方向键，ESC 退
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v4.3 | 2026-10-22 | 新增 **MODE=4 TINT_ALPHA**：`CI_gpu2d_spriteAlphaTint` / `spriteAlphaTintRect`（3 CI：base + tint）；敌方 A 弹改回 `ASSET_bullet_type_A_base` + 运行时红色 tint，保留 α=128 软边；`bullet_type_A_enemy` 预染图不再使用 |
 | v4.2 | 2026-10-22 | 适配新素材目录（`bigFish` / `character/bullet` / `accessory` / `background_interact`）；新增 **shop 门**（`ASSET_background_door_shop` = 71，移出 background 前缀，避免挤占 bedrock/wood）与 **MagicCard** 道具图（67）；`ROOM_SHOP` 的门改用 shop 贴图；素材 **75 / 24032 字 / 143 色** |
 | v4.1 | 2026-10-22 | 明确“回字形”= **2×2 四格全是房间**（4 间两两相邻、四面门）：生成时 `room_would_2x2()` 直接拒绝第四格，`game_room_validate()` 再加 `room_has_2x2()` 全图检查；兜底阶梯改成无 2×2 的 14 格路径 |
 | v4.0 | 2026-10-22 | `minecraft_stone` 替换房间 `bedrock` 的贴图内容（仍是 `ASSET_minecraft_bedrock`，编号 54，wood 仍 55，不挤位）；新增**可交互石头**：每房随机 **3~5** 块，BFS 保证**门与门 / 门到中心**连通；石头挡玩家肚子、挡玩家/Boss 弹幕、不可破坏；素材 **73 / 23136 字 / 143 色** |

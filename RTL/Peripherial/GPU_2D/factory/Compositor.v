@@ -117,20 +117,23 @@ localparam  MODE_FILL       = 3'd0;
 localparam  MODE_REPLACE    = 3'd1;
 localparam  MODE_ALPHA      = 3'd2;
 localparam  MODE_CKEY       = 3'd3;
+localparam  MODE_TINT_ALPHA = 3'd4;   // 纯色层 tint + alphaBlending
 
 function [1:0] src_en_of;
     input [2:0]         mode;
     input               pal_src;    // flags[3]：这次要的是调色板源
     begin
         case (mode)
-            MODE_FILL    : src_en_of = 2'b00;
-            MODE_REPLACE : src_en_of = pal_src ? 2'b10 : 2'b01;
-            MODE_ALPHA   : src_en_of = 2'b11;
-            MODE_CKEY    : src_en_of = 2'b10;   // ★ 纯色层（第 2 层 flags[2:0]=3）：只要源②，上层由合成级造
-                                                //   ★★【不要改成 2'b11】：mode 3 同时也是所有 CK 精灵的模式，
-                                                //      改成两路会让每个精灵都多读回一次目的行 —— 帧内写不完
-                                                //      ⇒ 画面撕裂/抽搐（2026-10-20 踩过，别再来一次）
-            default      : src_en_of = 2'b00;
+            MODE_FILL       : src_en_of = 2'b00;
+            MODE_REPLACE    : src_en_of = pal_src ? 2'b10 : 2'b01;
+            MODE_ALPHA      : src_en_of = 2'b11;
+            MODE_CKEY       : src_en_of = 2'b10;   // ★ 纯色层（第 2 层 flags[2:0]=3）：只要源②，上层由合成级造
+                                                    //   ★★【不要改成 2'b11】：mode 3 同时也是所有 CK 精灵的模式，
+                                                    //      改成两路会让每个精灵都多读回一次目的行 —— 帧内写不完
+                                                    //      ⇒ 画面撕裂/抽搐（2026-10-20 踩过，别再来一次）
+            MODE_TINT_ALPHA : src_en_of = 2'b11;   // ★ 纯色层 tint + AB：源① 背景 + 源② base
+                                                    //   ★ 新 mode，不复用 mode 3，CK 精灵完全不受影响
+            default         : src_en_of = 2'b00;
         endcase
     end
 endfunction
@@ -190,7 +193,8 @@ assign  src1_rd_en          = imgCombine_srcReady;
 //       1 = REPLACE ：按 flags[3] 选一路（0=DDR 源① / 1=PRAM 源②）
 //       2 = ALPHA   ：两路同时用 ⇒ 11，源② 是前景(带 α)，源① 是背景(读回的目的)
 //       3 = CKEY    ：解码同 2（这一档没用，留给颜色键控当合成模式）
-//       4~7 = 未定义：不要源，宁可少画
+//       4 = TINT_ALPHA：纯色层 tint + 两路混合（源① 背景 + 源② base）
+//       5~7 = 未定义：不要源，宁可少画
 //
 //   ★★ 常数色【不做】相位轮转（2026-10 删，踩过两次）：拍对齐已经下沉进 DDRPacker
 //      （行首 cnt_byte <= dst_off），流的第 0 个字节本来就落在目的块的第 0 个字节上，
@@ -201,8 +205,9 @@ assign  src_used            = |src_en_r;
 assign  sel_src1            = src_en_r[1];
 assign  alpha_mode          = src_en_r[1] & src_en_r[0];            // 11 ⇒ 混合模式
 
-//   ★ 纯色层：第 2 层 flags[2:0]=3（不读素材）且开了色调模式 ⇒ 上层 = 常量色 + 浓度
-assign  fx_solid_en    = line_fx_en & (flags_r[2:0] == 3'd3) & (fx_tone_r != 3'd0);
+//   ★ 纯色层：第 2 层 flags[2:0]=3（不读素材）或 4（tint+AB）且开了色调模式 ⇒ 上层 = 常量色 + 浓度
+assign  fx_solid_en    = line_fx_en & ((flags_r[2:0] == 3'd3) ||
+                                       (flags_r[2:0] == 3'd4)) & (fx_tone_r != 3'd0);
 assign  fx_solid_data  = {PIXELS{fx_color_r[23:0]}};
 assign  fx_solid_alpha = {PIXELS{fx_strength_r}};
 

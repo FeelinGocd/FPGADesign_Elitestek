@@ -5,23 +5,27 @@
 //  上一级是谁  : src/main.c → game_demo.h → game_demo_run()（game/game_main.c）
 //  接口契约    :
 //    · 状态只有一份：game_state.c 里的 g；别的模块只读写 g，不另立全局
-//    · 坐标就是屏幕坐标 —— 本作不做滚屏，没有相机、没有房间/视口两套坐标
+//    · 坐标就是屏幕坐标 —— 本作不做滚屏、没有相机；每间房都用同一套屏幕坐标
+//      （换房 = 两块缓冲整屏重铺，不是"移动相机"）
 //    · 素材一律 g_assets[ASSET_xxx]，不许写裸下标
 //  分层        :
-//    game_state.c  状态 / 时钟 / 初始化 / 上屏
+//    game_state.c  状态 / 时钟 / 初始化 / 上屏 / 换房内容布置
+//    game_room.c   线性房间表 / 门触发 / 换房重铺
 //    game_world.c  场景：地砖、脏区、可见性
 //    game_hud.c    HUD
 //    game_player.c 角色（移动 / 动画 / 开火）
 //    game_bullet.c 子弹池
 //    game_boss.c   Boss + 弹幕
-//    game_item.c   道具
-//    game_main.c   主循环（一帧四步）
+//    game_item.c   道具（随机生成 / 拾取）
+//    game_main.c   主循环（一帧四步）+ HUD 各块的提交
+//    render_list.c 渲染队列：每个元素带自己的 z，统一排序后下发
 //    game_assets.c 素材表唯一副本
 //  参考        : docs/spec/软件_驱动与API.md §6（脏区）/ §8（demo）
 //==============================================================================
 #pragma once
 
 #include "type.h"
+#include "render_list.h"    /* 渲染队列：每个元素带自己的 z，统一排序后画 */
 #include "assets_desc.h"    /* ASSET_xxx 枚举 / asset_desc_t（表见下面的 g_assets 宏） */
 
 //==================== 屏幕 ====================
@@ -50,14 +54,20 @@
 
 //==================== 玩法参数 ====================
 #define N_BULLETS 256
+#define N_MOBS     16                       /* 当前房间的小怪（slime） */
+#define N_COINS    16                       /* 当前房间的清理奖励金币 */
+#define N_WEBS     8                        /* 普通房间的蜘蛛网（减速） */
+#define N_STONES   8                        /* 房间里的可交互石头（阻挡，不破坏） */
 
 //==================== 判定框（★ 不是包围盒！）====================
-//  贴图里"头以下的身体"那一块 —— 头不参与判定，脚也不参与。
-//  子弹也只用【中心点】去碰，不用 32×32 的包围盒（那圈透明边会让人"隔空受伤"）。
-#define PB_OFF_X 8                      /* 角色身体：相对贴图左上角（40×56 里挖出身体那块） */
-#define PB_OFF_Y 16
-#define PB_W 24
-#define PB_H 34
+//  ★ 人物碰撞体积 = 【肚子】那一小块：头、脚、尾巴都不参与判定。
+//    这样进门时头可以探进墙/门里，不会在门口被头卡住。
+//    子弹也只用【中心点】去碰，不用 32×32 的包围盒（那圈透明边会让人"隔空受伤"）。
+//    这块同时用于：移动/门洞边界、门洞触发、道具拾取、中弹判定、Boss 瞄准。
+#define PB_OFF_X 10                     /* 肚子：相对 40×56 贴图左上角 */
+#define PB_OFF_Y 28
+#define PB_W 20
+#define PB_H 20
 #define BB_OFF_X 14                     /* Boss 身体 */
 #define BB_OFF_Y 36
 #define BB_W 52
@@ -124,7 +134,8 @@ enum { MOTION_LINE, MOTION_SINE, MOTION_ACCEL, MOTION_SPIRAL, MOTION_HOME };
 #define BLINK_ON_MS     55u                 /* 护盾闪白的"亮"持续 */
 #define BLINK_OFF_MS    70u                 /* 护盾闪白的"灭"持续 */
 #define BLINK_COOL_MS   1000u               /* 闪完两下之后，1 秒内不再闪 */
-#define BOSS_RESPAWN_MS 3000u               /* 击破后停多久再开一局 */
+#define BOSS_RESPAWN_MS 3000u               /* 击破后停多久再开一局（现在由 exit 触发） */
+#define BOSS_WAIT_MS    1000u               /* 进 Boss 房先等 1 s 再出招 */
 
 //==================== 颜色 ====================
 #define FLOOR_BG 0x493326u
@@ -133,12 +144,39 @@ enum { MOTION_LINE, MOTION_SINE, MOTION_ACCEL, MOTION_SPIRAL, MOTION_HOME };
 #define FB_C 0x08000000u
 #define FB_D 0x08800000u
 
+//==================== 渲染层号（z）====================
+/*  画家算法：z 小的先画（在下面），z 大的后画（盖上面）。
+ *  · 静态层之间留够间距，实体层的深度范围（0..~816）不会串到护盾层
+ *  · 实体层用【底边 y】当深度 ⇒ 越靠下越近、越靠前（俯视视角的透视）
+ *  · 加一种元素：在它的 submit() 里 rl_push(自己的 z, 画法, 下标) 即可 */
+enum {
+    Z_SCENE   =    0,       /* 地板 / 墙 / 门（脏区恢复，永远最下面） */
+    Z_ACTOR   = 1000,       /* 实体：角色 / Boss / 弹幕 / 道具（本层内按底边 y 排） */
+    Z_SHIELD  = 3000,       /* 锁血玻璃罩：盖住所有实体 */
+    Z_HUD     = 5000,       /* HUD：面板 / 血条 / 字幕 ...（子层见下面） */
+    Z_OVERLAY = 6000        /* GAME OVER 之类，永远最上面 */
+};
+
+/*  实体元素的 z = 层基址 + 底边 y。
+ *  深度夹到 [0, 1500]：负坐标（屏外元素）不会掉到场景层下面，越界也不会串到护盾层。 */
+#define ACTOR_Z(depth) (Z_ACTOR + \
+    ((depth) < 0 ? 0 : ((depth) > 1500 ? 1500 : (depth))))
+
+/*  HUD 子层：数字越大越靠上（顺序和 game_main.c 的 hud_submit 一致） */
+#define Z_HUD_TOAST       (Z_HUD + 10)   /* 拾取字幕（最下：血条会盖住它） */
+#define Z_HUD_BOSSBAR     (Z_HUD + 20)   /* Boss 血条 */
+#define Z_HUD_COUNTDOWN   (Z_HUD + 30)   /* 3-2-1 */
+#define Z_HUD_PANEL       (Z_HUD + 50)   /* 左上状态面板 */
+#define Z_HUD_VITAL       (Z_HUD + 60)   /* 心 / 额外命数 / 飘心 */
+#define Z_HUD_MINIMAP     (Z_HUD + 65)   /* 右上角小地图 */
+#define Z_HUD_POOL        (Z_HUD + 70)   /* 右侧道具池 */
+
 //==================== HUD 版式 ====================
-#define HUD_LABEL_CMD_COUNT 38              /* FPS3+BULLETS7+CMD3+STAGE5+DMG3+MOVE4+BSPD4+RANGE5+RATE4 = 38 */
+#define HUD_LABEL_CMD_COUNT 67              /* 9 行标签 38 + 9 行数字 21 + COINS 5 字 + 3 位数字 = 67 */
 /* HUD 占哪几格（脏区单位）：前 3 行 × 前 6 列 = 192×96 像素。
    这几格每帧都要进脏区，否则上一次画的数字不会被擦掉。 */
 #define HUD_CELLS_X 6
-#define HUD_CELLS_Y 10                      /* 4 行动态 + 心跳(第5行) + 5 行常量参数 */
+#define HUD_CELLS_Y 11                      /* FPS/BULLETS/CMD/STAGE + 心 + DMG/MOVE/BSPD/RANGE/RATE/COINS */
 /* Boss 血条（顶部居中）；它占的格子也要标脏，否则擦不干净会留残影 */
 #define HUD_HP_W   400
 #define HUD_HP_H   14
@@ -148,15 +186,9 @@ enum { MOTION_LINE, MOTION_SINE, MOTION_ACCEL, MOTION_SPIRAL, MOTION_HOME };
 /* 拾取字幕：显示在 Boss 血条下方（字模只有大写 A-Z，文案必须全大写） */
 #define HUD_TOAST_MS  2500u                 /* 显示多久 */
 #define HUD_TOAST_Y   58                    /* 字模顶边 y（血条 30..44，留 14 px 间距） */
-/* 倒计时：捡到道具后 3-2-1 再刷 Boss */
 #define GAMEOVER_MS     5000u               /* GAME OVER 停 5 秒后自动重开 */
 #define SCORE_HIT       10                  /* 每打中 Boss 一发 */
 #define SCORE_KILL      1000                /* 击破一个 Boss */
-#define COUNTDOWN_MS  3000u
-#define HUD_CD_X      540                   /* 倒计时文字块（擦除用） */
-#define HUD_CD_Y      236
-#define HUD_CD_W      200
-#define HUD_CD_H      92
 /*  场地（竞技场）：内圈 = wood，边界 = bedrock（2 格厚 = 64 px）
  *  ★ 玩家/Boss 的活动范围也用这一组，改这里场地和碰撞一起变。  */
 #define ARENA_X0   288
@@ -189,26 +221,40 @@ enum { MOTION_LINE, MOTION_SINE, MOTION_ACCEL, MOTION_SPIRAL, MOTION_HOME };
 enum { RIGHT, LEFT, DOWN, UP };
 enum { BULLET_A, BULLET_CHILI, BULLET_URANUS };   /* 弹种（贴图/伤害） */
 enum { ITEM_CHILI, ITEM_URANUS, ITEM_EYES, ITEM_1UP, ITEM_COUNT };   /* 道具编号（≠ 弹种，属性查表） */
-enum { PHASE_PICKUP, PHASE_COUNTDOWN, PHASE_FIGHT, PHASE_GAMEOVER };   /* 捡道具 → 3-2-1 → 开打 → 结束 */
+/*  玩法阶段
+ *    EXPLORE    起始房 / 空房 / 道具房 / 商店房：没有 Boss，自由走动
+ *    FIGHT      Boss 战（进 Boss 房立即开打，没有开场延迟）
+ *    GAMEOVER   命尽 */
+enum { PHASE_EXPLORE = 0, PHASE_FIGHT, PHASE_GAMEOVER };
 
 typedef struct {
-    int active;
-    int x, y;          /* 位置（像素） */
-    int vx, vy;        /* 速度：LINE/HOME = 每帧位移；SINE = 振幅/下落速度；SPIRAL = 半径/角速度；ACCEL = 初速/加速度 */
-    int mode;          /* MOTION_xxx */
-    int age;           /* 活了几帧（SINE/SPIRAL/ACCEL/HOME 都要） */
-    int base_x;        /* SINE 的中线 */
-    int type;          /* 贴图：BULLET_A / CHILI / URANUS */
-    int enemy;         /* 1 = 敌方弹 */
-    int vx8, vy8;      /* 速度的 1/8 像素精度（只有 use8 时生效） */
-    int rx, ry;        /* 亚像素余量 */
-    int use8;          /* 1 = 用 vx8/vy8 走位（精细角度），0 = 用整数 vx/vy */
-    int dist;          /* 已经飞了多远（1/8 像素，曼哈顿累加） */
-    int range;         /* 射程：飞满这么远就消失（0 = 不管，飞出去为止） */
-    int life;          /* 还能活几帧（0 = 不管，飞出屏幕为止） */
+    unsigned char active;
+    unsigned char mode;         /* MOTION_xxx */
+    unsigned char type;         /* 贴图：BULLET_A / CHILI / URANUS */
+    unsigned char enemy;        /* 1 = 敌方弹 */
+    unsigned char use8;         /* 1 = 用 vx8/vy8 走位（精细角度），0 = 用整数 vx/vy */
+    signed char   rx, ry;       /* 亚像素余量（0..7） */
+    short x, y;                 /* 位置（像素） */
+    short vx, vy;               /* 速度：LINE/HOME = 每帧位移；SINE = 振幅/下落速度；SPIRAL = 半径/角速度；ACCEL = 初速/加速度 */
+    short base_x;               /* SINE 的中线 */
+    unsigned short age;         /* 活了几帧（SINE/SPIRAL/ACCEL/HOME 都要） */
+    short vx8, vy8;             /* 速度的 1/8 像素精度（只有 use8 时生效） */
+    unsigned short dist;        /* 已经飞了多远（1/8 像素，曼哈顿累加） */
+    unsigned short range;       /* 射程：飞满这么远就消失（0 = 不管，飞出去为止） */
+    unsigned short life;        /* 还能活几帧（0 = 不管，飞出屏幕为止） */
 } bullet_t;
-typedef struct { int active, x, y; } old_t;
-typedef struct { int active, x, y, type; } item_t;
+typedef struct { short x, y; unsigned char active; } old_t;
+typedef struct { short x, y; unsigned char active; unsigned char type; } item_t;
+typedef struct {
+    unsigned char active;
+    unsigned char hp;
+    short x, y;
+    u32 move_next;              /* 下一次起跳的时间 */
+    u32 hop_until;              /* 这一跳腾空到什么时候（帧 1 / 抬升都看它） */
+} mob_t;
+typedef struct { unsigned char active; short x, y; } coin_t;
+typedef struct { unsigned char active; short x, y; } web_t;
+typedef struct { unsigned char active; short x, y; } stone_t;
 /*==============================================================================
  *  Boss 的数据结构（★ 招式是【数据】，不是代码）
  *------------------------------------------------------------------------------
@@ -295,7 +341,6 @@ typedef struct {
     int rx, ry;                         /* 亚像素余量（累计到 8 才走 1 像素） */
     u32 anim, fire_tick, anim_step;
     u32 pickup_until, hurt_until;
-    u32 countdown_until;                /* 倒计时结束时刻（PHASE_COUNTDOWN 用） */
 u32 gameover_until;                 /* GAME OVER 结束时刻（PHASE_GAMEOVER 用） */
 int score;                          /* 本局得分 */
 int gameover_stage;                 /* 结束时的关卡（要显示出来） */
@@ -311,10 +356,14 @@ int gameover_stage;                 /* 结束时的关卡（要显示出来） *
     int boss_x, boss_y, boss_pattern;
     u32 boss_tick;
     int stage;                          /* 第几关：击破一次 Boss +1，弹幕跟着变密 */
-    int phase;                          /* PHASE_PICKUP / PHASE_FIGHT */
+    int phase;                          /* PHASE_EXPLORE / PHASE_FIGHT / PHASE_GAMEOVER */
     int boss_hp, boss_gate;             /* 当前血量 / 下一个锁血线 */
     int boss_locked;                    /* 1 = 锁血中（无伤 + 弹幕雨） */
     u32 boss_lock_until, boss_flash_until, boss_dead_until;
+    u32 boss_wait_until;                /* 进 Boss 房后 1 s 内不出招、也不吃伤害 */
+    int exit_active;                    /* Boss 击破后，房间顶部出现的 exit */
+    int exit_room, exit_x, exit_y;
+    int exit_dirty;                     /* exit 消失后还要擦几帧（两块缓冲） */
     int boss_blink_cnt, boss_blink_on;  /* 护盾被打中：快闪两下（on/off 交替） */
     u32 boss_blink_next, boss_blink_cool;
     shot_t shot;                        /* ★ Boss 挂的弹幕发射器（小怪以后也各挂一个） */
@@ -325,8 +374,19 @@ int gameover_stage;                 /* 结束时的关卡（要显示出来） *
     /* 每块缓冲各记一份"这个元素上次画在哪"（双缓冲下两块内容不同） */
     old_t old_bullets[2][N_BULLETS];
     old_t old_player[2], old_boss[2], old_item[2];
+    /* 小怪 / 清理奖励金币 */
+    mob_t mobs[N_MOBS];
+    coin_t coin_items[N_COINS];
+    old_t old_mob[2][N_MOBS];
+    old_t old_coin[2][N_COINS];
+    web_t webs[N_WEBS];
+    old_t old_web[2][N_WEBS];
+    stone_t stones[N_STONES];
+    old_t old_stone[2][N_STONES];
+    int coins;                          /* 本局金币数（下一层保留，新一局清零） */
     /* 显示与统计 */
     int front;                          /* 正在显示的那块；后台 = front ^ 1 */
+    int door_dirty;                     /* 换房后还要重画几帧门（两块缓冲各一次） */
     int cmd_frame;                      /* 上一帧发了多少条命令 */
     int fps;
     u32 fps_epoch, fps_frames;
@@ -357,22 +417,54 @@ u32  game_ms(void);
 void game_reset_state(void);            /* 只复位数据，不重画 */
 int  game_restart(void);                /* 复位 + 把两块缓冲重铺一遍（R 键用） */
 void game_enter_gameover(u32 now);      /* 命尽：进 GAME OVER 画面 */
+void game_flow_enter_room(void);        /* 换房之后：按房间类型布置内容（道具 / Boss） */
+void game_boss_spawn(void);             /* 第一次进 Boss 房：满血到场中，立即开打 */
 int  game_init(void);
 int  game_finish_gpu(void);
 int  game_present(u32 fb);
 
 //==================== 场景（game_world.c）====================
-/*  —— 房间系统（game_room.c）—— */
+/*  —— 房间系统（game_room.c）——
+ *  房间不再硬编码：在 6×6 网格上随机生成一片连通的房间。
+ *  每个房间渲染门时直接看【周围 4 格】：
+ *    · 邻居格没有房间       → 墙（门锁死，不画）
+ *    · 邻居是普通房         → normal 门
+ *    · 邻居是特殊房         → 邻居的特殊门
+ *    · 自己是特殊房         → 本房间所有门都用本房间的特殊门
+ *  特殊房 = 非普通房（ITEM / SHOP / BOSS）；普通房 = START / EMPTY。
+ *  生成规则：一片连通房间；道具房 1 间、Boss 房 1 间；
+ *    特殊房之间不直接相连、空间 8 邻域不相邻；
+ *    **特殊房必须是叶子：只接 1 间普通房**；
+ *    **Boss 房不能直接连起点房**；
+ *    普通房可以和特殊房相邻/连通，也可以同时接多间特殊房。
+ *    **Boss 还活着时，Boss 房所有门锁死，不能离开。**
+ *  game_room_validate() 启动自检。  */
 #define MAP_COLS    40
 #define MAP_ROWS    23
-#define ROOM_COUNT  4
-/*  ★ 调试开关：1 = 先不生成怪和道具（房间系统单独验证用）  */
-#define ROOM_NO_SPAWN   1
+#define ROOM_GRID_W 6
+#define ROOM_GRID_H 6
+#define ROOM_COUNT  (ROOM_GRID_W * ROOM_GRID_H)
+enum { ROOM_NONE = -1, ROOM_START, ROOM_EMPTY, ROOM_ITEM, ROOM_SHOP, ROOM_BOSS };
 
 int  game_room_id(void);
-int  game_room_door_open(int dir);   /* 某方向的门通不通邻居（锁死=不渲染） */
+int  game_room_start(void);          /* 本轮起点房间的格子编号 */
+int  game_room_type(void);           /* 当前房间的类型：ROOM_START / EMPTY / ITEM / SHOP / BOSS */
+void game_room_pos(int *gx, int *gy);/* 当前房间在 6×6 网格里的坐标 */
+int  game_room_type_at(int gx, int gy); /* 任意格子的房间类型；无房间 = ROOM_NONE */
+int  game_room_door_asset(int dir);  /* 看周围 4 格的类型决定这扇门用哪张贴图 */
+int  game_room_door_exists(int dir); /* 邻居格有没有房间（门本身存在，不看锁） */
+int  game_room_door_open(int dir);   /* 邻居格有房间且当前房间没有怪 */
+int  game_room_validate(void);       /* 启动自检：起点/道具/Boss 唯一 / 特殊房不直连 / 空间不相邻 / 连通 */
 void game_room_reset(void);
 void game_room_step(void);
+void game_room_request(int target, int entry_dir);  /* 剧情跳转；entry_dir < 0 = 落在房间中心 */
+void game_room_mark_used(int room);  /* 标记"这间的道具已经拿过了" */
+int  game_room_is_used(int room);
+void game_room_mark_spawned(int room);  /* 特殊房内容（道具/Boss）只生成一次 */
+int  game_room_is_spawned(int room);
+int  game_room_take_reward(void);    /* 房间清理：返回 0..5 个金币，只给一次 */
+int  game_room_is_cleared(int room);
+void game_room_new_run(void);        /* 新一轮：清掉所有"已用过/已生成"标记 */
 void game_room_door_bounds(int px, int py, int *x0, int *y0, int *x1, int *y1);
 int  game_room_pending(void);
 int  game_room_commit(void);
@@ -386,6 +478,7 @@ void game_blit_tile(u32 fb, int tx, int ty, int fill_bg);
 void game_draw_floor(u32 fb);
 u32  game_floor_cmd_count(void);
 void game_mark_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, int h);
+void game_mark_doors_dirty(unsigned char dirty[GRID_H][GRID_W]);   /* 4 扇门的两格都标脏 */
 void game_restore_dirty(u32 fb, unsigned char dirty[GRID_H][GRID_W]);
 void game_restore_rect(u32 fb, int x, int y, int w, int h);
 int  game_visible(int x, int y, int w, int h);
@@ -394,7 +487,7 @@ int  game_visible(int x, int y, int w, int h);
 void game_hud_static(u32 fb);
 extern int game_hud_need_full;              /* 这一帧要不要整块重画（有精灵压到面板上） */
 int  game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
-                      int fps, int cmd_frame, int total_bullets);
+                      int fps, int cmd_frame, int total_bullets, int coins);
 void game_hud_dirty_row(unsigned char dirty[GRID_H][GRID_W], int row);
 void game_vital_prepare(unsigned char dirty[GRID_H][GRID_W], int buf);
 void game_hud_invalidate(void);
@@ -402,10 +495,13 @@ void game_vital_invalidate(void);
 void game_item_invalidate(void);
 void game_item_reset_cache(void);
 void game_item_prepare(unsigned char dirty[GRID_H][GRID_W], int buf);
-void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, int full);
+void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, int coins, int full);
 void game_hud_boss_bar(u32 fb, int hp, int hp_max);
 void game_hud_toast(u32 fb, const char *text);
-void game_hud_countdown(u32 fb, int n);      /* 大字倒计时（n = 3/2/1） */
+/*  右上角小地图（game_hud.c）：换房时 refresh、下一层时 reset+refresh，每帧 draw  */
+void game_minimap_reset(void);
+void game_minimap_refresh(void);
+void game_minimap_draw(u32 fb);
 /* 道具属性（都查 game_item.c 里的道具表） */
 const char *game_item_desc(int item);       /* 屏幕上方那行说明（全大写 A-Z） */
 int  game_item_fx(int item);                /* 效果种类：0 只换弹 / 1 三向 / 2 加命 */
@@ -415,6 +511,7 @@ void game_item_pool_rect(int *x, int *y, int *w, int *h);
 int  game_item_pool_need(void);
 /*  生命 / 命数（game_vital.c）  */
 void game_vital_reset(void);
+void game_vital_refill(void);               /* 新一关：血量补满，命数保留 */
 int  game_vital_hit(u32 now);               /* 1=扣爱心 2=扣光进死亡 0=无敌中无效 */
 void game_vital_step(u32 now);
 int  game_vital_hp(void);
@@ -434,7 +531,6 @@ void game_hud_label_at(u32 fb, int x, int y, const char *text);
 int  game_item_icon(int item);              /* 图标素材下标 */
 int  game_item_bullet(int item);            /* 吃了之后换成哪种弹 */
 void game_hud_mark_dirty(unsigned char dirty[GRID_H][GRID_W]);   /* HUD 占的格子标脏 */
-void game_hud_banner(u32 fb, const char *text);
 void game_hud_gameover(u32 fb, int score, int secs);
 /*  GAME OVER 三行字占的矩形（脏区用）  */
 #define GAMEOVER_X  480
@@ -445,6 +541,7 @@ void game_hud_gameover(u32 fb, int score, int secs);
 //==================== 角色（game_player.c）====================
 void game_player_step(u32 keys, u32 now);
 void game_player_draw(u32 fb, u32 now, int buf);
+void game_player_submit(void);          /* 登记到渲染队列：z = 底边 y */
 void game_player_fire(void);            /* 自动瞄准最近的敌人 */
 
 //==================== 子弹（game_bullet.c）====================
@@ -454,11 +551,36 @@ int  game_bullet_spawn8(int x, int y, int vx8, int vy8, int mode, int type, int 
 void game_bullet_fire_enemy(int x, int y, int dir);
 void game_bullets_step(u32 now);
 void game_bullets_sync(int buf);                    /* 记录"这块缓冲这次画在哪"（每帧一次） */
-void game_bullets_draw(u32 fb, int dmin, int dmax); /* 只画深度在 [dmin,dmax) 的那些 */
+void game_bullets_submit(void);                     /* 登记到渲染队列：每颗弹 z = 底边 y */
 int  game_bullets_alive(void);
 int  game_enemy_bullets_alive(void);
 void game_bullets_clear(void);
 void game_bullets_perf_fill(int count);
+
+//==================== 小怪 / 金币（game_mob.c / game_coin.c）====================
+void game_mobs_reset(void);                         /* 换房时清空当前房间的小怪 */
+void game_mobs_spawn(int count);                    /* 生成 count 只 slime */
+void game_mobs_step(u32 now);                        /* 2 帧动画 / 追玩家 / 接触扣血 / 清房 */
+void game_mobs_submit(void);
+int  game_mobs_alive(void);
+int  game_mobs_try_hit(int cx, int cy);              /* 玩家子弹命中一只 slime；1 = 命中 */
+void game_coins_reset(void);
+void game_coins_spawn(int count);                    /* 清理奖励：0..5 个 coin */
+void game_coins_step(u32 now);                       /* 拾取：肚子碰到 coin，金币 +1 */
+void game_coins_submit(void);
+
+//==================== 蜘蛛网（game_web.c）====================
+void game_web_reset(void);                           /* 换房时清空当前房间的网 */
+void game_web_spawn(int count);                      /* 普通房随机生成 count 张网 */
+int  game_web_slow_at(int x, int y);                 /* 这个点是否在网里（减速） */
+void game_web_submit(void);                          /* 画在地板上、人物下面 */
+
+//==================== 可交互石头（game_stone.c）====================
+void game_stones_reset(void);                        /* 换房时清空当前房间的石头 */
+void game_stones_spawn(int count);                   /* 随机生成 count 块，保证门与门连通 */
+int  game_stone_block(int px, int py);               /* 玩家左上角，按肚子判是否被石头挡住 */
+int  game_stone_hit_at(int x, int y);                /* 弹幕中心是否撞到石头（撞到就消失） */
+void game_stones_submit(void);
 
 //==================== Boss（game_boss.c）====================
 int  game_nearest_enemy(int *tx, int *ty);   /* 最近的敌人中心；没有返回 0 */
@@ -479,6 +601,8 @@ void game_boss_step(u32 now);
 void game_boss_draw_shield(u32 fb, u32 now);   /* 护盾单独画在元素之上 */
 void game_boss_hit(u32 now);            /* 玩家子弹打到 Boss 了 */
 void game_boss_draw(u32 fb, u32 now, int buf);
+void game_boss_draw_exit(u32 fb);       /* Boss 击破后房间顶部的 exit */
+void game_boss_submit(void);            /* 登记 Boss 本体 + 锁血护盾 */
 
 //==================== 压测脚手架（game_perf.c，正常游戏时不参与逻辑）====================
 void game_perf_init(void);
@@ -488,8 +612,8 @@ int  game_perf_keep_bg(void);       /* mode 3 = 0：不恢复背景 */
 int  game_perf_tick(u32 now);       /* 每 120 帧打点；返回 0 = 跑完了 */
 
 //==================== 道具（game_item.c）====================
-void game_enter_pickup(void);           /* 进入"场上放一个道具，等玩家来捡" */
-void game_begin_countdown(void);        /* 捡到道具 → 3-2-1 倒计时 */
-void game_start_fight(void);            /* 倒计时结束 → Boss 现身开打 */
+void game_start_fight(void);            /* Boss 开打：FIGHT + 招式表初始化 */
+void game_item_spawn_random(int x, int y);  /* 在 (x,y) 随机放一个道具（道具房用） */
 void game_item_try_pickup(u32 now);
 void game_item_draw(u32 fb, u32 now, int buf);
+void game_item_submit(void);            /* 登记到渲染队列：z = 底边 y */

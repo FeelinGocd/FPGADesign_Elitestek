@@ -113,13 +113,14 @@ endfunction
 
 //   ---- 这一格那张图，这一行要不要我（模式表见 docs/spec/硬件_加速器.md §1.3）----
 //       1 = REPLACE 且 flags[3]=1（源是 PRAM 精灵）  → 要
-//       2 = ALPHA / 3 = 纯色层（两路同时用）        → 要（我是前景那一路）
+//       2 = ALPHA / 3/4 = 纯色层（两路同时用）       → 要（我是前景那一路）
 //       0 = FILL / 未定义模式 / REPLACE 但源是 DDR   → 不要
 //     ★ 同一份判断在 DDRSource（要 bit0）和 Compositor（要两位）各有一份，改表要一起改。
 function lane_wanted;
     input [7:0]             f;
     begin
-        lane_wanted = (f[2:0] == 3'd2) || (f[2:0] == 3'd3) || ((f[2:0] == 3'd1) && f[3]);
+        lane_wanted = (f[2:0] == 3'd2) || (f[2:0] == 3'd3) || (f[2:0] == 3'd4) ||
+                      ((f[2:0] == 3'd1) && f[3]);
     end
 endfunction
 
@@ -196,12 +197,13 @@ assign param_1               = line_param[24*(IMAGE_NUM-1)+:24];
 wire                                                my_line_0;
 assign my_line_0             = lane_wanted(flags_0);
 wire                                                my_line_1;              // 图二那一趟要不要我【读素材】
-//   ★★ 第 2 层是【纯色层】（flags[2:0]=3）时，这一趟本模块【一个字节都不读】：上层颜色由
+//   ★★ 第 2 层是【纯色层】（flags[2:0]=3 或 4）时，这一趟本模块【一个字节都不读】：上层颜色由
 //      Compositor 自己造。以前少了这个条件 ⇒ 拿"颜色值当字地址"读一遍垃圾、然后卡在 S_WAIT
 //      等一个永远不来的 palette_ready ⇒ line_src1_free 永不拉高 ⇒ CmdExec 发不出下一行
 //      ⇒ 板上"撞一下就整屏卡死"（2026-10 抓到）。
 //      ★ 注意 switched（下面那个）【不能】跟着 gate 掉：合成级要靠那一拍进 S_COMBINE。
-assign my_line_1             = line_fx_en & lane_wanted(flags_1) & (flags_1[2:0] != 3'd3);
+assign my_line_1             = line_fx_en & lane_wanted(flags_1) &
+                               (flags_1[2:0] != 3'd3) & (flags_1[2:0] != 3'd4);
 
 //   这一拍真的收下行任务
 wire                                                take_task;
@@ -209,11 +211,13 @@ assign take_task             = (state == S_IDLE) & line_start & my_line_0;
 
 //   第 2 趟那一格要不要旋转（与 task_rot 同款判断，但看的是 flags_1）
 wire                                                task_rot_1;
-assign task_rot_1            = (flags_1[7] & flags_1[3] & (flags_1[2:0] != 3'd3));
-//   本趟要不要走旋转路：ROT90（flags[7]）+ PRAM 源（flags[3]）+ 不是纯色层（[2:0]!=3）
+assign task_rot_1            = (flags_1[7] & flags_1[3] &
+                                (flags_1[2:0] != 3'd3) & (flags_1[2:0] != 3'd4));
+//   本趟要不要走旋转路：ROT90（flags[7]）+ PRAM 源（flags[3]）+ 不是纯色层（[2:0]!=3/4）
 //   ★ 纯色层必须排除：那一格的 param[23] 是"色调 tone"的最高位，不是旋转位（字段按模式复用）。
 wire                                                task_rot;
-assign task_rot              = (flags_0[7] & flags_0[3] & (flags_0[2:0] != 3'd3));
+assign task_rot              = (flags_0[7] & flags_0[3] &
+                                (flags_0[2:0] != 3'd3) & (flags_0[2:0] != 3'd4));
 
 //   ★★ 选"这一趟算第几格"不能只看 pass_r：pass_r 是收行任务那拍才更新的，而 line_start
 //      那一拍 Decoder 就把 mx_r 锁走了 ⇒ 那一拍 pass_r 还是【上一条命令】留下的值，

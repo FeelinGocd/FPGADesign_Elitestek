@@ -17,7 +17,7 @@
 #include "game.h"
 #include "CI_gpu2d.h"
 
-#define HEART_W        24                    /* SpecialEffect_health 尺寸 */
+#define HEART_W        24                    /* SpecialEffect_heart 尺寸 */
 #define HEART_GAP      4
 #define HEART_X        HUD_LABEL_X           /* 面板第 5 行（原 ITEMS 那行） */
 #define HEART_Y        (VITAL_ROW * HUD_ROW_H + 4)
@@ -67,6 +67,16 @@ int  game_vital_hp(void)         { return s_hp; }
 int  game_vital_lives(void)      { return s_lives; }
 int  game_vital_over(void)       { return s_over; }
 void game_vital_clear_over(void) { s_over = 0; }
+
+/*  新一关：血量补满（命数不变）；把血量行标脏，下一帧重画心  */
+void game_vital_refill(void)
+{
+    s_hp = HP_MAX;
+    s_dead_until = 0u;
+    s_last_hp2[0] = s_last_hp2[1] = -1;
+    s_last_extra2[0] = s_last_extra2[1] = -1;
+    s_redraw = 2;
+}
 
 void game_vital_extra_life(void)
 {
@@ -170,7 +180,7 @@ void game_vital_mark_dirty(unsigned char dirty[GRID_H][GRID_W])
 /*----------------------------------------------------------------------------*/
 void game_vital_draw(u32 fb, u32 now, int full)
 {
-    const asset_desc_t *heart = &g_assets[ASSET_SpecialEffect_health];
+    const asset_desc_t *heart = &g_assets[ASSET_SpecialEffect_heart];
     const asset_desc_t *minus = &g_assets[ASSET_SpecialEffect_subtract];
     int extra = s_lives - 1;
     int i, x;

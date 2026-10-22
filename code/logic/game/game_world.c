@@ -11,8 +11,12 @@
 //  上一级是谁  : game/game_main.c（每帧）、game/game_state.c（开机铺地）
 //  接口契约    :
 //    · 地图字符：. = 空(黑)  B = 基岩地板  W = 木墙  D = 门  C/X/Y/Z = 角块(翻转)
-//    · 门是 32×54：竖直占 1 格宽、2 格高；旋转 90°/270° 时横过来
-//    · 门必须【最后画】，否则它盖住的那一格（地图里是 "."）会被黑底刷掉
+//    · 门贴图 40×64（门洞 32×64，左右各宽 4 px）：竖直占 1 格宽、2 格高；
+//      旋转 90°/270° 时横过来（输出 64×40）。位置按贴图实际尺寸算，见 blit_door
+//    · 门在 1×2 格里【只写一个 'D'】，另一格是 "."（编辑器 put() 的约定）；
+//      两格都要当墙补：开着的门由第二趟 blit_door 补，锁死的门由 blit_cell 补
+//      —— 少补一格，墙上就会留一个 32×32 的黑洞
+//    · 门必须【最后画】，否则它盖住的那一格会被黑底刷掉
 //  为什么这么做:
 //    · 房间是"画出来的"，不是算出来的 —— 改布局只改地图，不动代码
 //  参考        : docs/spec/软件_驱动与API.md §6.2 / §6.5、tools/sandbox
@@ -75,24 +79,16 @@ static const unsigned char room_rot_shared[MAP_ROWS][MAP_COLS] = {
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
 };
 
-/*  4 间房各自的表。
- *  ★ 现在 4 间共用同一张地图；以后单独画，只改这两张指针表，
- *    再往上面加 room_map_1 / room_map_2 ... 即可。  */
-static const char (*const room_maps[ROOM_COUNT])[MAP_COLS + 1] = {
-    room_map_shared, room_map_shared, room_map_shared, room_map_shared
-};
-static const unsigned char (*const room_rots[ROOM_COUNT])[MAP_COLS] = {
-    room_rot_shared, room_rot_shared, room_rot_shared, room_rot_shared
-};
-
+/*  所有房间共用同一张地图（房间布局只在 game_room.c 的网格里，不在地图里）。
+ *  以后要每间房单独画，再把这里改成按 room 查两张指针表即可。  */
 static const char          (*s_map)[MAP_COLS + 1] = room_map_shared;
 static const unsigned char (*s_rot)[MAP_COLS]     = room_rot_shared;
 
 void game_world_select(int room)
 {
-    if (room < 0 || room >= ROOM_COUNT) room = 0;
-    s_map = room_maps[room];
-    s_rot = room_rots[room];
+    (void)room;
+    s_map = room_map_shared;
+    s_rot = room_rot_shared;
 }
 
 const char          (*game_world_map(void))[MAP_COLS + 1] { return s_map; }
@@ -165,21 +161,29 @@ static u32 corner_transform(int tx, int ty)
     return corner_flip(tx, ty) | tile_rot(tx, ty);
 }
 
-/*  这一格实际多高：最后一行只有 16 px（720 = 22×32 + 16）。
- *  ★ 填 32 会写穿屏幕、污染另一块缓冲 ⇒ 必须按实际高度裁  */
-static int cell_h(int ty)
-{
-    int y = ty * TILE;
-
-    if (y + TILE <= SCR_H) return TILE;
-    return (SCR_H > y) ? (SCR_H - y) : 0;
-}
-
 static int is_door(int tx, int ty)
 {
     if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return 0;
     if (s_map[ty][tx] != 'D') return 0;
     return game_room_door_open(s_rot[ty][tx] & 3);   /* ★ 锁死的门不算门 */
+}
+
+/*  这一格是不是某扇门的内半格？
+ *  门在 1×2 格里【只写一个 'D'】，另一格地图里是 '.'（编辑器 put() 就是这么存的）。
+ *  是的话通过 (*dtx,*dty) 返回门那格的坐标 —— 补墙时走向要和门那格完全一致。  */
+static int door_inner_cell(int tx, int ty, int *dtx, int *dty)
+{
+    int r;
+
+    if (ty > 0 && s_map[ty - 1][tx] == 'D') {          /* 门在上一行：上/下门 */
+        r = s_rot[ty - 1][tx] & 3;
+        if (r == 0 || r == 2) { *dtx = tx; *dty = ty - 1; return 1; }
+    }
+    if (tx > 0 && s_map[ty][tx - 1] == 'D') {          /* 门在左一列：左/右门 */
+        r = s_rot[ty][tx - 1] & 3;
+        if (r & 1)            { *dtx = tx - 1; *dty = ty; return 1; }
+    }
+    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -192,6 +196,7 @@ static void blit_cell(u32 fb, int tx, int ty)
     u32 y = (u32)(ty * TILE);
     int draw_h;
     int ai = game_tile_asset(tx, ty);
+    int dtx, dty;
 
     if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return;
     if ((int)y >= SCR_H) return;
@@ -199,7 +204,17 @@ static void blit_cell(u32 fb, int tx, int ty)
     if ((int)y + draw_h > SCR_H) draw_h = SCR_H - (int)y;
     c = s_map[ty][tx];
 
-    if (ai < 0) {                                    /* 空：纯黑 */
+    if (ai < 0) {                                    /* 空：纯黑（门的内半格除外） */
+        /*  ★ 门占 1×2 格，地图只写一个 'D'，另一格是 '.'：
+         *    开着门时第二趟 blit_door 会补墙 + 画门；【锁死时没人画它】⇒
+         *    这里必须补成同走向的墙，否则锁死的门后面会是一个 32×32 的黑洞。 */
+        if (door_inner_cell(tx, ty, &dtx, &dty)) {
+            const asset_desc_t *wall = &g_assets[ASSET_minecraft_wood];
+
+            CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
+                                x, y, TILE, (u32)draw_h, tile_rot(dtx, dty));
+            return;
+        }
         CI_gpu2d_fillRect(fb, x, y, TILE, (u32)draw_h, 0x00000000u);
         return;
     }
@@ -222,40 +237,56 @@ static void blit_cell(u32 fb, int tx, int ty)
             x, y, TILE, (u32)draw_h, tile_rot(tx, ty));
 }
 
+/*  一扇门在屏幕上的左上角（输出矩形）。横向门的贴图会旋转 90°，输出宽高互换。
+ *  ★ 三种门（normal / accessory / boss）都是 40×64，左右各探进墙 4 px；
+ *    位置按【这张门贴图】的实际尺寸算，不能按 32 格写死。  */
+static void door_xy(int tx, int ty, int *ox, int *oy)
+{
+    int r = s_rot[ty][tx] & 3;
+    int ai = game_room_door_asset(r);
+    const asset_desc_t *door = &g_assets[ai];
+    int dw = (int)door->width;
+    int dh = (int)door->height;
+
+    if (r & 1) {                                    /* 横向门（贴图旋转 90°） */
+        *ox = (r == 1) ? (int)ARENA_X1 : (int)ARENA_X0 - dh;
+        *oy = ty * TILE - (dw - TILE) / 2;
+    } else {                                        /* 竖直门 */
+        *ox = tx * TILE - (dw - TILE) / 2;
+        *oy = (r == 0) ? (int)ARENA_Y0 - dh : (int)ARENA_Y1;
+    }
+}
+
 /*  画一扇门。
- *  ★ 门图是 32×54，而墙是 2 格（64）厚：门塞不满，差的那 10 px 要先用【同方向的墙】补，
- *    再把门【贴着场地】摆进去：
- *      上门 → 门的底边贴地板顶边   (y = ARENA_Y0 - 54)
- *      下门 → 门的顶边贴地板底边   (y = ARENA_Y1)
- *      左门 → 门的右边贴地板左边   (x = ARENA_X0 - 54)
- *      右门 → 门的左边贴地板右边   (x = ARENA_X1)
+ *
+ *  ★ 门洞本身还是墙上的 1×2 格（竖直门 32×64；横向门 64×32），但【贴图可以比门洞大】：
+ *    现在三种门都是 40×64 —— 左右各探进墙里 4 px，正好把 2 格厚的墙填满，
+ *    不用再补以前那 10 px。用哪张门贴图由 game_room_door_asset() 按房间类型决定。
+ *    ★ 两格墙贴图先铺满门洞（透明边后面是墙，不是黑洞），门再盖上去。
  */
 static void blit_door(u32 fb, int tx, int ty)
 {
-    const asset_desc_t *door = &g_assets[ASSET_background_door_normal];
-    const asset_desc_t *wall = &g_assets[ASSET_minecraft_wood];
     int r = s_rot[ty][tx] & 3;
+    int ai = game_room_door_asset(r);
+    const asset_desc_t *door = &g_assets[ai];
+    const asset_desc_t *wall = &g_assets[ASSET_minecraft_wood];
     int horiz = (r & 1) != 0;                       /* 90° / 270° ⇒ 横着 */
     u32 rot = tile_rot(tx, ty);                     /* ★ 和这一格墙完全同一个角度 */
-    int dh = (int)door->height;                     /* 54 */
-    int x = tx * TILE, y = ty * TILE;
+    int x, y;
 
-    /* ① 门占的 2 格先铺成墙（和门同一个旋转，接缝才对得上）  */
+    /* ① 门洞的两格先铺成墙（和门同一个旋转，接缝才对得上）  */
     CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
-        (u32)x, (u32)y, TILE, TILE, rot);
+        (u32)(tx * TILE), (u32)(ty * TILE), TILE, TILE, rot);
     CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
-        (u32)(horiz ? (tx + 1) * TILE : tx * TILE),
-        (u32)(horiz ? ty * TILE : (ty + 1) * TILE), TILE, TILE, rot);
+        (u32)((horiz ? tx + 1 : tx) * TILE),
+        (u32)((horiz ? ty : ty + 1) * TILE), TILE, TILE, rot);
 
-    /* ② 门贴着场地摆  */
-    if (r == 0)      y = ARENA_Y0 - dh;             /* 上：底边贴地板 */
-    else if (r == 2) y = ARENA_Y1;                  /* 下：顶边贴地板 */
-    else if (r == 1) x = ARENA_X1;                  /* 右：左边贴地板右边缘 */
-    else             x = ARENA_X0 - dh;             /* 左：右边贴地板 */
+    /* ② 门按贴图尺寸摆：竖直门贴地板的上/下边，横向门贴地板的左/右边  */
+    door_xy(tx, ty, &x, &y);
 
-    /*  门上有半透明玻璃 ⇒ 走 α 混合（不透明的地方结果和不透明一样）  */
+    /*  门有透明边 + 半透明玻璃 ⇒ 走 α 混合（不透明的地方结果和不透明一样）  */
     CI_gpu2d_spriteAlphaRect(door->base_word, door->stride_word, fb,
-        (u32)x, (u32)y, TILE, (u32)dh, rot);
+        (u32)x, (u32)y, door->width, door->height, rot);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -287,7 +318,17 @@ void game_draw_floor(u32 fb)
 /*----------------------------------------------------------------------------*/
 u32 game_floor_cmd_count(void)
 {
-    return 1u + (u32)(MAP_COLS * MAP_ROWS) + 4u * 3u + HUD_LABEL_CMD_COUNT;
+    /*  手册 §1.1：一条命令 = 2 条 CI；这里返回【命令数】，gpu2d_exclusive_end 里再 ×2。
+     *
+     *  ★ 取【下界】，绝不多算：
+     *    · 地图 40×23 格；
+     *    · 4 个 'D' 格：有邻居时 blit_cell 不画（0 条），没邻居时画木墙（1 条）；
+     *    · 4 个方向的门：有邻居才画 3 条（2 墙 + α 门 / 锁门深灰 FILL），没邻居 0 条；
+     *    · 两者相加 = 920 + 2×邻居数，最少 920（0 邻居），最多 928（4 邻居）；
+     *    · 静态 HUD = 67 条（标签 38 + 数字 21 + COINS 8）。
+     *  所以下界 = 1 + 920 + 67 = 988。实际只会 ≥ 988；少等不会黑屏，
+     *  多算一条（像之前 1004）就会一直等不到而黑屏。  */
+    return 1u + (u32)(MAP_COLS * MAP_ROWS) + HUD_LABEL_CMD_COUNT;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -308,6 +349,34 @@ void game_mark_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, i
 }
 
 /*----------------------------------------------------------------------------*/
+/*  换房后把 4 扇门【实际占的矩形】标脏（门开/关 + 门类型都变了，两块缓冲各要重画一次）。
+ *  ★ 三种门都是 40×64，比门洞左右各宽 4 px ⇒ 脏区也要带上探进墙里的那一圈，
+ *    否则门从开到关时，墙里那 4 px 的旧门框会留下来。
+ *  ★ 地图没变时 game_room_commit 不再整屏重铺，门的状态就靠这两帧的脏区更新。  */
+void game_mark_doors_dirty(unsigned char dirty[GRID_H][GRID_W])
+{
+    int tx, ty;
+
+    for (ty = 0; ty < MAP_ROWS; ++ty)
+        for (tx = 0; tx < MAP_COLS; ++tx) {
+            const asset_desc_t *door;
+            int r, ai, x, y, ow, oh;
+
+            if (s_map[ty][tx] != 'D') continue;
+
+            r = s_rot[ty][tx] & 3;
+            ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
+            door = &g_assets[ai];
+
+            door_xy(tx, ty, &x, &y);
+            ow = (r & 1) ? (int)door->height : (int)door->width;
+            oh = (r & 1) ? (int)door->width  : (int)door->height;
+
+            game_mark_dirty(dirty, x, y, ow, oh);
+        }
+}
+
+/*----------------------------------------------------------------------------*/
 void game_restore_dirty(u32 fb, unsigned char dirty[GRID_H][GRID_W])
 {
     int tx, ty;
@@ -316,19 +385,34 @@ void game_restore_dirty(u32 fb, unsigned char dirty[GRID_H][GRID_W])
         for (tx = 0; tx < GRID_W; ++tx)
             if (dirty[ty][tx]) blit_cell(fb, tx, ty);
 
-    /*  门只有 4 扇：只要脏区碰到它的 2 格，就整扇重画  */
+    /*  门只有 4 扇：只要脏区碰到【门的实际矩形】（含 40×64 探进墙的边），就整扇重画  */
     for (ty = 0; ty < MAP_ROWS; ++ty)
         for (tx = 0; tx < MAP_COLS; ++tx) {
-            int horiz, tx2, ty2;
+            const asset_desc_t *door;
+            int r, ai, x, y, ow, oh, x0, x1, y0, y1, rx, ry, need = 0;
 
             if (!is_door(tx, ty)) continue;
-            horiz = (s_rot[ty][tx] & 1) != 0;
-            tx2 = horiz ? tx + 1 : tx;
-            ty2 = horiz ? ty : ty + 1;
 
-            if ((tx < GRID_W && ty < GRID_H && dirty[ty][tx]) ||
-                (tx2 < GRID_W && ty2 < GRID_H && dirty[ty2][tx2]))
-                blit_door(fb, tx, ty);
+            r = s_rot[ty][tx] & 3;
+            ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
+            door = &g_assets[ai];
+
+            door_xy(tx, ty, &x, &y);
+            ow = (r & 1) ? (int)door->height : (int)door->width;
+            oh = (r & 1) ? (int)door->width  : (int)door->height;
+
+            x0 = x / TILE; x1 = (x + ow - 1) / TILE;
+            y0 = y / TILE; y1 = (y + oh - 1) / TILE;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 >= GRID_W) x1 = GRID_W - 1;
+            if (y1 >= GRID_H) y1 = GRID_H - 1;
+
+            for (ry = y0; ry <= y1 && !need; ++ry)
+                for (rx = x0; rx <= x1; ++rx)
+                    if (dirty[ry][rx]) { need = 1; break; }
+
+            if (need) blit_door(fb, tx, ty);
         }
 }
 

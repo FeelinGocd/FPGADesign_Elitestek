@@ -131,6 +131,7 @@ localparam  MODE_FILL       = 3'd0;             // 纯色：不要源
 localparam  MODE_REPLACE    = 3'd1;             // 覆盖：源①（DDR 读回的那一路）
 localparam  MODE_ALPHA      = 3'd2;             // ★ alpha 混合：源①(读回的目的) + 源②(调色板精灵)
 localparam  MODE_CKEY       = 3'd3;             // 纯色层标记（颜色合成的第 2 层）
+localparam  MODE_TINT_ALPHA = 3'd4;             // 纯色层 tint + alpha 混合（源①背景 + 源②base）
 
 //   本模块现在只用【第 1 格】（= 第 1 条参数 = 原图那一份），
 //   所以格宽就是下面的字面位数，第 2 格（特效）等合成做的时候从 cmd_*[31:16] 之类取
@@ -309,11 +310,12 @@ assign frame_done           = take_cmd & (cmd_type == CMD_FENCE);
 //==============================================================================
 assign line_start           = (state == S_SEND);       // 只停一拍 → 天然是单拍脉冲
 //   ★ 本模块只关心一件事："这条命令用不用源" —— 决定 line_src_addr 要不要填。
-//     用不用源是模式说了算（1/2/3 用源，0=FILL 和未定义模式不用）。
+//     用不用源是模式说了算（1/2/3/4 用源，0=FILL 和未定义模式不用）。
 //     ★ 用哪一路、要不要混合，是各源和合成器自己的事（见上面"函数"那段的说明）。
 assign uses_src             = (cmd_flags_r[2:0] == MODE_REPLACE) |
                               (cmd_flags_r[2:0] == MODE_ALPHA  ) |
-                              (cmd_flags_r[2:0] == MODE_CKEY   );
+                              (cmd_flags_r[2:0] == MODE_CKEY   ) |
+                              (cmd_flags_r[2:0] == MODE_TINT_ALPHA);
 
 assign line_dst_addr        = line_dst_r;
 assign line_w               = cmd_w_r;
@@ -345,7 +347,8 @@ genvar gi;
         //      而行任务要发 h 次。用端口就会把下一条命令的模式位当成这一条的（踩过）
         assign lane_uses_src[gi]               = (cmd_flags_r[8*gi +: 3] == MODE_REPLACE) |
                                                 (cmd_flags_r[8*gi +: 3] == MODE_ALPHA  ) |
-                                                (cmd_flags_r[8*gi +: 3] == MODE_CKEY   );
+                                                (cmd_flags_r[8*gi +: 3] == MODE_CKEY   ) |
+                                                (cmd_flags_r[8*gi +: 3] == MODE_TINT_ALPHA);
 
         //   ★ MX（水平镜像）的"倒读起点"在这里算 —— 取出器只负责"每读一个字 −1"。
         //     本图这一行的【行首字】是 line_src_r[gi]，镜像时广播它的【最后一个字】：

@@ -60,11 +60,37 @@ int game_item_count(void)
 }
 
 /*----------------------------------------------------------------------------*/
+/*  道具房：从 ITEM_COUNT 种道具里随机挑一个，放在 (x, y)（房间中心）。
+ *  用 LCG 而不是 rand()：不拉 libc 的大表；第一次用毫秒时钟做种子，
+ *  同一次上电里每次进房（或新的一轮）拿到的道具不同。  */
+void game_item_spawn_random(int x, int y)
+{
+    static u32 seed;
+    u32 r;
+
+    if (seed == 0u) seed = game_ms() | 1u;
+    seed = seed * 1664525u + 1013904223u;
+    r = seed >> 16;
+
+    g.item.type   = (int)(r % (u32)ITEM_COUNT);
+    g.item.x      = x;
+    g.item.y      = y;
+    g.item.active = 1;
+
+    g.old_item[0].active = 0;       /* 新道具：不要把上一件的旧位置当脏区擦 */
+    g.old_item[1].active = 0;
+}
+
+/*----------------------------------------------------------------------------*/
 void game_item_try_pickup(u32 now)
 {
+    int hx = g.x + PB_OFF_X;
+    int hy = g.y + PB_OFF_Y;
+
     if (!g.item.active) return;
-    if (g.x < g.item.x + ITEM_W && g.x + PW > g.item.x &&
-        g.y < g.item.y + ITEM_H && g.y + PH > g.item.y) {
+    /*  用【肚子】去碰道具，头/脚不算  */
+    if (hx < g.item.x + ITEM_W && hx + PB_W > g.item.x &&
+        hy < g.item.y + ITEM_H && hy + PB_H > g.item.y) {
         int bt = game_item_bullet(g.item.type);
         int fx = game_item_fx(g.item.type);
 
@@ -95,8 +121,8 @@ void game_item_try_pickup(u32 now)
         g.toast_until = now + HUD_TOAST_MS;
         bsp_printf("DEBUG: accessory picked; bullet type=%d\r\n", g.bullet_type);
 
-        /* 拾取阶段捡到道具 ⇒ Boss 现身开打 */
-        if (g.phase == PHASE_PICKUP) game_begin_countdown();
+        /*  ★ 道具房：拿过就算用过，这一轮再进来不会重新生成  */
+        game_room_mark_used(game_room_id());
     }
 }
 
@@ -107,7 +133,7 @@ void game_item_try_pickup(u32 now)
 #define POOL_ICON      32
 #define POOL_GAP       8
 #define POOL_X         (SCR_W - POOL_ICON - 10)
-#define POOL_LABEL_Y   12                     /* "ITEM" 标签的字顶 */
+#define POOL_LABEL_Y   140                    /* "ITEM" 标签的字顶（小地图下面，再下移 64） */
 #define POOL_LABEL_W   (4 * 16)               /* 标签 4 个字 = 64 px */
 /*  ★ 标签右端和图标列右端对齐（往左延伸 64 px），否则超出屏宽会被整块丢弃
  *    —— 之前 x 起点太靠右，"EM" 两个字母因为超出 1280 直接被裁掉了。  */
@@ -205,4 +231,18 @@ void game_item_draw(u32 fb, u32 now, int buf)
             fb, (u32)g.item.x, (u32)(g.item.y + ITEM_ICON_DY + float_y),
             icon->width, icon->height, 0u);
     }
+}
+
+/*----------------------------------------------------------------------------*/
+/*  登记进渲染队列：z = 底座底边 y —— 道具和角色/Boss/弹幕按同一条深度尺子排。
+ *  ★ 每帧都要登记：被捡走后 game_item_draw() 还要把 old_item 清掉。 */
+static void item_draw_entry(u32 fb, u32 now, int buf, int arg)
+{
+    (void)arg;
+    game_item_draw(fb, now, buf);
+}
+
+void game_item_submit(void)
+{
+    rl_push(ACTOR_Z(g.item.y + ITEM_H), item_draw_entry, 0);
 }

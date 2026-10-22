@@ -69,6 +69,13 @@ void game_player_step(u32 keys, u32 now)
     if (mx && my) { tvx = mx * PLAYER_DIAG_V8; tvy = my * PLAYER_DIAG_V8; }
     else          { tvx = mx * PLAYER_MAX_V8;  tvy = my * PLAYER_MAX_V8;  }
 
+    /*  站在蜘蛛网上：目标速度降到 45%（离开就恢复）  */
+    if (game_web_slow_at(g.x + PB_OFF_X + PB_W / 2,
+                         g.y + PB_OFF_Y + PB_H / 2)) {
+        tvx = tvx * 45 / 100;
+        tvy = tvy * 45 / 100;
+    }
+
     g.vx8 = approach(g.vx8, tvx, tvx ? PLAYER_ACCEL_V8 : PLAYER_BRAKE_V8);
     g.vy8 = approach(g.vy8, tvy, tvy ? PLAYER_ACCEL_V8 : PLAYER_BRAKE_V8);
 
@@ -86,11 +93,11 @@ void game_player_step(u32 keys, u32 now)
     else if (my < 0) g.dir = UP;
     else if (my > 0) g.dir = DOWN;
 
-    /*  ★ 撞墙 = 撞到场地边界（基岩），不是屏幕边。
-     *    但正对着门时允许再往外走一格（门口凹槽），否则人进不了门洞。  */
+    /*  ★ 撞墙 = 【肚子】撞到场地边界（基岩），不是贴图包围盒。
+     *    头/脚/尾巴可以探进墙里；正对着门时门洞那一段再往外放一点，让人走进门。  */
     {
-        int bx0 = ARENA_X0, by0 = ARENA_Y0;
-        int bx1 = ARENA_X1 - PW, by1 = ARENA_Y1 - PH;
+        int bx0 = ARENA_X0 - PB_OFF_X, by0 = ARENA_Y0 - PB_OFF_Y;
+        int bx1 = ARENA_X1 - PB_OFF_X - PB_W, by1 = ARENA_Y1 - PB_OFF_Y - PB_H;
 
         game_room_door_bounds(nx, ny, &bx0, &by0, &bx1, &by1);
 
@@ -98,6 +105,19 @@ void game_player_step(u32 keys, u32 now)
         if (nx > bx1) { nx = bx1; g.vx8 = 0; g.rx = 0; }
         if (ny < by0) { ny = by0; g.vy8 = 0; g.ry = 0; }
         if (ny > by1) { ny = by1; g.vy8 = 0; g.ry = 0; }
+    }
+
+    /*  ★ 可交互石头：按【肚子】挡；分轴处理，可以贴着石头滑动  */
+    if (game_stone_block(nx, ny)) {
+        if (!game_stone_block(nx, g.y)) {
+            ny = g.y;
+        } else if (!game_stone_block(g.x, ny)) {
+            nx = g.x;
+        } else {
+            nx = g.x;
+            ny = g.y;
+        }
+        g.vx8 = 0; g.vy8 = 0; g.rx = 0; g.ry = 0;
     }
 
     g.moving = (nx != g.x || ny != g.y || g.vx8 != 0 || g.vy8 != 0);
@@ -245,4 +265,19 @@ void game_player_draw(u32 fb, u32 now, int buf)
     g.old_player[buf].active = 1;
     g.old_player[buf].x = g.x;
     g.old_player[buf].y = g.y;
+}
+
+/*----------------------------------------------------------------------------*/
+/*  登记进渲染队列：z = 脚底 y（越靠下越前）。
+ *  ★ 每帧都要登记：GAME OVER / 死亡时不画，但 game_player_draw() 里要把
+ *    old_player 记下来，下一帧才有位置可擦。 */
+static void player_draw_entry(u32 fb, u32 now, int buf, int arg)
+{
+    (void)arg;
+    game_player_draw(fb, now, buf);
+}
+
+void game_player_submit(void)
+{
+    rl_push(ACTOR_Z(g.y + PH), player_draw_entry, 0);
 }

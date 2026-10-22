@@ -49,6 +49,7 @@
 #define GPU2D_MODE_REPLACE  1
 #define GPU2D_MODE_ALPHA    2           /* alpha 混合: 已实现, 见 docs/spec/硬件_加速器.md §5.3 */
 #define GPU2D_MODE_CKEY     3           /* 纯色层标记（颜色合成的第 2 层就是它） */
+#define GPU2D_MODE_TINT_ALPHA 4         /* 纯色层 tint + alpha 混合（源①背景 + 源②base） */
 
 /* flags[3] = 源类型: 0 = DDR 里的 RGB888 帧, 1 = 片上 PRAM 的调色板素材。
  * 选 1 时颜色字段的含义换成【源行跨距】(单位: 字, 一个字 4 个索引)。 */
@@ -138,6 +139,25 @@ void CI_gpu2d_spriteAlpha(u32 asset_base, u32 dst_addr, u32 w, u32 h,
 /* alpha 的坐标版（extra 同上；extra=0 就是纯 alpha 混合） */
 void CI_gpu2d_spriteAlphaRect(u32 asset_base, u32 stride, u32 dst_fb,
                               u32 dx, u32 dy, u32 w, u32 h, u32 extra);
+
+/*   —— tint + alpha（MODE=4，新增）——
+ *   一条命令 = 3 条 CI：
+ *       ① 命令开始: { 宽, 高 } + 目的地址
+ *       ② 底图: PRAM 地址 + REPLACE|SPRITE + 行跨距 / ROT90
+ *       ③ tint: ARGB 颜色 + TINT_ALPHA|SPRITE|CKEY_EN + tone/strength
+ *   · 底图的 α 完整保留（0/128/255），先由 imageCombine 上色，再由 alphaBlending 用底图 α
+ *     和背景混合；tint 不碰背景。
+ *   · argb 的 A 不用（填 0）；strength 0..255；tone: 1 插值 / 2 加光 / 3 乘系数 / 4 正片叠底。
+ *   · extra = GPU2D_MODE_CKEY_EN | GPU2D_FLIP_X/Y | GPU2D_ROT90（底图用，tint 层不带形状）。
+ *   · 与 spriteAlpha 相比只多了一条 tint CI；适合"同一张 base 弹换颜色"的运行时染色。 */
+void CI_gpu2d_spriteAlphaTint(u32 asset_base, u32 stride, u32 dst_addr,
+                              u32 w, u32 h, u32 argb, u32 strength, u32 tone,
+                              u32 extra);
+
+/* tint + alpha 的坐标版 */
+void CI_gpu2d_spriteAlphaTintRect(u32 asset_base, u32 stride, u32 dst_fb,
+                                  u32 dx, u32 dy, u32 w, u32 h,
+                                  u32 argb, u32 strength, u32 tone, u32 extra);
 
 /*   —— 图片合成：把两张 PRAM 素材图合成一张再写进目的 ——
  *   一条命令 = 3 条 CI（硬件只发一条命令，软件发三条）:

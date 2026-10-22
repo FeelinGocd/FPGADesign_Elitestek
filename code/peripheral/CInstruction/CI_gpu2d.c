@@ -179,6 +179,42 @@ void CI_gpu2d_spriteAlphaRect(u32 asset_base, u32 stride, u32 dst_fb,
     CI_gpu2d_spriteAlpha(asset_base, dst, w, h, stride, extra);
 }
 
+/*   —— tint + alpha（MODE=4）：底图 + 纯色层（颜色/强度/色调）——
+ *   命令 = 3 条 CI，形状和 combineTint 一样，但最后一格模式用 MODE_TINT_ALPHA：
+ *       ① BLIT 宽高+目的
+ *       ② 底图：REPLACE|SPRITE，param = stride / ROT90
+ *       ③ tint：ARGB + TINT_ALPHA|SPRITE|CKEY_EN，param = tone / strength
+ *   硬件：imageCombine 先给底图上色，alphaBlending 再用底图的 α 和背景混合。
+ *   ★ 底图的翻转/旋转/ck 都走第 ② 格；tint 层没有形状，不参与旋转。
+ *   ★ ROT90 时命令宽高要交换（和 spriteAlpha 一致）。  */
+void CI_gpu2d_spriteAlphaTint(u32 asset_base, u32 stride, u32 dst_addr,
+                              u32 w, u32 h, u32 argb, u32 strength, u32 tone,
+                              u32 extra)
+{
+    u32 rot = (extra & GPU2D_ROT90) != 0u;
+    u32 base_flags = GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE
+                   | (extra & GPU2D_MODE_CKEY_EN)
+                   | ((extra << 5) & 0x60u);
+    u32 tint_flags = GPU2D_MODE_TINT_ALPHA | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN;
+    u32 tint_param = ((tone & 7u) << 21) | ((strength & 0xFFu) << 12);
+
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(rot ? h : w, rot ? w : h), dst_addr);
+    (void)ci_args_full(asset_base, base_flags, sprite_param(stride, rot), 1u);
+    (void)ci_args_full(argb, tint_flags, tint_param, 0u);
+}
+
+void CI_gpu2d_spriteAlphaTintRect(u32 asset_base, u32 stride, u32 dst_fb,
+                                  u32 dx, u32 dy, u32 w, u32 h,
+                                  u32 argb, u32 strength, u32 tone, u32 extra)
+{
+    u32 dst = dst_fb
+            + dy * ci_line_bytes()
+            + dx * LINEBUFFER_PIXEL_BYTES;
+
+    CI_gpu2d_spriteAlphaTint(asset_base, stride, dst, w, h,
+                             argb, strength, tone, extra);
+}
+
 /*   —— 下面两个是"镜像"版：只多拼了 flags[5]/[6] ——
  *   ★ 源地址约定和普通 sprite 完全一样：要画那一段(未镜像时)的左边缘。
  *     倒读起点由硬件 CmdExec 自己算（行尾字 = 行首 + ceil(w/4) − 1），软件不用管。 */

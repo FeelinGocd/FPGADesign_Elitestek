@@ -4,7 +4,8 @@
 //  干什么      :
 //    · g            : 整个 demo 唯一的一份状态（别的模块只读写它）
 //    · game_ms()    : 毫秒时钟（CLINT）
-//    · game_init()  : 放一个道具、清两块缓冲、铺好地板、开显示
+//    · game_init()  : 清两块缓冲、铺好地板、开显示（起始房，暂不生成任何内容）
+//    · game_flow_enter_room(): 换房后按房间类型布置内容（道具房随机道具 / Boss 房生成并立即开打）
 //    · game_finish_gpu() / game_present(): 一帧画完 → FENCE → 等显示真的翻页
 //  上一级是谁  : game/game_main.c
 //  接口契约    :
@@ -83,7 +84,6 @@ int game_present(u32 fb)
 /*  纯数据复位（不碰帧缓冲）：初始化和"R 键重开"共用  */
 void game_reset_state(void)
 {
-    u32 seed = game_ms();
     int i;
 
     /* 玩家在初始房正中间（房间系统负责摆位置） */
@@ -109,34 +109,42 @@ void game_reset_state(void)
     g.hurt_until = 0u;
     g.toast_until = 0u;
     g.toast_type = ITEM_CHILI;
-    g.countdown_until = 0u;
 
-    g.boss_x = (SCR_W - BOSS_W) / 2;
-    g.boss_y = (SCR_H - BOSS_H) / 2;
+    g.boss_x = (ARENA_X0 + ARENA_X1) / 2 - BOSS_W / 2;
+    g.boss_y = (ARENA_Y0 + ARENA_Y1) / 2 - BOSS_H / 2;
     g.boss_pattern = 0;
     g.boss_tick = 0u;
     g.stage = 1;                            /* 重开也从第 1 关开始 */
     g.score = 0;                            /* 本局得分清零 */
+    g.coins = 0;                            /* 本局金币清零（下一层保留） */
     g.boss_hp = g_boss_def.hp;
     g.boss_gate = g_boss_def.gate1;
     g.boss_locked = 0;
     g.boss_lock_until = 0u;
     g.boss_flash_until = 0u;
     g.boss_dead_until = 0u;
+    g.boss_wait_until = 0u;
+    g.exit_active = 0;
+    g.exit_dirty = 0;
+    g.exit_room = 0;
+    g.exit_x = 0;
+    g.exit_y = 0;
     g.boss_blink_cnt = 0;
     g.boss_blink_on = 0;
     g.boss_blink_next = 0u;
     g.boss_blink_cool = 0u;
     game_shot_stop(&g.shot);
 
-    /* 道具放在屏幕正中：捡了它 Boss 才现身 */
-    g.item.active = ROOM_NO_SPAWN ? 0 : 1;
-    g.item.type = (int)((seed >> 4) % (u32)ITEM_COUNT);
+    /*  开局在起始房：没有道具、没有 Boss。
+     *  道具由"进道具房"时随机生成（见 game_flow_enter_room）。  */
+    g.item.active = 0;
+    g.item.type = ITEM_CHILI;
     g.item.x = (SCR_W - ITEM_W) / 2;
     g.item.y = (SCR_H - ITEM_H) / 2;
-    g.phase = PHASE_PICKUP;
+    g.phase = PHASE_EXPLORE;
 
     g.front = 0;
+    g.door_dirty = 0;
     g.cmd_frame = 0;
     g.fps = 0;
     g.fps_epoch = 0u; g.fps_frames = 0u; g.cmd_before = 0u;
@@ -169,61 +177,142 @@ void game_enter_gameover(u32 now)
 
     game_bullets_clear();
 
-    /* GAME OVER ??????????????????????
-     * game_reset_state() ?????????????? */
+    /*  GAME OVER 期间玩法冻结；5 秒后由 game_update 调 game_restart() 重开  */
     game_shot_stop(&g.shot);            /* Boss 停火 */
     bsp_printf("GAME OVER: stage %d (auto restart in %d ms)\r\n",
                g.stage, (int)GAMEOVER_MS);
 }
 
 /*----------------------------------------------------------------------------*/
-void game_enter_pickup(void)
+/*  换房之后：按房间类型布置内容。
+ *  由 game_room_commit() 在"新房间已经显示出来"之后调用 ——
+ *  Boss 房的 Boss 就是在这里生成的。  */
+void game_flow_enter_room(void)
 {
-    g.phase = PHASE_PICKUP;
-    g.item.active = ROOM_NO_SPAWN ? 0 : 1;
-    g.item.type = (g.item.type + 1) % ITEM_COUNT;    /* 四件道具轮着给 */
-    g.item.x = (SCR_W - ITEM_W) / 2;
-    g.item.y = (SCR_H - ITEM_H) / 2;
+    int type = game_room_type();
+    int id = game_room_id();
 
+    /*  换房：先清掉上一间房的小怪 / 金币 / 蜘蛛网 / 石头  */
+    game_mobs_reset();
+    game_coins_reset();
+    game_web_reset();
+    game_stones_reset();
+
+    /*  默认：这间房没有道具；Boss 房保留 Boss 当前状态（Boss 只生成一次）  */
+    g.item.active = 0;
+    if (type != ROOM_BOSS) {
+        g.boss_locked = 0;
+        g.boss_blink_cnt = 0;
+        g.boss_blink_on = 0;
+    }
+    game_shot_stop(&g.shot);
+
+    switch (type) {
+    case ROOM_EMPTY:
+        g.phase = PHASE_EXPLORE;
+        if (!game_room_is_spawned(id) && !game_room_is_cleared(id)) {
+            game_mobs_spawn(2);             /* 每间普通房 2 只 slime */
+            game_room_mark_spawned(id);
+        }
+        game_web_spawn(1 + (int)(game_ms() % 2u));   /* 普通房 1~2 张网 */
+        bsp_printf("ROOM: empty\r\n");
+        break;
+
+    case ROOM_ITEM:
+        g.phase = PHASE_EXPLORE;
+        if (game_room_is_used(id)) {
+            bsp_printf("ROOM: item (already taken)\r\n");
+        } else if (!game_room_is_spawned(id)) {
+            /*  ★ 道具房：这一轮第一次进来才随机挑一个，放在【房间中心】 */
+            game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
+                                   (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
+            game_mobs_spawn(2);             /* 道具房也有 2 只 slime */
+            game_room_mark_spawned(id);
+            bsp_printf("ROOM: item (random #%d)\r\n", g.item.type);
+        } else {
+            /*  之前生成过、还没拿：原样恢复，不重掷  */
+            g.item.active = 1;
+            bsp_printf("ROOM: item (kept #%d)\r\n", g.item.type);
+        }
+        break;
+
+    case ROOM_BOSS:
+        if (!game_room_is_spawned(game_room_id())) {
+            game_boss_spawn();              /* 满血到场中，先等 1 s 再出招 */
+            game_room_mark_spawned(game_room_id());
+            bsp_printf("ROOM: boss\r\n");
+        } else {
+            /*  只生成一次：重进不重置血量/位置，接着打（但先等 1 s）  */
+            if (g.boss_hp > 0) {
+                g.phase = PHASE_FIGHT;
+                g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
+                game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
+                game_shot_begin(&g.shot, 0);
+            } else {
+                g.phase = PHASE_EXPLORE;    /* 已击破：exit 在上面等玩家 */
+            }
+            bsp_printf("ROOM: boss (resume, hp=%d)\r\n", g.boss_hp);
+        }
+        break;
+
+    case ROOM_SHOP:
+        g.phase = PHASE_EXPLORE;
+        bsp_printf("ROOM: shop (empty)\r\n");
+        break;
+
+    default:                            /* ROOM_START */
+        g.phase = PHASE_EXPLORE;
+        game_web_spawn(1 + (int)(game_ms() % 2u));   /* 起点房也是普通房 */
+        bsp_printf("ROOM: start\r\n");
+        break;
+    }
+
+    /*  每个房间随机 3~5 块可交互石头；spawn 内部用 BFS 保证门与门连通  */
+    game_stones_spawn(3 + (int)(game_ms() % 3u));
+}
+
+/*----------------------------------------------------------------------------*/
+/*  Boss 第一次生成：满血 / 场地正中，先等 1 s 再出招  */
+void game_boss_spawn(void)
+{
+    g.boss_x = (ARENA_X0 + ARENA_X1) / 2 - BOSS_W / 2;
+    g.boss_y = (ARENA_Y0 + ARENA_Y1) / 2 - BOSS_H / 2;
     g.boss_hp = g_boss_def.hp;
     g.boss_gate = g_boss_def.gate1;
     g.boss_locked = 0;
     g.boss_lock_until = 0u;
     g.boss_flash_until = 0u;
-    game_shot_stop(&g.shot);
+    g.boss_dead_until = 0u;
+    g.boss_blink_cnt = 0;
+    g.boss_blink_on = 0;
+    g.boss_blink_next = 0u;
+    g.boss_blink_cool = 0u;
     g.boss_tick = 0u;
-    g.countdown_until = 0u;
-    g.old_boss[0].active = 0;               /* 不要再擦一个不在的 Boss */
+    g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
+    g.exit_active = 0;
+    g.exit_dirty = 0;
+    game_shot_stop(&g.shot);
+
+    g.old_boss[0].active = 0;               /* 不要在别的房间擦一个"上一场的 Boss" */
     g.old_boss[1].active = 0;
+
+    game_start_fight();                     /* phase = FIGHT + 招式表初始化 */
 }
 
 /*----------------------------------------------------------------------------*/
-/*  捡到道具 → 3-2-1 倒计时（倒计时里 Boss 还不出现）  */
-void game_begin_countdown(void)
-{
-    g.phase = PHASE_COUNTDOWN;
-    g.countdown_until = game_ms() + COUNTDOWN_MS;
-    g.boss_hp = g_boss_def.hp;
-    g.boss_gate = g_boss_def.gate1;
-    g.boss_locked = 0;
-    game_shot_stop(&g.shot);
-    g.boss_tick = 0u;
-    bsp_printf("COUNTDOWN: stage %d\r\n", g.stage);
-}
-
-/*----------------------------------------------------------------------------*/
-/*  倒计时结束 → Boss 现身开打  */
+/*  Boss 开打：切战斗阶段 + 初始化招式表（第一次生成 / 重进续战都用这套）  */
 void game_start_fight(void)
 {
     g.phase = PHASE_FIGHT;
+
     game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
     game_shot_begin(&g.shot, 0);
+
     g.boss_hp = g_boss_def.hp;
     g.boss_gate = g_boss_def.gate1;
     g.boss_locked = 0;
     g.boss_tick = 0u;
     g.boss_dead_until = 0u;
-    g.countdown_until = 0u;
     bsp_printf("FIGHT: stage %d\r\n", g.stage);
 }
 
@@ -258,6 +347,13 @@ int game_init(void)
     int bi;
 
     game_reset_state();
+
+    /*  硬规则自检：起点/道具/Boss 唯一、特殊房不直连/空间不相邻、连通  */
+    if (game_room_validate() != 0) {
+        bsp_printf("ROOM ERROR: room generation rule broken "
+                   "(count / adjacent / connectivity)\r\n");
+        return 0;
+    }
 
     bsp_printf("DEBUG: accessory at (%d,%d), bullet=A\r\n", g.item.x, g.item.y);
 

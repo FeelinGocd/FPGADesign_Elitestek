@@ -1,10 +1,10 @@
 //==============================================================================
-//  game_hud.c —— 左上角状态面板 + 右上角道具池 + Boss 血条 + 字幕/倒计时
+//  game_hud.c —— 左上角状态面板 + 右侧道具池 + Boss 血条 + 字幕
 //------------------------------------------------------------------------------
 //  干什么      :
 //    · 面板每一行 = 【纯色底板(FILL) + 标签(CK字模) + 数字(CK字模)】
 //    · 只有"这一行的数变了"才重画那一行；没变就一条命令都不发
-//  上一级是谁  : game/game_main.c（每帧 layer_hud）
+//  上一级是谁  : game/game_main.c（每帧 hud_submit()，各块带自己的 Z_HUD_* 层号）
 //  接口契约    :
 //    · 面板是【不透明】的：谁走到它后面都被盖住 → 不需要脏区恢复，也不留残影
 //    · 数字必须定宽（digits 位），位数一变后面的内容会平移
@@ -94,12 +94,13 @@ void game_hud_static(u32 fb)
     hud_row(fb, 7, "BSPD",    0, 2);
     hud_row(fb, 8, "RANGE",   0, 3);
     hud_row(fb, 9, "RATE",    0, 2);
+    hud_row(fb, 10, "COINS",  0, 3);
 }
 
 /*----------------------------------------------------------------------------*/
 /*  每帧：只重画"数值变了"的那些行  */
 /*  这一帧各行要显示的值（面板和"帧首标脏"共用一份，别两处各算一遍）  */
-static void hud_values(int fps, int cmd_frame, int total_bullets, int v[10])
+static void hud_values(int fps, int cmd_frame, int total_bullets, int coins, int v[HUD_CELLS_Y])
 {
     v[0] = fps;
     v[1] = total_bullets;
@@ -111,12 +112,13 @@ static void hud_values(int fps, int cmd_frame, int total_bullets, int v[10])
     v[7] = g.fire_triple ? PLAYER_TRIPLE_SPEED : PLAYER_BULLET_SPEED;
     v[8] = PLAYER_BULLET_RANGE;
     v[9] = (int)(60u / FIRE_EVERY);
+    v[10] = coins;
 }
 
 /*  ★ 帧首调用：把"和这块缓冲上次画的不一样"的行标脏（旧文字由脏区恢复擦掉）。
  *    双缓冲各记各的 ⇒ 两块都不会闪、也不会互相留残影。  */
-static int s_draw[2][10];                       /* 本帧要重画的行（prepare 置位，frame 消费） */
-static int s_last[2][10];                    /* 每块缓冲上一次画的值（-1 = 没画过） */
+static int s_draw[2][HUD_CELLS_Y];              /* 本帧要重画的行（prepare 置位，frame 消费） */
+static int s_last[2][HUD_CELLS_Y];              /* 每块缓冲上一次画的值（-1 = 没画过） */
 static int s_init;
 
 /*  ★ 整局重开 / 铺完地砖之后必须调一次：把两块缓冲的"上次值"作废，
@@ -126,9 +128,9 @@ void game_hud_invalidate(void)
     int b, i;
 
     for (b = 0; b < 2; ++b)
-        for (i = 0; i < 10; ++i) s_last[b][i] = -1;
+        for (i = 0; i < HUD_CELLS_Y; ++i) s_last[b][i] = -1;
     for (b = 0; b < 2; ++b)
-        for (i = 0; i < 10; ++i) s_draw[b][i] = 1;
+        for (i = 0; i < HUD_CELLS_Y; ++i) s_draw[b][i] = 1;
     s_init = 0;
 }
 
@@ -144,22 +146,22 @@ static int row_touched(unsigned char dirty[GRID_H][GRID_W], int row)
 }
 
 int game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
-                     int fps, int cmd_frame, int total_bullets)
+                     int fps, int cmd_frame, int total_bullets, int coins)
 {
     int any = 0;
-    int v[10];
+    int v[HUD_CELLS_Y];
     int i;
 
-    hud_values(fps, cmd_frame, total_bullets, v);
+    hud_values(fps, cmd_frame, total_bullets, coins, v);
 
     if (!s_init) {
-        for (i = 0; i < 10; ++i) { s_last[0][i] = -1; s_last[1][i] = -1; }
+        for (i = 0; i < HUD_CELLS_Y; ++i) { s_last[0][i] = -1; s_last[1][i] = -1; }
         s_init = 1;
     }
 
     if (buf < 0 || buf > 1) buf = 0;
 
-    for (i = 0; i < 10; ++i) {
+    for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
 
         if (s_last[buf][i] != v[i]) {           /* ① 数值变了：标脏 + 重画这一行 */
@@ -177,18 +179,19 @@ int game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
 }
 
 /*  绘制：把标脏过的行画出来（没标脏的不用管）  */
-void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, int full)
+void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, int coins, int full)
 {
-    static const char *labels[10] = { "FPS", "BULLETS", "CMD", "STAGE", 0,
-                                      "DMG", "MOVE", "BSPD", "RANGE", "RATE" };
-    static const int digits[10]   = { 2, 3, 3, 2, 0, 2, 2, 2, 3, 2 };
-    int v[10];
+    static const char *labels[HUD_CELLS_Y] = { "FPS", "BULLETS", "CMD", "STAGE", 0,
+                                               "DMG", "MOVE", "BSPD", "RANGE", "RATE",
+                                               "COINS" };
+    static const int digits[HUD_CELLS_Y]   = { 2, 3, 3, 2, 0, 2, 2, 2, 3, 2, 3 };
+    int v[HUD_CELLS_Y];
     int i;
 
-    hud_values(fps, cmd_frame, total_bullets, v);
+    hud_values(fps, cmd_frame, total_bullets, coins, v);
     if (buf < 0 || buf > 1) buf = 0;
 
-    for (i = 0; i < 10; ++i) {
+    for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
         if (!full && !s_draw[buf][i]) continue;
         hud_row(fb, i, labels[i], v[i], digits[i]);
@@ -242,24 +245,6 @@ void game_hud_toast(u32 fb, const char *text)
 
     while (*p++) ++len;
     hud_label(fb, (SCR_W - len * 16) / 2, HUD_TOAST_Y, text);
-}
-
-/*----------------------------------------------------------------------------*/
-void game_hud_countdown(u32 fb, int n)
-{
-    hud_label(fb, (SCR_W - 5 * 16) / 2, HUD_CD_Y, "READY");
-    if (n > 0 && n < 10)
-        hud_number(fb, (SCR_W - 16) / 2, HUD_CD_Y + 34, n, 1);
-}
-
-/*----------------------------------------------------------------------------*/
-void game_hud_banner(u32 fb, const char *text)
-{
-    int len = 0;
-    const char *p = text;
-
-    while (*p++) ++len;
-    hud_label(fb, (SCR_W - len * 16) / 2, 120, text);
 }
 
 /*----------------------------------------------------------------------------*/

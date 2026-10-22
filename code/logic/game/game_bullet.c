@@ -5,7 +5,7 @@
 //    · game_bullet_spawn()     : 通用生成（位置 + 速度 + 弹道 + 贴图 + 敌我）
 //    · game_bullet_fire_enemy(): 朝向版（直线），弹幕雨 / 简单图案用它
 //    · game_bullets_step()     : 按弹道推进 → 判命中 → 判越界
-//    · game_bullets_draw()     : 绘制（朝向由速度方向推出来）
+//    · game_bullets_submit()   : 把每颗弹登记进渲染队列（z = 底边 y，和角色/Boss 同一把尺子）
 //  上一级是谁  : game/game_main.c（每帧）、game_player.c / game_boss.c（生成）
 //  接口契约    :
 //    · 固定 256 槽的池子，不开动态内存；其中 32 槽永远留给玩家（PLAYER_RESERVE）
@@ -26,8 +26,8 @@ static const u32 dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
 /*----------------------------------------------------------------------------*/
 static int bullet_asset(const bullet_t *b)
 {
-    /*  敌方弹用 base 弹贴图，红色靠【半透明颜色层】压上去（见下面的绘制）  */
-    if (b->enemy)                 return ASSET_bullet_type_A_enemy;
+    /*  敌我弹共用 base 贴图；敌方颜色由绘制时的 tint+alpha 命令实时染色  */
+    if (b->enemy)                 return ASSET_bullet_type_A_base;
     if (b->type == BULLET_CHILI)  return ASSET_bullet_type_B_chili_NOTROT90;
     if (b->type == BULLET_URANUS) return ASSET_bullet_type_C_Uranus;
     return ASSET_bullet_type_A_base;
@@ -239,6 +239,12 @@ void game_bullets_step(u32 now)
         cx = b->x + BW / 2;             /* 判定点 = 子弹中心 */
         cy = b->y + BH / 2;
 
+        /*  可交互石头：玩家弹 / Boss 弹撞上都直接消失；石头本身不可破坏  */
+        if (game_stone_hit_at(cx, cy)) {
+            b->active = 0;
+            continue;
+        }
+
         if (b->enemy) {
             /* 打到角色的【身体】（头不判、脚不判） */
             if (pt_in(cx, cy, g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H)) {
@@ -257,6 +263,12 @@ void game_bullets_step(u32 now)
 
             if (hit) {
                 game_boss_hit(now);
+                b->active = 0;
+                continue;
+            }
+
+            /*  没打中 Boss：再看当前房间的 slime  */
+            if (game_mobs_try_hit(cx, cy)) {
                 b->active = 0;
                 continue;
             }
@@ -283,28 +295,47 @@ void game_bullets_sync(int buf)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  只画【深度】落在 [dmin, dmax) 的弹 —— 深度 = 底边 y（越大越靠前）  */
-void game_bullets_draw(u32 fb, int dmin, int dmax)
+/*  一颗弹的画法：由渲染队列排好序之后按槽号调用  */
+static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
+{
+    const bullet_t *b = &g.bullets[i];
+    int ai = bullet_asset(b);
+
+    (void)now; (void)buf;
+
+    /*  ★ 敌我弹都走 α：敌方弹用 base 弹 + 运行时 tint+alpha（MODE=4），
+     *     先给 base 上色，再用 base 的 α=128 软边和背景混合。
+     *     ★ 不再用预染的 bullet_type_A_enemy；那张图可以不用了。  */
+    if (b->enemy) {
+        CI_gpu2d_spriteAlphaTintRect(
+            g_assets[ASSET_bullet_type_A_base].base_word,
+            g_assets[ASSET_bullet_type_A_base].stride_word,
+            fb, (u32)b->x, (u32)b->y, BW, BH,
+            0x00FF4040u,   /* 红色 */
+            160u,          /* 浓度 0..255 */
+            1u,            /* 插值染色 */
+            bullet_flip(b, ASSET_bullet_type_A_base));
+    } else {
+        CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
+            fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
+    }
+}
+
+/*----------------------------------------------------------------------------*/
+/*  把每颗在场、且整块在屏内的弹登记进渲染队列。
+ *  z = Z_ACTOR + 底边 y ⇒ 弹和角色 / Boss / 道具用同一条深度尺子互相遮挡：
+ *  弹飞到人物脚下方就盖住人物，飞到人物头上就被人物盖住（俯视视角的透视）。  */
+void game_bullets_submit(void)
 {
     int i;
 
     for (i = 0; i < N_BULLETS; ++i) {
         const bullet_t *b = &g.bullets[i];
-        int ai;
-        int depth;
 
         if (!b->active) continue;
-        depth = b->y + BH;
-        if (depth < dmin || depth >= dmax) continue;
+        if (!game_visible(b->x, b->y, BW, BH)) continue;   /* 屏外不占队列 */
 
-        ai = bullet_asset(b);
-
-        if (!game_visible(b->x, b->y, BW, BH)) continue;
-
-        /*  ★ 敌我弹都走 α：敌方弹用【已经染红的素材】bullet_type_A_enemy，
-         *     这样半透明也能保留（combineTint 那套是 REPLACE，必定不透明）  */
-        CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
-            fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
+        rl_push(ACTOR_Z(b->y + BH), bullet_draw_one, i);
     }
 }
 
