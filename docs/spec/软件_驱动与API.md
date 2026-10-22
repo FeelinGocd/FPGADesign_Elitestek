@@ -652,6 +652,7 @@ uv run tools/game_pad.py -p COM5       # 连上，W/A/S/D 或方向键，ESC 退
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v4.7 | 2026-10-22 | Boss 弹幕改走**硬件 MODE=4**：`ASSET_bullet_type_A_base` + `CI_gpu2d_spriteAlphaTintRect` 实时红 tint，保留 base α；`C_Uranus` 只给玩家；`bullet_type_A_enemy` 预染图不再使用 |
 | v4.6 | 2026-10-22 | Boss 弹幕恢复 **`bullet_type_A_enemy` 预染红弹**；C_Uranus 绿紫星球只给玩家 Uranus 弹；MODE=4 tint+alpha 代码保留，但当前子弹不再使用 |
 | v4.5 | 2026-10-22 | 修复 **Boss 弹幕素材**：`bullet_asset()` 先判 `BULLET_URANUS` / `BULLET_CHILI`，再判 `enemy`；Boss 的 `BULLET_URANUS` 恢复 `ASSET_bullet_type_C_Uranus`；只有敌方 **A 弹**走 base + tint，B/C 不再被一起染红 |
 | v4.4 | 2026-10-22 | 新增 **bug 敌怪**：`mobs_bug_00_standUp` / `mobs_bug_01_Right`；4 步动画 **0, 1, 对称1, 0**（第 3 帧 `GPU2D_FLIP_X`）；普通/道具房 **1 slime + 1 bug**；bug HP 2、30 ms/px 追击、120 ms/帧；素材 **79 / 24608 字 / 145 色** |

@@ -26,9 +26,9 @@ static const u32 dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
 /*----------------------------------------------------------------------------*/
 static int bullet_asset(const bullet_t *b)
 {
-    /*  Boss / 敌方弹用预染的 A_enemy（红色）—— C_Uranus 是玩家的 Uranus 弹，
-     *  不能给 Boss 用（否则 Boss 弹幕会变成玩家的绿紫色星球）。  */
-    if (b->enemy)                 return ASSET_bullet_type_A_enemy;
+    /*  敌方（Boss）走 A_base + 硬件 MODE=4 实时 tint；
+     *  玩家的 B/C 弹走各自素材。C_Uranus 只给玩家，不给 Boss。  */
+    if (b->enemy)                 return ASSET_bullet_type_A_base;
     if (b->type == BULLET_CHILI)  return ASSET_bullet_type_B_chili_NOTROT90;
     if (b->type == BULLET_URANUS) return ASSET_bullet_type_C_Uranus;
     return ASSET_bullet_type_A_base;
@@ -304,11 +304,21 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
 
     (void)now; (void)buf;
 
-    /*  敌我弹都走 α；敌方弹用预染的 bullet_type_A_enemy（红色），
-     *  这样 Boss 弹幕保持原来的红弹造型，不会被染成玩家的 C_Uranus 绿紫星球。
-     *  ★ MODE=4 的 tint+alpha 代码保留，但当前子弹不再使用。  */
-    CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
-        fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
+    /*  ★ Boss 弹幕走硬件 MODE=4：A_base + spriteAlphaTintRect 实时红 tint；
+     *     base 的 α=128 软边保留。玩家 B/C 弹走普通 alpha。  */
+    if (b->enemy) {
+        CI_gpu2d_spriteAlphaTintRect(
+            g_assets[ASSET_bullet_type_A_base].base_word,
+            g_assets[ASSET_bullet_type_A_base].stride_word,
+            fb, (u32)b->x, (u32)b->y, BW, BH,
+            0x00FF4040u,   /* 红色 */
+            160u,          /* 浓度 0..255 */
+            1u,            /* 插值染色 */
+            bullet_flip(b, ASSET_bullet_type_A_base));
+    } else {
+        CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
+            fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
+    }
 }
 
 /*----------------------------------------------------------------------------*/
