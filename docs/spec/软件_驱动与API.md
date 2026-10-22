@@ -652,6 +652,7 @@ uv run tools/game_pad.py -p COM5       # 连上，W/A/S/D 或方向键，ESC 退
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v4.5 | 2026-10-22 | 修复 **Boss 弹幕素材**：`bullet_asset()` 先判 `BULLET_URANUS` / `BULLET_CHILI`，再判 `enemy`；Boss 的 `BULLET_URANUS` 恢复 `ASSET_bullet_type_C_Uranus`；只有敌方 **A 弹**走 base + tint，B/C 不再被一起染红 |
 | v4.4 | 2026-10-22 | 新增 **bug 敌怪**：`mobs_bug_00_standUp` / `mobs_bug_01_Right`；4 步动画 **0, 1, 对称1, 0**（第 3 帧 `GPU2D_FLIP_X`）；普通/道具房 **1 slime + 1 bug**；bug HP 2、30 ms/px 追击、120 ms/帧；素材 **79 / 24608 字 / 145 色** |
 | v4.3 | 2026-10-22 | 新增 **MODE=4 TINT_ALPHA**：`CI_gpu2d_spriteAlphaTint` / `spriteAlphaTintRect`（3 CI：base + tint）；敌方 A 弹改回 `ASSET_bullet_type_A_base` + 运行时红色 tint，保留 α=128 软边；`bullet_type_A_enemy` 预染图不再使用 |
 | v4.2 | 2026-10-22 | 适配新素材目录（`bigFish` / `character/bullet` / `accessory` / `background_interact`）；新增 **shop 门**（`ASSET_background_door_shop` = 71，移出 background 前缀，避免挤占 bedrock/wood）与 **MagicCard** 道具图（67）；`ROOM_SHOP` 的门改用 shop 贴图；素材 **75 / 24032 字 / 143 色** |

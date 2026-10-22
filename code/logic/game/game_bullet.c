@@ -26,10 +26,11 @@ static const u32 dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
 /*----------------------------------------------------------------------------*/
 static int bullet_asset(const bullet_t *b)
 {
-    /*  敌我弹共用 base 贴图；敌方颜色由绘制时的 tint+alpha 命令实时染色  */
-    if (b->enemy)                 return ASSET_bullet_type_A_base;
+    /*  先按弹种选素材：Boss 弹幕是 BULLET_URANUS，必须用 C_Uranus 那张，
+     *  不能被下面的 enemy 默认分支吞掉（否则 Boss 弹幕全变成 A 弹）。  */
     if (b->type == BULLET_CHILI)  return ASSET_bullet_type_B_chili_NOTROT90;
     if (b->type == BULLET_URANUS) return ASSET_bullet_type_C_Uranus;
+    if (b->enemy)                 return ASSET_bullet_type_A_base;   /* 敌方 A 弹：base + tint */
     return ASSET_bullet_type_A_base;
 }
 
@@ -303,10 +304,9 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
 
     (void)now; (void)buf;
 
-    /*  ★ 敌我弹都走 α：敌方弹用 base 弹 + 运行时 tint+alpha（MODE=4），
-     *     先给 base 上色，再用 base 的 α=128 软边和背景混合。
-     *     ★ 不再用预染的 bullet_type_A_enemy；那张图可以不用了。  */
-    if (b->enemy) {
+    /*  ★ 只有敌方 A 弹走 base + 运行时 tint+alpha（MODE=4）；
+     *     Boss 的 C_Uranus / B 弹有自己的素材，走普通 alpha，不能一起染红。  */
+    if (b->enemy && ai == ASSET_bullet_type_A_base) {
         CI_gpu2d_spriteAlphaTintRect(
             g_assets[ASSET_bullet_type_A_base].base_word,
             g_assets[ASSET_bullet_type_A_base].stride_word,
