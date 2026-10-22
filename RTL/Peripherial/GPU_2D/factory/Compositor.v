@@ -205,9 +205,15 @@ assign  src_used            = |src_en_r;
 assign  sel_src1            = src_en_r[1];
 assign  alpha_mode          = src_en_r[1] & src_en_r[0];            // 11 ⇒ 混合模式
 
-//   ★ 纯色层：第 2 层 flags[2:0]=3（不读素材）或 4（tint+AB）且开了色调模式 ⇒ 上层 = 常量色 + 浓度
+//   ★ 纯色层：第 2 层 flags[2:0]=3（不读素材）或 4（tint+AB）⇒ 上层 = 常量色 + 浓度
+//   ★★ 这里【不能】再 gate `fx_tone_r != 0`（2026-10-22 修）：tone=0 是合法档位
+//      （"tint 关"），但 imageCombine 进 S_COMBINE 后，纯色层那一趟上游根本不来货
+//      （PaletteSource 只读 base 一趟）；line_solid_en=0 时它等 source_valid 永远等不到
+//      ⇒ 整行卡死、line_done 永不回。去掉这个 gate 后 tone=0 走 mix_sel：
+//      ck 开时 cur_wr_en=0 ⇒ 取缓冲里的 base 原色，掩码/α 全用 base 的
+//      ⇒ 正好等价 MODE=2（tint 不生效），和文档 §5.6 "tint=0 回到老行为" 一致。
 assign  fx_solid_en    = line_fx_en & ((flags_r[2:0] == 3'd3) ||
-                                       (flags_r[2:0] == 3'd4)) & (fx_tone_r != 3'd0);
+                                       (flags_r[2:0] == 3'd4));
 assign  fx_solid_data  = {PIXELS{fx_color_r[23:0]}};
 assign  fx_solid_alpha = {PIXELS{fx_strength_r}};
 

@@ -93,6 +93,9 @@ u32  lineBuffer_isEnabled(void);
 /** @brief 当前请求的模式是否为分屏。 */
 u32  lineBuffer_isSplit(void);
 
+/** @brief 当前显示模式的一行字节数（软件缓存；lineBuffer_setSplit 时更新）。 */
+u32  lineBuffer_lineBytes(void);
+
 /** @brief 读加速器侧帧率(帧/秒)。没写 DONE 之前恒为 0 —— 统计的是交帧事件, 不是刷新率。 */
 u32  lineBuffer_getFpsAcc(void);
 

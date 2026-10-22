@@ -20,6 +20,10 @@
 #include "io.h"             /* 带来 soc.h 里的 IO_APB_SLAVE_0_INPUT */
 #include "vexriscv.h"       /* data_cache_invalidate_all: 写完帧缓存要刷 cache */
 
+/*  软件缓存的行跨距：绘制热路径不再每发一条命令都读一次 APB STATUS。
+ *  lineBuffer_setSplit() 是唯一入口，切全屏/分屏时同步更新。  */
+static u32 s_line_bytes = LINEBUFFER_LINE_BYTES;
+
 /*------------------------------------------------------------------------------
  * 基地址 = APB Slave 0 窗口(soc.h, 0xf8100000) + 0x2040。
  * 和 RTL 必须一致, 改一处要改两处: 槽 2 = PADDR[15:12]==4'b0010, 显示子块 = PADDR[6]==1。
@@ -101,6 +105,7 @@ void lineBuffer_setSplit(u32 split){
         s &= ~LINEBUFFER_ST_SPLIT;
 
     LINEBUFFER->status = s;
+    s_line_bytes = split ? LINEBUFFER_HALF_LINE_BYTES : LINEBUFFER_LINE_BYTES;
 }
 
 /** @brief 读 STATUS 原值。 */
@@ -116,6 +121,11 @@ u32 lineBuffer_isEnabled(void){
 /** @brief 当前请求的模式是否为分屏。 */
 u32 lineBuffer_isSplit(void){
     return (LINEBUFFER->status & LINEBUFFER_ST_SPLIT) ? 1u : 0u;
+}
+
+/** @brief 当前显示模式的一行字节数（全屏 5760 / 分屏半幅 2880）。 */
+u32 lineBuffer_lineBytes(void){
+    return s_line_bytes;
 }
 
 /** @brief 读加速器侧帧率。 */

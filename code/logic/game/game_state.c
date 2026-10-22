@@ -105,6 +105,11 @@ void game_reset_state(void)
     game_item_invalidate();                            /* 初始 3 条命（1UP! 再加一） */
     g.bullet_type = BULLET_A;
     g.held_type = ITEM_CHILI;
+    g.stats.move_v8      = PLAYER_MAX_V8;
+    g.stats.fire_every   = (int)FIRE_EVERY;
+    g.stats.bullet_speed = PLAYER_BULLET_SPEED;
+    g.stats.triple_speed = PLAYER_TRIPLE_SPEED;
+    g.stats.damage       = 1;
     g.pickup_until = 0u;
     g.hurt_until = 0u;
     g.toast_until = 0u;
@@ -138,6 +143,7 @@ void game_reset_state(void)
     /*  开局在起始房：没有道具、没有 Boss。
      *  道具由"进道具房"时随机生成（见 game_flow_enter_room）。  */
     g.item.active = 0;
+    g.boss_drop_pending = 0;                /* Boss 饰品掉落状态也清零 */
     g.item.type = ITEM_CHILI;
     g.item.x = (SCR_W - ITEM_W) / 2;
     g.item.y = (SCR_H - ITEM_H) / 2;
@@ -151,8 +157,8 @@ void game_reset_state(void)
     g.probe_epoch = 0u; g.probe_frames = 0u; g.probe_frame_no = 0u;
     g.probe_peak = 0; g.probe_peak_frame = 0; g.probe_peak_cmd = 0;
 
+    game_bullets_clear();                   /* 同时复位 alive 计数 / 空闲槽栈 */
     for (i = 0; i < N_BULLETS; ++i) {
-        g.bullets[i].active = 0;
         g.old_bullets[0][i].active = 0;
         g.old_bullets[1][i].active = 0;
     }
@@ -192,14 +198,12 @@ void game_flow_enter_room(void)
     int type = game_room_type();
     int id = game_room_id();
 
-    /*  换房：先清掉上一间房的小怪 / 金币 / 蜘蛛网 / 石头  */
+    /*  换房：小怪按房间重建；金币 / 网 / 石头都带 room 持久化，不在这里清  */
     game_mobs_reset();
-    game_coins_reset();
-    game_web_reset();
-    game_stones_reset();
 
-    /*  默认：这间房没有道具；Boss 房保留 Boss 当前状态（Boss 只生成一次）  */
-    g.item.active = 0;
+    /*  默认：这间房没有道具；Boss 房保留 Boss 当前状态（Boss 只生成一次）。
+     *  ★ Boss 击破掉的饰品如果还没捡，重进 Boss 房要恢复，不能在这里清掉。  */
+    g.item.active = (type == ROOM_BOSS && g.boss_drop_pending) ? 1 : 0;
     if (type != ROOM_BOSS) {
         g.boss_locked = 0;
         g.boss_blink_cnt = 0;
@@ -211,23 +215,25 @@ void game_flow_enter_room(void)
     case ROOM_EMPTY:
         g.phase = PHASE_EXPLORE;
         if (!game_room_is_spawned(id) && !game_room_is_cleared(id)) {
-            game_mobs_spawn(1);             /* 普通房：1 只 slime */
+            game_mobs_spawn(2);             /* 普通房：2 只 slime */
             game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
         }
-        game_web_spawn(1 + (int)(game_ms() % 2u));   /* 普通房 1~2 张网 */
+        game_web_spawn(2 + (int)(game_ms() % 2u));   /* 普通房 2~3 张网 */
         bsp_printf("ROOM: empty\r\n");
         break;
 
     case ROOM_ITEM:
         g.phase = PHASE_EXPLORE;
+        /*  单槽道具：进道具房就以这间的道具为准；上一间 Boss 没捡的饰品作废  */
+        g.boss_drop_pending = 0;
         if (game_room_is_used(id)) {
             bsp_printf("ROOM: item (already taken)\r\n");
         } else if (!game_room_is_spawned(id)) {
             /*  ★ 道具房：这一轮第一次进来才随机挑一个，放在【房间中心】 */
             game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
                                    (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
-            game_mobs_spawn(1);             /* 道具房：1 只 slime */
+            game_mobs_spawn(2);             /* 道具房：2 只 slime */
             game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
             bsp_printf("ROOM: item (random #%d)\r\n", g.item.type);
@@ -259,18 +265,24 @@ void game_flow_enter_room(void)
 
     case ROOM_SHOP:
         g.phase = PHASE_EXPLORE;
-        bsp_printf("ROOM: shop (empty)\r\n");
+        game_shop_enter();                  /* 首次进商店：随机挑一个在售道具 */
+        bsp_printf("ROOM: shop (heart=5, item=15)\r\n");
         break;
 
     default:                            /* ROOM_START */
         g.phase = PHASE_EXPLORE;
-        game_web_spawn(1 + (int)(game_ms() % 2u));   /* 起点房也是普通房 */
+        game_web_spawn(2 + (int)(game_ms() % 2u));   /* 起点房也是普通房 */
         bsp_printf("ROOM: start\r\n");
         break;
     }
 
-    /*  每个房间随机 3~5 块可交互石头；spawn 内部用 BFS 保证门与门连通  */
-    game_stones_spawn(3 + (int)(game_ms() % 3u));
+    /*  商店是特殊房：不刷 mob / web / stone；其它房间增加石头，
+     *  Boss 房再稍微多一点点（普通 5~7，Boss 7~8）。  */
+    if (type != ROOM_SHOP) {
+        int n = (type == ROOM_BOSS) ? (7 + (int)(game_ms() % 2u))
+                                    : (5 + (int)(game_ms() % 3u));
+        game_stones_spawn(n);
+    }
 }
 
 /*----------------------------------------------------------------------------*/

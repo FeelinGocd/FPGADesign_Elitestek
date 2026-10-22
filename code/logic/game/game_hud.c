@@ -46,6 +46,13 @@ static void hud_label(u32 fb, int x, int y, const char *text)
 
 static void hud_number(u32 fb, int x, int y, int value, int digits)
 {
+    /*  ★ 16×8 加进来之后，素材表里 num0_16x24 / num0_16x8 / num1_16x24… 是交错的，
+     *    不能再拿 ASSET_num0_16x24 + digit 连续寻址，否则会混进小号数字。  */
+    static const int big_digit[10] = {
+        ASSET_num0_16x24, ASSET_num1_16x24, ASSET_num2_16x24, ASSET_num3_16x24,
+        ASSET_num4_16x24, ASSET_num5_16x24, ASSET_num6_16x24, ASSET_num7_16x24,
+        ASSET_num8_16x24, ASSET_num9_16x24
+    };
     int i;
 
     if (value < 0) value = 0;
@@ -53,7 +60,7 @@ static void hud_number(u32 fb, int x, int y, int value, int digits)
         int div = 1, j;
 
         for (j = 0; j < i; ++j) div *= 10;
-        hud_glyph(fb, x, y, ASSET_num0_16x24 + (value / div) % 10);
+        hud_glyph(fb, x, y, big_digit[(value / div) % 10]);
         x += 16;
     }
 }

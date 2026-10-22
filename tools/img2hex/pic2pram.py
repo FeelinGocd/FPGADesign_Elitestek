@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#   用法（本仓库用 uv，依赖在仓库根的 pyproject.toml 里）：uv run res/func/pic2pram.py
+#   用法（本仓库用 uv，依赖在仓库根的 pyproject.toml 里）：uv run tools/img2hex/pic2pram.py
 """
 pic2pram.py —— 把 res/pic 里的图片转成 2D 加速器【素材源】要用的初值文件
 
 干什么
     res/pic 里的图片  ──▶  8bpp 索引 + 一张 256 色调色板 + 素材描述表
-    产物全部落在 res/func/output/，给 RTL 的初值文件用（生成 bit 的阶段烧进 BRAM）：
-        assets.hex       素材索引数据（PRAM 初值），一行 = 一个 32 位字 = 4 个索引
-        palette.hex      调色板，一行 = 一项 AARRGGBB（★ α 在高字节，低 24 位就是原来的 RRGGBB）
-        assets_desc.vh   素材描述表（Verilog include，给 PaletteSource 查表用）
-        assets_desc.h    同一张表的 C 头文件（软件算坐标/调试时用）
-        preview_*.png    量化后的预览（肉眼确认硬件会画成什么样）
-        report.txt       这次转换的账（编号/尺寸/跨距/占用/基址/调色板用量）
+    产物直接写进要用的地方：
+        project/<工程>/hex/assets.hex
+        project/<工程>/hex/palette.hex     RTL 的 $readmemh 初值（重新综合才生效）
+        tools/img2hex/output/assets_desc.h C 侧素材表（再复制到固件的 gpu2d 目录）
+        tools/img2hex/output/report.txt   这次转换的账（编号/尺寸/跨距/占用/基址/调色板用量）
+
+    不再生成 preview_*.png / alpha_demo_*.png —— 这些图没人看，已经删掉。
 
 为什么这么做
     · 一张调色板要服务所有素材 ⇒ 先把所有图缩略图拼起来量化出【共用】256 色，
@@ -22,9 +22,9 @@ pic2pram.py —— 把 res/pic 里的图片转成 2D 加速器【素材源】要
     · 索引数据、调色板、描述表【同一处生成】⇒ 图/表/颜色永远不会对不上。
 
 怎么用
-    python res/func/pic2pram.py                 # 用下面的默认参数
-    python res/func/pic2pram.py --max 64        # 单张素材最大边缩到 64
-    python res/func/pic2pram.py --budget 8192   # 只看 32KB 预算够不够（不写文件）
+    python tools/img2hex/pic2pram.py                 # 用下面的默认参数
+    python tools/img2hex/pic2pram.py --max 64        # 单张素材最大边缩到 64
+    python tools/img2hex/pic2pram.py --budget 8192   # 只看 32KB 预算够不够（不写文件）
 
 约定（RTL 那边按这个来）
     字 = 32 位 = 4 个 8bpp 索引；字里【低位字节 = 最左边的像素】
@@ -60,7 +60,7 @@ except ImportError:
     sys.exit("需要 Pillow：请用带 Pillow 的 python 跑（本机 E:\\Program Flies\\python\\python.exe 有 10.3.0）")
 
 # ---------------------------------------------------------------- 配置
-ROOT        = Path(__file__).resolve().parents[2]      # 工程根目录
+ROOT        = Path(__file__).resolve().parents[2]      # 工程根目录（tools/img2hex/ 的上两级）
 PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #   ★★ 默认扫【哪几个目录】—— 不是 res/pic 根目录！
 #     老版本默认扫根目录 ⇒ 会把根目录下的非素材图（以前那张实拍照片）也打进去，
@@ -80,10 +80,10 @@ PIC_DIRS_DEFAULT = [
     PIC_DIR / "character" / "mobs",   # 小怪（slime 2 帧）
     PIC_DIR / "base" / "background_interact", # 新背景装饰：不挤占原有地砖/墙的编号
 ]
-OUT_DIR     = ROOT / "res" / "func" / "output"         # 产物（归档 + 给 C 用）
+OUT_DIR     = Path(__file__).resolve().parent / "output"   # 报告 + 素材表（不给综合用）
 #   ★ Efinity 综合时，$readmemh 的相对路径是按【工程目录】解析的 —— 工程里 SoC 自己
 #     那些 .bin 初值就是直接躺在工程目录里的。所以 assets.hex / palette.hex
-#     除了放 output 归档，还要在【每个】Efinity 工程那边再放一份，
+#     直接写进【每个】Efinity 工程，不再在 res 下留归档，
 #     否则综合报 VERI-1012 cannot open file。
 #   ★ 放【工程根】还是放【工程下的子目录】，由 RTL 里的参数决定：
 #       GPU_2D.v 的 INDEX_INIT_FILE / PALETTE_INIT_FILE 写 "assets.hex"   ⇒ 放工程根；
@@ -399,14 +399,11 @@ def main():
         return
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for old in OUT_DIR.glob("preview_*.png"):       # 清掉上次留下的预览, 免得看不出哪张是新的
-        old.unlink()
 
-    # ---- assets.hex：PRAM 初值 ----
-    with open(OUT_DIR / "assets.hex", "w", encoding="ascii") as f:
-        for a in assets:
-            for wd in a["words_data"]:
-                f.write(f"{wd:08x}\n")
+    # ---- assets.hex：PRAM 初值（先拼文本，稍后直接写进工程）----
+    assets_hex_text = "\n".join(
+        f"{word:08x}" for a in assets for word in a["words_data"]
+    ) + "\n"
 
     # ---- palette.hex：调色板（★ 一项 = AARRGGBB，α 在高字节）----
     #   低 24 位就是原来的 RRGGBB ⇒ "低位字节 = B"这条全工程约定一点没变；
@@ -421,16 +418,37 @@ def main():
     for old_ix, new_ix, _ in splits:
         assert pal[old_ix*3:old_ix*3+3] == pal[new_ix*3:new_ix*3+3]
     pal_alpha[PAD_INDEX] = 0
-    with open(OUT_DIR / "palette.hex", "w", encoding="ascii") as f:
-        for i in range(PAL_ENTRIES):
-            r, g, b = pal[i*3], pal[i*3+1], pal[i*3+2]
-            f.write(f"{pal_alpha[i]:02x}{r:02x}{g:02x}{b:02x}\n")
+    palette_hex_text = "\n".join(
+        f"{pal_alpha[i]:02x}{pal[i*3]:02x}{pal[i*3+1]:02x}{pal[i*3+2]:02x}"
+        for i in range(PAL_ENTRIES)
+    ) + "\n"
+
+    # ---- 写进每个 Efinity 工程（$readmemh 按工程目录解析，少一份就报 VERI-1012）----
+    hex_dirs = []
+    for d in EFX_HEX_DIRS:
+        proj = d.parent                     # ★ 工程目录本身不存在就别建了（写错路径能立刻看出来）
+        if not proj.is_dir():
+            print(f"[WARN] 找不到工程目录 {proj}，{d.name}/ 下的 hex 没写")
+            continue
+        d.mkdir(parents=True, exist_ok=True)   # 目标子目录不存在就建（例如 <工程>/hex/）
+        with open(d / "assets.hex", "w", encoding="ascii", newline="\n") as f:
+            f.write(assets_hex_text)
+        with open(d / "palette.hex", "w", encoding="ascii", newline="\n") as f:
+            f.write(palette_hex_text)
+        hex_dirs.append(d)
+    if not hex_dirs:
+        print("[WARN] 没有可写的工程 hex 目录，hex 先放 tools/img2hex/output/")
+        with open(OUT_DIR / "assets.hex", "w", encoding="ascii", newline="\n") as f:
+            f.write(assets_hex_text)
+        with open(OUT_DIR / "palette.hex", "w", encoding="ascii", newline="\n") as f:
+            f.write(palette_hex_text)
+        hex_dirs.append(OUT_DIR)
 
     # ---- assets_desc.h：素材信息交给 C（软件发命令时把 base/宽/高带下去）----
     #   硬件不查表 ⇒ 不再生成 Verilog 描述表（.vh）。
     #   ★ 生成文件里注释一律 ASCII：它要被 C 编译器直接吃，中文在不保证 UTF-8 的环境会乱。
-    with open(OUT_DIR / "assets_desc.h", "w", encoding="ascii") as f:
-        f.write("/* generated by res/func/pic2pram.py -- DO NOT EDIT */\n")
+    with open(OUT_DIR / "assets_desc.h", "w", encoding="ascii", newline="\n") as f:
+        f.write("/* generated by tools/img2hex/pic2pram.py -- DO NOT EDIT */\n")
         f.write("#pragma once\n\n")
         f.write(f"#define ASSET_NUM   {len(assets)}\n\n")
         f.write("typedef struct {\n"
@@ -457,15 +475,11 @@ def main():
             f.write(f"    {ident} = {i},\n")
         f.write("};\n")
 
-    # ---- 预览图 + 账本 ----
-    for i, a in enumerate(assets):
-        q_preview = a["q"].copy()
-        q_preview.putpalette(pal)
-        q_preview.convert("RGB").save(OUT_DIR / f"preview_{i}_{a['safe']}.png")
-
+    # ---- 账本 ----
     with open(OUT_DIR / "report.txt", "w", encoding="utf-8-sig") as f:
         f.write("输入目录 : " + ", ".join(str(d) for d in pic_dirs) + "\n")
-        f.write(f"输出目录 : {OUT_DIR}\n")
+        f.write(f"报告目录 : {OUT_DIR}\n")
+        f.write("综合 hex : " + ", ".join(str(d) for d in hex_dirs) + "\n")
         f.write(f"最大边   : {args.max}   调色板: {PAL_ENTRIES} 色   实际用到: {used}\n")
         f.write(f"PRAM     : 每字 {PIX_PER_WORD} 个索引, 共 {total} 字 = {total*4/1024:.1f} KB\n\n")
         f.write(f"{'#':>3}  {'文件':<24} {'宽':>4} {'高':>4} {'跨距':>5} {'字数':>7} {'基址':>7}"
@@ -496,20 +510,11 @@ def main():
         else:
             print(f"[WARN] 找不到固件目录 {d}，assets_desc.h 没放过去")
 
-    # ---- 综合要用的那一份：每个 Efinity 工程都要放（放哪由 RTL 的 INIT_FILE 参数决定）----
-    for d in EFX_HEX_DIRS:
-        proj = d.parent                     # ★ 工程目录本身不存在就别建了（写错路径能立刻看出来）
-        if not proj.is_dir():
-            print(f"[WARN] 找不到工程目录 {proj}，{d.name}/ 下的 hex 没放过去")
-            continue
-        d.mkdir(parents=True, exist_ok=True)   # 目标子目录不存在就建（例如 <工程>/hex/）
-        for n in ("assets.hex", "palette.hex"):
-            shutil.copyfile(OUT_DIR / n, d / n)
-        print(f"[OK] 综合用副本已放好：{d}")
-
-    print(f"[OK] 产物写好了：{OUT_DIR}")
-    for n in ("assets.hex", "palette.hex", "assets_desc.h", "report.txt"):
+    print(f"[OK] 报告 / 素材表：{OUT_DIR}")
+    for n in ("assets_desc.h", "report.txt"):
         print(f"    {n}")
+    for d in hex_dirs:
+        print(f"[OK] 综合 hex：{d}")
 
     #   ★★ 素材动过之后必须做的三件事（漏一件就是"板上还是旧的"）
     #      —— 2026-10-14 就踩过：C 代码改了、固件没重编，板上跑的少一段逻辑。

@@ -450,13 +450,22 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                              //   ★ MY（垂直镜像）：这张图的源地址从【最后一行】开始，
                              //     之后每行往回走一个跨距。目的地址照旧正向推进。
                              //     (h−1)×stride 每条命令、每张图只算一次（不是每像素）。
-                             line_src_r[32*i +: 32]        <= cmd_flags[8*i + 7]
-                                                            ? (cmd_flags[8*i + 6]
-                                                               ? rot_col_last_addr(cmd_src[32*i +: 32], cmd_h)
-                                                               : cmd_src[32*i +: 32])
-                                                            : (cmd_flags[8*i + 6]
-                                                               ? (cmd_src[32*i +: 32] + lane_take_last_row[40*i +: 32])
-                                                               : cmd_src[32*i +: 32]);
+                             //   ★★ 例外：纯色层（flags[2:0]=3=CK 纯色 / 4=TINT_ALPHA）那一格带的
+                             //      【不是地址，是颜色】⇒ 起点也不能按地址算。特别是 MODE=4：
+                             //      tone[2] 正好落在 param[23] 上，CIUnpack 会把它同时塞进
+                             //      flags[7]（ROT90）⇒ 这里若不排除，tone=4 就会被当成旋转，
+                             //      第 0 行颜色就被 rot_col_last_addr 改坏（h≥5 时 +1 起步）。
+                             line_src_r[32*i +: 32]        <=
+                                 ((cmd_flags[8*i +: 3] == MODE_CKEY) ||
+                                  (cmd_flags[8*i +: 3] == MODE_TINT_ALPHA))
+                                 ? cmd_src[32*i +: 32]
+                                 : (cmd_flags[8*i + 7]
+                                    ? (cmd_flags[8*i + 6]
+                                       ? rot_col_last_addr(cmd_src[32*i +: 32], cmd_h)
+                                       : cmd_src[32*i +: 32])
+                                    : (cmd_flags[8*i + 6]
+                                       ? (cmd_src[32*i +: 32] + lane_take_last_row[40*i +: 32])
+                                       : cmd_src[32*i +: 32]));
                          end
                      end
 
@@ -465,19 +474,24 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                          line_y_r    <= line_y_r + 16'd1;
                          line_dst_r  <= line_dst_r + dst_stride;
                          //   ★ 每张图各推各的：各用自己的跨距；MY 时取负（往回走一行）
-                         //   ★★ 例外：纯色层（flags[2:0]=3）那一格带的【不是地址，是颜色】
-                         //      （Compositor 拿它当常量色用）⇒ 那一格【不递推】，每行都得是同一个颜色。
-                         //      递推了的话第 2 行起颜色就变了（症状：闪红一行一个色、越往下越怪）。
+                         //   ★★ 例外：纯色层（flags[2:0]=3=CK 纯色 / 4=TINT_ALPHA）那一格带的
+                         //      【不是地址，是颜色】（Compositor 拿它当常量色用）⇒ 那一格
+                         //      【不递推】，每行都得是同一个颜色。递推了的话第 2 行起颜色就变
+                         //      （症状：闪红一行一个色、越往下越怪）。
+                         //      ★ MODE=4 是后加的纯色层：漏掉它的话，tone=1/2 每行颜色 +5760，
+                         //        tone=4 还会走 rot_col_next_addr（因为 tone[2] 在 flags[7] 上）。
                          for (i = 0; i < IMAGE_NUM; i = i + 1)
-                             line_src_r[32*i +: 32] <= (cmd_flags_r[8*i +: 3] == MODE_CKEY)
-                                                     ?  line_src_r[32*i +: 32]
-                                                     : (cmd_flags_r[8*i + 7]
-                                                        ? (cmd_flags_r[8*i + 6]
-                                                           ? rot_col_prev_addr(line_src_r[32*i +: 32])
-                                                           : rot_col_next_addr(line_src_r[32*i +: 32]))
-                                                        : (cmd_flags_r[8*i + 6]
-                                                           ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
-                                                           : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]})));
+                             line_src_r[32*i +: 32] <=
+                                 ((cmd_flags_r[8*i +: 3] == MODE_CKEY) ||
+                                  (cmd_flags_r[8*i +: 3] == MODE_TINT_ALPHA))
+                                 ?  line_src_r[32*i +: 32]
+                                 : (cmd_flags_r[8*i + 7]
+                                    ? (cmd_flags_r[8*i + 6]
+                                       ? rot_col_prev_addr(line_src_r[32*i +: 32])
+                                       : rot_col_next_addr(line_src_r[32*i +: 32]))
+                                    : (cmd_flags_r[8*i + 6]
+                                       ? (line_src_r[32*i +: 32] - {8'd0, cmd_src_stride_r[24*i +: 24]})
+                                       : (line_src_r[32*i +: 32] + {8'd0, cmd_src_stride_r[24*i +: 24]})));
                      end
             default: ;
         endcase

@@ -20,6 +20,7 @@ typedef struct {
 
 static rl_item_t s_items[RL_MAX];
 static u16       s_order[RL_MAX];
+static u16       s_tmp[RL_MAX];  /* 归并排序的临时下标表（稳定，O(n log n)） */
 static int       s_n;           /* 本帧登记了几个 */
 static u16       s_seq;         /* 本帧已经发了几个序号 */
 static u32       s_dropped;     /* 累计丢了多少个（正常恒 0） */
@@ -88,26 +89,36 @@ static int rl_already_sorted(void)
 /*----------------------------------------------------------------------------*/
 static void rl_sort(void)
 {
-    int i, j;
+    int i, width;
 
     for (i = 0; i < s_n; ++i) s_order[i] = (u16)i;
 
-    if (rl_already_sorted()) return;
+    if (s_n <= 1 || rl_already_sorted()) return;
 
-    /*  二分插入：先找到该插的位置，再把后面那段整体后移一格。
-     *  判据带 seq，所以同 z 的元素保持 push 顺序（稳定）。 */
-    for (i = 1; i < s_n; ++i) {
-        u16 key = s_order[i];
-        int lo = 0, hi = i;
+    /*  自底向上稳定归并：同 z 时左段优先 ⇒ 保持 push 顺序。
+     *  旧的二分插入最坏会 O(n²) 搬下标；这里固定 O(n log n)。  */
+    for (width = 1; width < s_n; width <<= 1) {
+        int left;
 
-        while (lo < hi) {
-            int mid = (lo + hi) >> 1;
+        for (left = 0; left < s_n; left += (width << 1)) {
+            int mid = left + width;
+            int right = left + (width << 1);
+            int a, b, k;
 
-            if (rl_before(key, s_order[mid])) hi = mid;
-            else                              lo = mid + 1;
+            if (mid > s_n) mid = s_n;
+            if (right > s_n) right = s_n;
+
+            a = left;
+            b = mid;
+            k = left;
+            while (a < mid && b < right) {
+                if (rl_before(s_order[b], s_order[a])) s_tmp[k++] = s_order[b++];
+                else                                  s_tmp[k++] = s_order[a++];
+            }
+            while (a < mid)   s_tmp[k++] = s_order[a++];
+            while (b < right) s_tmp[k++] = s_order[b++];
         }
-        for (j = i; j > lo; --j) s_order[j] = s_order[j - 1];
-        s_order[lo] = key;
+        for (i = 0; i < s_n; ++i) s_order[i] = s_tmp[i];
     }
 }
 

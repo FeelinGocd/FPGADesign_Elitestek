@@ -2,7 +2,8 @@
 //  game_stone.c —— 房间里的可交互石头（阻挡人物 / 弹幕，不可破坏）
 //------------------------------------------------------------------------------
 //  规则：
-//    · 每个房间随机刷 3~5 块（"中等"数量）；
+//    · 每间房【第一次进】随机刷 3~5 块；之后按 room 记住位置，重进不重随机；
+//    · 落点避开当前房间还没捡的金币 / 网；
 //    · 一定保证【门与门之间可以走通】：刷完后在竞技场 32 px 网格上 BFS，
 //      所有开着的门对应的内侧格必须互相可达，否则撤掉这块石头；
 //    · 中间 3×3 格子留给玩家/道具/Boss，不落石；
@@ -19,6 +20,12 @@
 #define SG_CY 6
 
 static u32 s_seed;
+static unsigned char s_stone_done[ROOM_COUNT];   /* 每间房只随机生成一次 */
+
+/*  当前房间的石头占用表：32 px 格对齐，碰撞只查 1 个格 / 身体覆盖的几格。
+ *  s_grid_room 与当前房间不一致时重建；换房/重刷后置 -1。  */
+static unsigned char s_stone_grid[SG_AH][SG_AW];
+static signed char   s_grid_room = -1;
 
 static u32 stone_rand(void)
 {
@@ -30,6 +37,7 @@ static u32 stone_rand(void)
 static int cell_blocked(int i, int j)
 {
     int k;
+    signed char room = (signed char)game_room_id();
 
     /* 四个门的内侧格 */
     if ((i == SG_CX && j == 0) || (i == SG_CX && j == SG_AH - 1) ||
@@ -43,7 +51,7 @@ static int cell_blocked(int i, int j)
     for (k = 0; k < N_STONES; ++k) {
         const stone_t *s = &g.stones[k];
 
-        if (!s->active) continue;
+        if (!s->active || s->room != room) continue;    /* 别的房间的石头不算 */
         if ((s->x - ARENA_X0) / STONE_SIZE == i &&
             (s->y - ARENA_Y0) / STONE_SIZE == j) return 1;
     }
@@ -71,7 +79,7 @@ static int stone_bfs_ok(void)
     for (k = 0; k < N_STONES; ++k) {
         const stone_t *s = &g.stones[k];
 
-        if (!s->active) continue;
+        if (!s->active || s->room != (signed char)game_room_id()) continue;
         i = (s->x - ARENA_X0) / STONE_SIZE;
         j = (s->y - ARENA_Y0) / STONE_SIZE;
         if (i >= 0 && i < SG_AW && j >= 0 && j < SG_AH) block[j][i] = 1;
@@ -110,68 +118,179 @@ static int stone_bfs_ok(void)
     return 1;
 }
 
+/*  重建当前房间的石头占用表（只在换房后第一次碰撞/绘制查询时做一次）  */
+static void stone_grid_build(void)
+{
+    int i, j, k;
+    signed char room = (signed char)game_room_id();
+
+    for (j = 0; j < SG_AH; ++j)
+        for (i = 0; i < SG_AW; ++i) s_stone_grid[j][i] = 0;
+
+    for (k = 0; k < N_STONES; ++k) {
+        const stone_t *s = &g.stones[k];
+        int gx, gy;
+
+        if (!s->active || s->room != room) continue;
+        gx = (s->x - ARENA_X0) / STONE_SIZE;
+        gy = (s->y - ARENA_Y0) / STONE_SIZE;
+        if (gx >= 0 && gx < SG_AW && gy >= 0 && gy < SG_AH)
+            s_stone_grid[gy][gx] = 1;
+    }
+    s_grid_room = room;
+}
+
 void game_stones_reset(void)
 {
-    int i;
+    int i, b;
 
-    /*  只清 active，保留 old_stone 让换房后的帧首把上一间房的石头擦掉  */
-    for (i = 0; i < N_STONES; ++i) g.stones[i].active = 0;
+    for (i = 0; i < N_STONES; ++i) {
+        g.stones[i].active = 0;
+        g.stones[i].room   = -1;
+    }
+    for (b = 0; b < 2; ++b)
+        for (i = 0; i < N_STONES; ++i) g.old_stone[b][i].active = 0;
+    for (i = 0; i < ROOM_COUNT; ++i) s_stone_done[i] = 0;
+    s_grid_room = -1;
 }
 
 void game_stones_spawn(int count)
 {
     int n = 0, attempt;
+    int room = game_room_id();
 
     if (count <= 0) return;
+    if (room < 0 || room >= ROOM_COUNT) return;
+    if (s_stone_done[room]) return;             /* 这间房已经生成过，不重随机 */
+    s_stone_done[room] = 1;
 
     for (attempt = 0; attempt < 300 && n < count; ++attempt) {
         int i = (int)(stone_rand() % (u32)SG_AW);
         int j = (int)(stone_rand() % (u32)SG_AH);
+        int slot, x, y;
         stone_t *s;
 
         if (cell_blocked(i, j)) continue;
 
-        s = &g.stones[n];
+        x = ARENA_X0 + i * STONE_SIZE;
+        y = ARENA_Y0 + j * STONE_SIZE;
+        /*  别把当前房间的金币 / 网埋进石头里  */
+        if (game_coin_overlap(x, y, STONE_SIZE, STONE_SIZE)) continue;
+        if (game_web_overlap(x, y, STONE_SIZE, STONE_SIZE)) continue;
+
+        for (slot = 0; slot < N_STONES; ++slot)
+            if (!g.stones[slot].active) break;  /* 别的房间的石头占着槽 */
+        if (slot >= N_STONES) break;
+        s = &g.stones[slot];
+
         s->active = 1;
-        s->x = (short)(ARENA_X0 + i * STONE_SIZE);
-        s->y = (short)(ARENA_Y0 + j * STONE_SIZE);
+        s->room   = (signed char)room;
+        s->x      = (short)x;
+        s->y      = (short)y;
         ++n;
 
-        if (!stone_bfs_ok()) {
+        if (!stone_bfs_ok()) {                  /* 这块挡了门/中心 ⇒ 撤掉重来 */
             s->active = 0;
+            s->room   = -1;
             --n;
         }
     }
+    s_grid_room = -1;                           /* 下一帧碰撞查询时重建 */
 }
 
+static void stone_grid_ensure(void)
+{
+    if (s_grid_room != (signed char)game_room_id()) stone_grid_build();
+}
+
+/*  石头按“相对上下”只挡迎面的那条边：
+ *    · 石头在上、人物在下 → 用脚底（向上走时脚先碰到石头下沿）；
+ *    · 反之石头在下、人物在上 → 用最上一排（眼睛，向下走时先碰到石头上沿）。
+ *  这样人物上半身可以叠进石头，不会因为整条身体矩形擦到石头就被卡住。  */
 int game_stone_block(int px, int py)
 {
-    int bx = px + PB_OFF_X;
-    int by = py + PB_OFF_Y;
     int i;
+    signed char room = (signed char)game_room_id();
+    int pcy = py + PB_OFF_Y + PB_H / 2;
 
     for (i = 0; i < N_STONES; ++i) {
         const stone_t *s = &g.stones[i];
+        int ex = px + PB_OFF_X;
+        int ey, eh;
 
-        if (!s->active) continue;
-        if (bx < s->x + STONE_SIZE && bx + PB_W > s->x &&
-            by < s->y + STONE_SIZE && by + PB_H > s->y) return 1;
+        if (!s->active || s->room != room) continue;
+
+        if (s->y + STONE_SIZE / 2 < pcy) {
+            /* 石头在上：脚底 */
+            ey = py + PB_OFF_Y + PB_H - PB_FOOT_H;
+            eh = PB_FOOT_H;
+        } else {
+            /* 石头在下：最上一排（眼睛） */
+            ey = py + PB_OFF_Y;
+            eh = PB_TOP_H;
+        }
+
+        if (ex < s->x + STONE_SIZE && ex + PB_W > s->x &&
+            ey < s->y + STONE_SIZE && ey + eh > s->y) return 1;
     }
     return 0;
 }
 
 int game_stone_hit_at(int x, int y)
 {
+    int gx, gy;
+
+    if (x < ARENA_X0 || x >= ARENA_X1 ||
+        y < ARENA_Y0 || y >= ARENA_Y1) return 0;
+
+    gx = (x - ARENA_X0) / STONE_SIZE;
+    gy = (y - ARENA_Y0) / STONE_SIZE;
+    stone_grid_ensure();
+    return s_stone_grid[gy][gx] != 0;
+}
+
+/*  矩形 (x,y,w,h) 和当前房间的石头相交？—— 金币落点避让用。
+ *  石头占满 32 px 格，所以只要矩形覆盖到任一标记格就相交。  */
+int game_stone_overlap(int x, int y, int w, int h)
+{
+    int x0 = x, x1 = x + w - 1;
+    int y0 = y, y1 = y + h - 1;
+    int i0, i1, j0, j1, i, j;
+
+    if (w <= 0 || h <= 0) return 0;
+    if (x1 < ARENA_X0 || x0 >= ARENA_X1 ||
+        y1 < ARENA_Y0 || y0 >= ARENA_Y1) return 0;
+
+    if (x0 < ARENA_X0) x0 = ARENA_X0;
+    if (y0 < ARENA_Y0) y0 = ARENA_Y0;
+    if (x1 >= ARENA_X1) x1 = ARENA_X1 - 1;
+    if (y1 >= ARENA_Y1) y1 = ARENA_Y1 - 1;
+
+    i0 = (x0 - ARENA_X0) / STONE_SIZE;
+    i1 = (x1 - ARENA_X0) / STONE_SIZE;
+    j0 = (y0 - ARENA_Y0) / STONE_SIZE;
+    j1 = (y1 - ARENA_Y0) / STONE_SIZE;
+
+    stone_grid_ensure();
+    for (j = j0; j <= j1; ++j)
+        for (i = i0; i <= i1; ++i)
+            if (s_stone_grid[j][i]) return 1;
+    return 0;
+}
+
+/*  每帧把 old_stone[buf] 对齐到当前房间的石头（节奏同 game_bullets_sync）  */
+void game_stones_sync(int buf)
+{
     int i;
+    signed char room = (signed char)game_room_id();
 
     for (i = 0; i < N_STONES; ++i) {
         const stone_t *s = &g.stones[i];
 
-        if (!s->active) continue;
-        if (x >= s->x && x < s->x + STONE_SIZE &&
-            y >= s->y && y < s->y + STONE_SIZE) return 1;
+        g.old_stone[buf][i].active = s->active && (s->room == room);
+        g.old_stone[buf][i].x = s->x;
+        g.old_stone[buf][i].y = s->y;
     }
-    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -181,10 +300,8 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
     const asset_desc_t *a = &g_assets[ASSET_background_interact_stone];
 
     (void)now;
-    g.old_stone[buf][i].active = s->active;
-    g.old_stone[buf][i].x = s->x;
-    g.old_stone[buf][i].y = s->y;
-    if (!s->active) return;
+    (void)buf;
+    if (!s->active || s->room != (signed char)game_room_id()) return;
 
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
                              (u32)s->x, (u32)s->y, STONE_SIZE, STONE_SIZE, 0u);
@@ -193,11 +310,12 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
 void game_stones_submit(void)
 {
     int i;
+    signed char room = (signed char)game_room_id();
 
     for (i = 0; i < N_STONES; ++i) {
         const stone_t *s = &g.stones[i];
 
-        if (!s->active) continue;
+        if (!s->active || s->room != room) continue;
         if (!game_visible(s->x, s->y, STONE_SIZE, STONE_SIZE)) continue;
         rl_push(ACTOR_Z(s->y + STONE_SIZE), stone_draw_one, i);
     }

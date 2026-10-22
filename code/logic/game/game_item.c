@@ -17,19 +17,14 @@
 #include "bsp.h"
 
 /*==============================================================================
- *  道具属性表（★ 说明文字、图标、送的弹种都是【道具自己的属性】）
+ *  道具属性表（★ 说明文字、图标、属性增减量都是【道具自己的属性】）
  *------------------------------------------------------------------------------
  *  desc 只能全大写 A-Z 和空格 —— 字模只有 26 张大写字母，小写会被跳过。
+ *  属性使用 game.h 的 item_mod_t：0 = 不改，正负 = 加/减。
+ *  目前 HUD 还没设计“属性展示”，这里只负责数值结算。
  *============================================================================*/
-/*  效果种类：一个道具可能"换弹种"或"改开火方式"或"加命"  */
+/*  旧接口 game_item_fx() 的效果种类（保留给外部/字幕判断）  */
 enum { FX_NONE, FX_TRIPLE, FX_LIFE };
-
-typedef struct {
-    const char *desc;       /* 屏幕上方那行说明（只能大写 A-Z 和空格） */
-    int icon;               /* 图标素材下标 */
-    int bullet;             /* 吃了换成哪种弹；-1 = 不动弹种 */
-    int fx;                 /* FX_xxx */
-} item_def_t;
 
 static int item_index(int item)
 {
@@ -37,17 +32,36 @@ static int item_index(int item)
     return (index < 0) ? index + ITEM_COUNT : index;
 }
 
-static const item_def_t item_defs[ITEM_COUNT] = {
-    /* ITEM_CHILI  */ { "YOU FEEL SO HOT",    ASSET_accessory_chili,      BULLET_CHILI,  FX_NONE   },
-    /* ITEM_URANUS */ { "IT FEELS LIKE IRON", ASSET_accessory_Uranus,     BULLET_URANUS, FX_NONE   },
-    /* ITEM_EYES   */ { "SLOWER BUT MORER",   ASSET_accessory_Inner_eyes, -1,            FX_TRIPLE },
-    /* ITEM_1UP    */ { "EXTRA LIFE",         ASSET_accessory_1UP_ExtraLiFE, -1,         FX_LIFE   }
+const item_def_t g_item_defs[ITEM_COUNT] = {
+    /* ITEM_CHILI  */ {
+        "YOU FEEL SO HOT", ASSET_accessory_chili,
+        { 0, 0, 0, 0, 0, 0, 0, 0, BULLET_CHILI, 0 }
+    },
+    /* ITEM_URANUS */ {
+        "IT FEELS LIKE IRON", ASSET_accessory_Uranus,
+        { 0, 0, 0, 0, 0, 0, 0, 0, BULLET_URANUS, 0 }
+    },
+    /* ITEM_EYES   */ {
+        "SLOWER BUT MORER", ASSET_accessory_Inner_eyes,
+        { 0, 0, 0, 0, 0, 0, 0, 0, -1, 1 }
+    },
+    /* ITEM_1UP    */ {
+        "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE,
+        { 0, 0, 1, 0, 0, 0, 0, 0, -1, 0 }
+    }
 };
 
-const char *game_item_desc(int item)   { return item_defs[item_index(item)].desc; }
-int  game_item_icon(int item)          { return item_defs[item_index(item)].icon; }
-int  game_item_bullet(int item)        { return item_defs[item_index(item)].bullet; }
-int  game_item_fx(int item)            { return item_defs[item_index(item)].fx; }
+const char *game_item_desc(int item)   { return g_item_defs[item_index(item)].desc; }
+int  game_item_icon(int item)          { return g_item_defs[item_index(item)].icon; }
+int  game_item_bullet(int item)        { return g_item_defs[item_index(item)].mod.bullet_type; }
+int  game_item_fx(int item)
+{
+    const item_mod_t *m = &g_item_defs[item_index(item)].mod;
+
+    if (m->triple) return FX_TRIPLE;
+    if (m->lives > 0) return FX_LIFE;
+    return FX_NONE;
+}
 
 /*----------------------------------------------------------------------------*/
 /*  池子里已经有几件道具（HUD 用）  */
@@ -59,20 +73,108 @@ int game_item_count(void)
     return n;
 }
 
+/*  道具刷新权重：
+ *    · 没拿过的权重 2；
+ *    · 拿过的权重 1（降一半）；
+ *    · 都没拿过 / 都拿过时仍是等概率。  */
+static int item_weight(int item)
+{
+    return (g.item_mask & (1u << item)) ? 1 : 2;
+}
+
+static int item_weighted_pick(u32 r)
+{
+    u32 total = 0u;
+    int i;
+
+    for (i = 0; i < ITEM_COUNT; ++i) total += (u32)item_weight(i);
+    if (total == 0u) return 0;
+
+    r %= total;
+    for (i = 0; i < ITEM_COUNT; ++i) {
+        u32 w = (u32)item_weight(i);
+
+        if (r < w) return i;
+        r -= w;
+    }
+    return ITEM_COUNT - 1;
+}
+
+static u32 s_item_seed;
+
+static u32 item_rand(void)
+{
+    if (s_item_seed == 0u) s_item_seed = game_ms() | 1u;
+    s_item_seed = s_item_seed * 1664525u + 1013904223u;
+    return s_item_seed >> 16;
+}
+
+/*  道具房 / 商店共用：按“拿过权重减半”随机挑一个道具类型  */
+int game_item_random_type(void)
+{
+    return item_weighted_pick(item_rand());
+}
+
+/*  拿到一个道具的效果结算（拾取 / 商店购买共用）。
+ *  只改背包与效果，不碰道具实体、不弹 toast。  */
+void game_item_apply(int type)
+{
+    const item_mod_t *m = &g_item_defs[type].mod;
+    int i, k, dup = 0;
+
+    g.held_type = type;
+
+    /*  ★ 道具池：拿过的永久记下来，效果【累加】，不会因为再拿一个就丢掉。
+     *    · 换弹种类（辣椒/天王星）：弹种以后拿的为准（"后面的盖前面的"）
+     *    · 三向（内眼）：一旦拿到就常驻（fire_triple 由池子算，不是开关）
+     *    · 加命（1UP）：每拿一次 +1                                    */
+    g.item_mask |= (1u << type);
+
+    /*  按【获取先后】进队列：同一个道具只排一次，新的追加到末尾  */
+    for (k = 0; k < g.item_order_n; ++k)
+        if (g.item_order[k] == type) dup = 1;
+
+    if (!dup && g.item_order_n < ITEM_COUNT)
+        g.item_order[g.item_order_n++] = type;
+
+    /*  ---- 属性增减（HUD 展示还没设计，这里先结算数值） ---- */
+    for (i = 0; i < m->hp; ++i) game_vital_heal_one();
+    for (i = 0; i < m->lives; ++i) game_vital_extra_life();
+    /*  m->hp_max 先保留字段：等血条 UI 支持“上限变化”后再接。  */
+
+    g.stats.move_v8 += m->move_v8;
+    if (g.stats.move_v8 < 8)  g.stats.move_v8 = 8;
+    if (g.stats.move_v8 > 48) g.stats.move_v8 = 48;
+
+    g.stats.fire_every += m->fire_every;
+    if (g.stats.fire_every < 1)  g.stats.fire_every = 1;
+    if (g.stats.fire_every > 60) g.stats.fire_every = 60;
+
+    g.stats.bullet_speed += m->bullet_speed;
+    if (g.stats.bullet_speed < 1)  g.stats.bullet_speed = 1;
+    if (g.stats.bullet_speed > 12) g.stats.bullet_speed = 12;
+
+    g.stats.triple_speed += m->triple_speed;
+    if (g.stats.triple_speed < 1)  g.stats.triple_speed = 1;
+    if (g.stats.triple_speed > 12) g.stats.triple_speed = 12;
+
+    g.stats.damage += m->damage;
+    if (g.stats.damage < 1) g.stats.damage = 1;
+    if (g.stats.damage > 9) g.stats.damage = 9;
+
+    if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
+    if (m->triple) g.fire_triple = 1;
+    g.fire_triple = (g.item_mask & (1u << ITEM_EYES)) ? 1 : 0;
+}
+
 /*----------------------------------------------------------------------------*/
-/*  道具房：从 ITEM_COUNT 种道具里随机挑一个，放在 (x, y)（房间中心）。
+/*  道具房：从 ITEM_COUNT 种道具里加权挑一个，放在 (x, y)（房间中心）。
  *  用 LCG 而不是 rand()：不拉 libc 的大表；第一次用毫秒时钟做种子，
- *  同一次上电里每次进房（或新的一轮）拿到的道具不同。  */
+ *  同一次上电里每次进房（或新的一轮）拿到的道具不同。
+ *  ★ 拿过的道具权重减半（2 → 1），但不降到 0 —— 仍有机会再刷出来。  */
 void game_item_spawn_random(int x, int y)
 {
-    static u32 seed;
-    u32 r;
-
-    if (seed == 0u) seed = game_ms() | 1u;
-    seed = seed * 1664525u + 1013904223u;
-    r = seed >> 16;
-
-    g.item.type   = (int)(r % (u32)ITEM_COUNT);
+    g.item.type   = game_item_random_type();
     g.item.x      = x;
     g.item.y      = y;
     g.item.active = 1;
@@ -88,34 +190,12 @@ void game_item_try_pickup(u32 now)
     int hy = g.y + PB_OFF_Y;
 
     if (!g.item.active) return;
-    /*  用【肚子】去碰道具，头/脚不算  */
+    /*  用【脚到眼睛】的身体矩形去碰道具，头不算  */
     if (hx < g.item.x + ITEM_W && hx + PB_W > g.item.x &&
         hy < g.item.y + ITEM_H && hy + PB_H > g.item.y) {
-        int bt = game_item_bullet(g.item.type);
-        int fx = game_item_fx(g.item.type);
-
         g.item.active = 0;
-        g.held_type = g.item.type;
-
-        /*  ★ 道具池：拿过的永久记下来，效果【累加】，不会因为再拿一个就丢掉。
-         *    · 换弹种类（辣椒/天王星）：弹种以后拿的为准（"后面的盖前面的"）
-         *    · 三向（内眼）：一旦拿到就常驻（fire_triple 由池子算，不是开关）
-         *    · 加命（1UP）：每拿一次 +1                                    */
-        g.item_mask |= (1u << g.item.type);
-
-        /*  按【获取先后】进队列：同一个道具只排一次，新的追加到末尾  */
-        {
-            int k, dup = 0;
-
-            for (k = 0; k < g.item_order_n; ++k)
-                if (g.item_order[k] == g.item.type) dup = 1;
-
-            if (!dup && g.item_order_n < ITEM_COUNT)
-                g.item_order[g.item_order_n++] = g.item.type;
-        }
-        if (bt >= 0) g.bullet_type = bt;        /* -1 = 这个道具不换弹种 */
-        g.fire_triple = (g.item_mask & (1u << ITEM_EYES)) ? 1 : 0;
-        if (fx == FX_LIFE) game_vital_extra_life();
+        g.boss_drop_pending = 0;        /* Boss 掉的饰品已经捡走，重进 Boss 房不再恢复 */
+        game_item_apply(g.item.type);   /* 背包 / 弹种 / 三向 / 加命统一结算 */
         g.pickup_until = now + PICKUP_MS;
         g.toast_type = g.item.type;             /* 屏幕上方弹一行说明 */
         g.toast_until = now + HUD_TOAST_MS;

@@ -3,10 +3,10 @@
 game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟手柄）
 
 用法（本仓库的 Python 环境走 uv，依赖在仓库根的 pyproject.toml 里）:
-    uv run tools/game_pad.py                 # 直接用下面 PORT 常量里的串口
-    uv run tools/game_pad.py --list          # 先看看有哪些串口
-    uv run tools/game_pad.py -p COM7         # 临时换一个口
-    uv run tools/game_pad.py --quiet         # 不显示板子回传的日志
+    uv run tools/GamePad/game_pad.py                 # 直接用下面 PORT 常量里的串口
+    uv run tools/GamePad/game_pad.py --list          # 先看看有哪些串口
+    uv run tools/GamePad/game_pad.py -p COM7         # 临时换一个口
+    uv run tools/GamePad/game_pad.py --quiet         # 不显示板子回传的日志
 
   ★ 换串口最简单的方法：改下面 PORT = "COM5" 这一行，然后直接跑脚本。
 
@@ -46,12 +46,12 @@ except ImportError:
         sys.stderr.write("用 .venv 的 Python 重开一次：%s\n" % venv_py)
         sys.stderr.flush()
         os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve())] + sys.argv[1:])
-    sys.exit("缺 pyserial：先在仓库根跑一次  uv sync，然后用  uv run tools/game_pad.py")
+    sys.exit("缺 pyserial：先在仓库根跑一次  uv sync，然后用  uv run tools/GamePad/game_pad.py")
 
 # =============================================================================
 #  ★★★ 只改这两行就够了（命令行 -p / -b 仍然可以临时覆盖）★★★
 # =============================================================================
-PORT = "COM5"          # ← 板子接的那个串口（不确定就跑：uv run tools/game_pad.py --list）
+PORT = "COM5"          # ← 板子接的那个串口（不确定就跑：uv run tools/GamePad/game_pad.py --list）
 BAUD = 115200
 # =============================================================================
 

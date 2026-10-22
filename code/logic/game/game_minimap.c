@@ -63,7 +63,7 @@ static u32 mm_color(int type)
     switch (type) {
     case ROOM_ITEM: return 0x00FFD800u;   /* 宝箱：黄 */
     case ROOM_BOSS: return 0x00E02020u;   /* Boss：红 */
-    case ROOM_SHOP: return 0x003060C0u;   /* 商店：蓝（暂未生成） */
+    case ROOM_SHOP: return 0x003060C0u;   /* 商店：蓝 */
     default:        return 0x00808080u;   /* 普通：灰 */
     }
 }

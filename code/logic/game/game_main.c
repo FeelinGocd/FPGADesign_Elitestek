@@ -35,6 +35,46 @@ static int  g_toast_on;                         /* 本帧要不要画拾取字�
 static int  g_toast_fade;                       /* 同上（拾取字幕） */
 static int  g_bossbar_fade;                     /* 血条消失后还要擦几帧（它不在面板行里） */
 
+/*  分段计时（CLINT 原始 tick → us）。默认开；只想省代码/不想看日志时改 0。  */
+#define GAME_PROFILE 1
+#if GAME_PROFILE
+static u32 s_pf_begin, s_pf_update, s_pf_draw, s_pf_fence, s_pf_present;
+static u32 s_pf_begin_max, s_pf_update_max, s_pf_draw_max;
+static u32 s_pf_fence_max, s_pf_present_max;
+static u32 s_pf_frames;
+
+static u32 prof_now(void)
+{
+    return (u32)clint_getTime(BSP_CLINT);
+}
+
+static void prof_add(u32 *sum, u32 *max, u32 dt)
+{
+    *sum += dt;
+    if (dt > *max) *max = dt;
+}
+
+static void prof_report(void)
+{
+    u32 div = (u32)(BSP_CLINT_HZ / 1000000u);
+
+    if (div == 0u) div = 1u;
+    if (s_pf_frames == 0u) return;
+
+    bsp_printf("PROFILE 1s us avg/max: begin=%d/%d update=%d/%d draw=%d/%d fence=%d/%d present=%d/%d\r\n",
+               (int)(s_pf_begin / s_pf_frames / div),   (int)(s_pf_begin_max / div),
+               (int)(s_pf_update / s_pf_frames / div),  (int)(s_pf_update_max / div),
+               (int)(s_pf_draw / s_pf_frames / div),    (int)(s_pf_draw_max / div),
+               (int)(s_pf_fence / s_pf_frames / div),   (int)(s_pf_fence_max / div),
+               (int)(s_pf_present / s_pf_frames / div), (int)(s_pf_present_max / div));
+
+    s_pf_begin = s_pf_update = s_pf_draw = s_pf_fence = s_pf_present = 0u;
+    s_pf_begin_max = s_pf_update_max = s_pf_draw_max = 0u;
+    s_pf_fence_max = s_pf_present_max = 0u;
+    s_pf_frames = 0u;
+}
+#endif
+
 
 /*----------------------------------------------------------------------------*/
 /*  ① 帧首  */
@@ -45,6 +85,7 @@ static void frame_begin(u32 now)
     for (y = 0; y < GRID_H; ++y)
         for (x = 0; x < GRID_W; ++x)
             g_dirty[y][x] = 0u;
+    game_dirty_begin();                 /* 同时清空脏格队列（mark 时只登记 0→1） */
 
     g.cmd_before = gpu2d_getCmdDone();
 
@@ -63,9 +104,10 @@ static void game_update(u32 keys, u32 now)
 {
     if (game_perf_frozen()) return;     /* 压测 mode 1：冻结玩法，只跑绘制 */
 
-    /*  串口手柄按一下 T：切换"无敌"（调试用）  */
+    /*  串口手柄按一下 T / 串口命令 T：切换"无敌"（调试用）  */
     if (game_take_debug_toggle()) {
         game_debug_invuln = !game_debug_invuln;
+        if (game_debug_invuln) game_vital_refill();
         bsp_printf("DEBUG: invincible %s (key T)\r\n",
                    game_debug_invuln ? "ON" : "OFF");
     }
@@ -93,18 +135,15 @@ static void game_update(u32 keys, u32 now)
     game_bullets_step(now);
     game_mobs_step(now);                /* slime：动画 / 追玩家 / 清房奖励 */
     game_coins_step(now);               /* 金币拾取：肚子碰到 +1 */
+    game_shop_step(now);                /* 商店：身体碰商品 → 扣币 / 回血 / 给道具 */
 }
 
 /*----------------------------------------------------------------------------*/
 /*  精灵的脏区有没有压到 HUD 那几格（压到了就得重画 HUD，否则字会被擦掉）  */
 static int hud_cells_touched(unsigned char dirty[GRID_H][GRID_W])
 {
-    int x, y;
-
-    for (y = 0; y < HUD_CELLS_Y; ++y)
-        for (x = 0; x < HUD_CELLS_X; ++x)
-            if (dirty[y][x]) return 1;
-    return 0;
+    (void)dirty;
+    return game_dirty_touches(0, 0, HUD_CELLS_X, HUD_CELLS_Y);
 }
 
 /*==============================================================================
@@ -221,6 +260,9 @@ static void game_draw(u32 now, int buf)
         game_mark_dirty(g_dirty, g.exit_x, g.exit_y, 32, 32);
     }
 
+    /*  商店：商品按 room 持久；先擦这块缓冲上次画的位置  */
+    game_shop_mark_old(g_dirty, buf);
+
     /* 收集脏区：把"这块缓冲里上次画在哪"都并进格子 */
     if (g.old_boss[buf].active)
         game_mark_dirty(g_dirty, g.old_boss[buf].x, g.old_boss[buf].y, BOSS_W, BOSS_H);
@@ -322,6 +364,10 @@ static void game_draw(u32 now, int buf)
     game_vital_mark_dirty(g_dirty);
 
     game_bullets_sync(buf);             /* 脏区用：记下这一帧每颗弹画在哪 */
+    game_coins_sync(buf);               /* 金币同样：擦完旧位置再把 old_coin 对齐到这一帧 */
+    game_web_sync(buf);                 /* 网 / 石头：同样按当前房间对齐 old 位置 */
+    game_stones_sync(buf);
+    game_shop_sync(buf);                /* 商店商品：房间 + 位置的 old 对齐 */
 
     /*  ★ 先提交、再统一排序绘制：z 小的在下、z 大的在上（同 z 保持提交顺序）。
      *    实体的 z 在各自的 submit() 里 = Z_ACTOR + 底边 y ⇒ 自然的透视遮挡。  */
@@ -329,6 +375,7 @@ static void game_draw(u32 now, int buf)
     rl_push(Z_SCENE, scene_restore, 0);   /* 脏区恢复（擦旧精灵）必须最先 */
     if (g.exit_active && game_room_id() == g.exit_room)
         rl_push(Z_SCENE + 5, exit_draw, 0);  /* exit 在地板上、人物下面 */
+    game_shop_submit();                   /* 商店商品也在地板上、人物下面 */
     game_player_submit();                 /* 同深度时玩家在实体里最靠后 ⇒ 先提交 */
     game_bullets_submit();
     game_boss_submit();                   /* 本体 + 锁血护盾（Z_SHIELD） */
@@ -346,8 +393,26 @@ static void game_draw(u32 now, int buf)
 /*  ④ 帧尾：交帧 → 统计 → 探针  */
 static int frame_end(u32 now, int buf)
 {
+#if GAME_PROFILE
+    u32 t0 = prof_now();
+#endif
+
     if (!game_finish_gpu()) return 0;
+#if GAME_PROFILE
+    {
+        u32 t1 = prof_now();
+        prof_add(&s_pf_fence, &s_pf_fence_max, t1 - t0);
+        t0 = t1;
+    }
+#endif
     if (!game_present(g_fb[buf])) return 0;
+#if GAME_PROFILE
+    {
+        u32 t1 = prof_now();
+        prof_add(&s_pf_present, &s_pf_present_max, t1 - t0);
+        ++s_pf_frames;
+    }
+#endif
 
     g.cmd_frame = (int)(gpu2d_getCmdDone() - g.cmd_before);
 
@@ -370,6 +435,9 @@ static int frame_end(u32 now, int buf)
                    (int)g.probe_frames, g.probe_peak_cmd,
                    g.x, g.y, game_vital_hp(), game_vital_lives(),
                    (int)rl_dropped());
+#if GAME_PROFILE
+        prof_report();
+#endif
         g.probe_epoch = now;
         g.probe_frames = 0u;
         g.probe_peak = 0;
@@ -384,7 +452,7 @@ static int frame_end(u32 now, int buf)
 void game_demo_run(void)
 {
     bsp_printf("\r\nGAME: KEY0=left KEY1=right KEY2=down KEY3=up, auto fire\r\n");
-    bsp_printf("DEBUG CMDS: debug0 = invincible ON, debug1 = OFF (type + Enter)\r\n");
+    bsp_printf("DEBUG CMDS: T = toggle invincible, debug0 = ON, debug1 = OFF (type + Enter)\r\n");
     if (PERF_TEST_MODE == 1)
         bsp_printf("PERF TEST: fixed model, bullet levels 16/32/64/96/128/192/256\r\n");
     else if (PERF_TEST_MODE == 2)
@@ -410,11 +478,35 @@ void game_demo_run(void)
             if (!game_room_commit()) return;
             continue;
         }
+#if GAME_PROFILE
+        {
+            u32 t0 = prof_now();
 
+            frame_begin(now);
+            {
+                u32 t1 = prof_now();
+                prof_add(&s_pf_begin, &s_pf_begin_max, t1 - t0);
+                t0 = t1;
+            }
+            game_update(keys, now);
+            game_room_step();   /* 检测是否走进门 → 置 s_pending */
+            {
+                u32 t1 = prof_now();
+                prof_add(&s_pf_update, &s_pf_update_max, t1 - t0);
+                t0 = t1;
+            }
+            game_draw(now, back);
+            {
+                u32 t1 = prof_now();
+                prof_add(&s_pf_draw, &s_pf_draw_max, t1 - t0);
+            }
+        }
+#else
         frame_begin(now);
         game_update(keys, now);
         game_room_step();   /* 检测是否走进门 → 置 s_pending */
         game_draw(now, back);
+#endif
         if (!frame_end(now, back)) return;
 
         g.front = back;                 /* 这块画完并交帧了，下一帧画另一块 */

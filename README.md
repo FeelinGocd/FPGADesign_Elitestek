@@ -77,13 +77,15 @@ FPGADesign_Elitestek/
 │  │  ├─ character/TheBoss/      Boss 3 帧（80×96）
 │  │  ├─ base/{num,Eng}/         数字 0-9 + 字母 A-Z（16×24）
 │  │  ├─ base/{alpha,background,specialEffect}/
-│  │  ├─ sprite/{bullet,accessory}/
+│  │  ├─ character/{bullet,mobs}/ 子弹 / 小怪
+│  │  ├─ accessory/               道具
 │  │  └─ _原始图/                ★ 不参与打包的原图
-│  ├─ func/                      pic2pram.py（素材 → PRAM/调色板）+ 预览 + output/
+│  ├─ func/                      素材打包产物归档（output/，脚本在 tools/）
 │  └─ example/                   里程碑快照（RTL + Code + project 三件套）
 │
 ├─ code/                         C 代码归档（导入方法见 code/README_如何导入C文件到工程.md）
-├─ tools/                        构建 / 仿真 / 调试脚本与排查记录
+├─ tools/                        构建/仿真/调试脚本与排查记录
+│  ├─ img2hex/                   素材 → assets.hex / palette.hex / assets_desc.h / report.txt
 └─ AI_WorkSpace/                 AI 协作工作区（缓存 / 日志 / 输出，不入库）
 ```
 
@@ -91,16 +93,16 @@ FPGADesign_Elitestek/
 >
 > - **改 RTL 改仓库根 `RTL/`** —— 发布工程 `GamingPlayUnit` 的设计文件表指向它；改完**要重新综合**
 > - **改固件改 `project/GamingPlayUnit/embedded_sw/.../standalone/GamingPlayUnit/src|peripheral`**（只重编 app，不用重新综合）
-> - **改素材改 `res/pic/*` 然后跑 `res/func/pic2pram.py`** —— 它会自动把 hex 放到每个工程的 hex 位置；
+> - **改素材改 `res/pic/*` 然后跑 `tools/img2hex/pic2pram.py`** —— 它会自动把 hex 放到每个工程的 hex 位置；
 >   素材和调色板是 **BRAM 初值**，所以**一改就必须重新综合 + 重编固件**
 
 ---
 
-## 素材怎么加（`res/func/pic2pram.py`）
+## 素材怎么加（`tools/img2hex/pic2pram.py`）
 
 ```
 uv sync                                # 第一次 / 换机器：建 .venv 并装依赖（pyserial / pillow）
-uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（新目录要加进脚本的 PIC_DIRS_DEFAULT）
+uv run tools/img2hex/pic2pram.py               # 打 res/pic 下默认那几个目录（新目录要加进脚本的 PIC_DIRS_DEFAULT）
 ```
 
 > PC 侧的 Python 工具统一用 **uv** 管理：依赖声明在仓库根的 `pyproject.toml`，锁文件 `uv.lock` 入库。
@@ -108,12 +110,13 @@ uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 > 否则 `import serial` / `from PIL import Image` 会报"无法解析导入"。
 
 产物：`assets.hex`（PRAM 初值）、`palette.hex`（一项 = `AARRGGBB`）、`assets_desc.h`（C 侧素材表，用 `ASSET_*` 名字）、
-`report.txt`（这次转换的账）、`preview_*.png`（量化后的预览）。脚本会顺手把这些放到：
+`report.txt`（这次转换的账）。脚本会顺手把这些放到：
 
 | 放哪 | 为什么 |
 |---|---|
-| `res/func/output/` | 归档 + 给 C 用 |
-| `<每个工程>/hex/` 或工程根 | `$readmemh` 的**相对路径按工程目录解析**，少一份就报 `VERI-1012 cannot open file` |
+| `project/GamingPlayUnit/hex/` | 发布工程的综合初值（`assets.hex` / `palette.hex`） |
+| `project/verified/06_SoC_2DGPU/project/` | 已验证工程的同类副本（RTL 的 `INIT_FILE` 写在工程根） |
+| `tools/img2hex/output/` | `report.txt` + `assets_desc.h`（工具自己的账和素材表） |
 | 各 C 工程的 `peripheral/APB0/gpu2d/` | 固件 `#include "assets_desc.h"` |
 
 **三条规矩（踩过才写下来的）**
@@ -125,7 +128,7 @@ uv run res/func/pic2pram.py            # 打 res/pic 下默认那几个目录（
 4. **不透明区里不许有纯白**（键色是白，会被 ck 抠掉）—— 脚本会自检，不合格直接报错。
 5. **朝左的帧不用画**：命名带 `_left` 的会被跳过，要用时开 `FLIP_X`。
 
-当前用量：**79 张素材、PRAM 24608 / 32768 字（75%）、调色板 145 / 256 项**（`res/func/output/report.txt`，2026-10-22 加 bug 敌怪后重跑）。
+当前用量：**88 张素材、PRAM 24672 / 32768 字（75.3%）、调色板 140 / 256 项**（`tools/img2hex/output/report.txt`，2026-10-22 新增商店 16×8 数字后重跑）。
 
 ---
 

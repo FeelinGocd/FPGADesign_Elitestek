@@ -449,8 +449,8 @@ initial begin
     err_cnt = 0; n_chk = 0; line_done_cnt = 0; wr_bursts = 0; rd_bursts = 0;
     rst_n = 1'b0;
 
-    $readmemh("E:/project/FPGA_Project/FPGA_Elitestek/FPGADesign_Elitestek/res/func/output/assets.hex", ramw);
-    $readmemh("E:/project/FPGA_Project/FPGA_Elitestek/FPGADesign_Elitestek/res/func/output/palette.hex", pal);
+    $readmemh("hex/assets.hex", ramw);
+    $readmemh("hex/palette.hex", pal);
 
     repeat (10) @(negedge clk);
     rst_n = 1'b1;

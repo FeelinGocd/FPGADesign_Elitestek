@@ -10,10 +10,12 @@
 //      带 static ⇒ 【每个包含它的 .c 都会各自复制一份】（59 项 × 20 字节 = 1.2 KB）。
 //      拆成多个 .c 之后，6 个文件各一份，RAM 白吃 7 KB。
 //      ⇒ 让本文件拿着那一份，别的模块通过 game_asset_table() 访问同一份。
-//  参考        : res/func/pic2pram.py（生成的表）、docs/spec/硬件_加速器.md §7.3
+//  参考        : tools/img2hex/pic2pram.py（生成的表）、docs/spec/硬件_加速器.md §7.3
 //==============================================================================
 #include "type.h"
 #include "assets_desc.h"     /* 注意：这里【不能】包含 game.h，否则宏会把 g_assets 替换掉 */
+
+const asset_desc_t *const g_assets_ptr = g_assets;
 
 const asset_desc_t *game_asset_table(void)
 {

@@ -90,6 +90,12 @@
  *     代价只有每帧 4 条命令, 可以忽略。
  *----------------------------------------------------------------------------*/
 #define SPLIT_DIGIT_ASSET0  ASSET_num0_16x24    /* 素材表里数字 '0' 的下标（用生成的名字，别写数字）*/
+/*  16×8 小数字加入后，16×24 在素材表里不再连续 ⇒ 显式表取大号数字。  */
+static const int s_split_digits[10] = {
+    ASSET_num0_16x24, ASSET_num1_16x24, ASSET_num2_16x24, ASSET_num3_16x24,
+    ASSET_num4_16x24, ASSET_num5_16x24, ASSET_num6_16x24, ASSET_num7_16x24,
+    ASSET_num8_16x24, ASSET_num9_16x24
+};
 #define SPLIT_INFO_X        20
 #define SPLIT_INFO_Y        20
 #define SPLIT_INFO_DW       16                  /* 数字素材宽（2026-10-12 重绘成 16x24）*/
@@ -478,8 +484,8 @@ static void info_digits(u32 fb, u32 v)
     const asset_desc_t *a0;
 
     if (!g_info_on) return;
-    a1 = &g_assets[SPLIT_DIGIT_ASSET0 + (int)((v / 10u) % 10u)];
-    a0 = &g_assets[SPLIT_DIGIT_ASSET0 + (int)(v % 10u)];
+    a1 = &g_assets[s_split_digits[(int)((v / 10u) % 10u)]];
+    a0 = &g_assets[s_split_digits[(int)(v % 10u)]];
 
     CI_gpu2d_spriteRectCK(a1->base_word, a1->stride_word, fb,
                           SPLIT_INFO_X, SPLIT_INFO_Y, a1->width, a1->height);

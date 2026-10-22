@@ -215,7 +215,7 @@ task run_case;
 endtask
 
 initial begin
-    $readmemh("E:/project/FPGA_Project/FPGA_Elitestek/FPGADesign_Elitestek/res/func/output/palette.hex", pal);
+    $readmemh("palette.hex", pal);
     line_start = 1'b0; index_data = 32'd0;
     repeat (6) @(negedge clk);
     rst_n = 1'b1;

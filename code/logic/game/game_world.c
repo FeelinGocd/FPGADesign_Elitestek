@@ -84,11 +84,53 @@ static const unsigned char room_rot_shared[MAP_ROWS][MAP_COLS] = {
 static const char          (*s_map)[MAP_COLS + 1] = room_map_shared;
 static const unsigned char (*s_rot)[MAP_COLS]     = room_rot_shared;
 
+/*  4 扇门的位置在地图加载时缓存一次；恢复/标脏不再每次扫 40×23 格。  */
+#define MAX_DOORS 8
+static unsigned char s_door_tx[MAX_DOORS];
+static unsigned char s_door_ty[MAX_DOORS];
+static int           s_door_n;
+
+/*  脏格队列：只在 dirty 从 0 变 1 时登记一次。
+ *  上限 128；超过就置 overflow，恢复时回退到整表扫描（不会漏格）。
+ *  128×2B = 256B，比每帧扫 40×23 格便宜。  */
+#define DIRTY_LIST_MAX 128
+static unsigned short s_dirty_cells[DIRTY_LIST_MAX];
+static int            s_dirty_n;
+static int            s_dirty_overflow;
+static int            s_dirty_ready;
+
+void game_dirty_begin(void)
+{
+    s_dirty_n = 0;
+    s_dirty_overflow = 0;
+    s_dirty_ready = 1;
+}
+
+static void dirty_add(int tx, int ty)
+{
+    if (s_dirty_n < DIRTY_LIST_MAX)
+        s_dirty_cells[s_dirty_n++] = (unsigned short)(ty * GRID_W + tx);
+    else
+        s_dirty_overflow = 1;
+}
+
 void game_world_select(int room)
 {
+    int tx, ty;
+
     (void)room;
     s_map = room_map_shared;
     s_rot = room_rot_shared;
+
+    s_door_n = 0;
+    for (ty = 0; ty < MAP_ROWS; ++ty)
+        for (tx = 0; tx < MAP_COLS; ++tx) {
+            if (s_map[ty][tx] != 'D') continue;
+            if (s_door_n >= MAX_DOORS) return;
+            s_door_tx[s_door_n] = (unsigned char)tx;
+            s_door_ty[s_door_n] = (unsigned char)ty;
+            ++s_door_n;
+        }
 }
 
 const char          (*game_world_map(void))[MAP_COLS + 1] { return s_map; }
@@ -345,7 +387,10 @@ void game_mark_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, i
 
     for (ty = ty0; ty <= ty1; ++ty)
         for (tx = tx0; tx <= tx1; ++tx)
-            dirty[ty][tx] = 1u;
+            if (!dirty[ty][tx]) {
+                dirty[ty][tx] = 1u;
+                dirty_add(tx, ty);
+            }
 }
 
 /*----------------------------------------------------------------------------*/
@@ -355,65 +400,93 @@ void game_mark_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, i
  *  ★ 地图没变时 game_room_commit 不再整屏重铺，门的状态就靠这两帧的脏区更新。  */
 void game_mark_doors_dirty(unsigned char dirty[GRID_H][GRID_W])
 {
-    int tx, ty;
+    int k;
 
-    for (ty = 0; ty < MAP_ROWS; ++ty)
-        for (tx = 0; tx < MAP_COLS; ++tx) {
-            const asset_desc_t *door;
-            int r, ai, x, y, ow, oh;
+    for (k = 0; k < s_door_n; ++k) {
+        int tx = s_door_tx[k];
+        int ty = s_door_ty[k];
+        const asset_desc_t *door;
+        int r, ai, x, y, ow, oh;
 
-            if (s_map[ty][tx] != 'D') continue;
+        r = s_rot[ty][tx] & 3;
+        ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
+        door = &g_assets[ai];
 
-            r = s_rot[ty][tx] & 3;
-            ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
-            door = &g_assets[ai];
+        door_xy(tx, ty, &x, &y);
+        ow = (r & 1) ? (int)door->height : (int)door->width;
+        oh = (r & 1) ? (int)door->width  : (int)door->height;
 
-            door_xy(tx, ty, &x, &y);
-            ow = (r & 1) ? (int)door->height : (int)door->width;
-            oh = (r & 1) ? (int)door->width  : (int)door->height;
-
-            game_mark_dirty(dirty, x, y, ow, oh);
-        }
+        game_mark_dirty(dirty, x, y, ow, oh);
+    }
 }
 
 /*----------------------------------------------------------------------------*/
 void game_restore_dirty(u32 fb, unsigned char dirty[GRID_H][GRID_W])
 {
-    int tx, ty;
+    int tx, ty, k;
 
-    for (ty = 0; ty < GRID_H; ++ty)
-        for (tx = 0; tx < GRID_W; ++tx)
+    if (!s_dirty_ready || s_dirty_overflow) {
+        for (ty = 0; ty < GRID_H; ++ty)
+            for (tx = 0; tx < GRID_W; ++tx)
+                if (dirty[ty][tx]) blit_cell(fb, tx, ty);
+    } else {
+        for (k = 0; k < s_dirty_n; ++k) {
+            unsigned short code = s_dirty_cells[k];
+
+            tx = code % GRID_W;
+            ty = code / GRID_W;
             if (dirty[ty][tx]) blit_cell(fb, tx, ty);
+        }
+    }
 
     /*  门只有 4 扇：只要脏区碰到【门的实际矩形】（含 40×64 探进墙的边），就整扇重画  */
-    for (ty = 0; ty < MAP_ROWS; ++ty)
-        for (tx = 0; tx < MAP_COLS; ++tx) {
-            const asset_desc_t *door;
-            int r, ai, x, y, ow, oh, x0, x1, y0, y1, rx, ry, need = 0;
+    for (k = 0; k < s_door_n; ++k) {
+        int tx = s_door_tx[k];
+        int ty = s_door_ty[k];
+        const asset_desc_t *door;
+        int r, ai, x, y, ow, oh, x0, x1, y0, y1, rx, ry, need = 0;
 
-            if (!is_door(tx, ty)) continue;
+        if (!is_door(tx, ty)) continue;
 
-            r = s_rot[ty][tx] & 3;
-            ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
-            door = &g_assets[ai];
+        r = s_rot[ty][tx] & 3;
+        ai = game_room_door_asset(r);           /* 这扇门用哪种门贴图 */
+        door = &g_assets[ai];
 
-            door_xy(tx, ty, &x, &y);
-            ow = (r & 1) ? (int)door->height : (int)door->width;
-            oh = (r & 1) ? (int)door->width  : (int)door->height;
+        door_xy(tx, ty, &x, &y);
+        ow = (r & 1) ? (int)door->height : (int)door->width;
+        oh = (r & 1) ? (int)door->width  : (int)door->height;
 
-            x0 = x / TILE; x1 = (x + ow - 1) / TILE;
-            y0 = y / TILE; y1 = (y + oh - 1) / TILE;
-            if (x0 < 0) x0 = 0;
-            if (y0 < 0) y0 = 0;
-            if (x1 >= GRID_W) x1 = GRID_W - 1;
-            if (y1 >= GRID_H) y1 = GRID_H - 1;
+        x0 = x / TILE; x1 = (x + ow - 1) / TILE;
+        y0 = y / TILE; y1 = (y + oh - 1) / TILE;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 >= GRID_W) x1 = GRID_W - 1;
+        if (y1 >= GRID_H) y1 = GRID_H - 1;
 
-            for (ry = y0; ry <= y1 && !need; ++ry)
-                for (rx = x0; rx <= x1; ++rx)
-                    if (dirty[ry][rx]) { need = 1; break; }
+        for (ry = y0; ry <= y1 && !need; ++ry)
+            for (rx = x0; rx <= x1; ++rx)
+                if (dirty[ry][rx]) { need = 1; break; }
 
-            if (need) blit_door(fb, tx, ty);
-        }
+        if (need) blit_door(fb, tx, ty);
+    }
+}
+
+/*  脏格队列里有没有格子落在 [x0,x1) × [y0,y1)？
+ *  overflow 时返回 1（保守：让 HUD 整面板重画，绝不会漏）。  */
+int game_dirty_touches(int x0, int y0, int x1, int y1)
+{
+    int k;
+
+    if (!s_dirty_ready || s_dirty_overflow) return 1;
+
+    for (k = 0; k < s_dirty_n; ++k) {
+        unsigned short code = s_dirty_cells[k];
+        int tx = code % GRID_W;
+        int ty = code / GRID_W;
+
+        if (tx >= x0 && tx < x1 && ty >= y0 && ty < y1) return 1;
+    }
+    return 0;
 }
 
 /*----------------------------------------------------------------------------*/

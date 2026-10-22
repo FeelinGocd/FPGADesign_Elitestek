@@ -41,6 +41,7 @@ static int s_pending;
 static int s_target;
 static int s_entry_dir;         /* < 0 = 落在房间中心 */
 static int s_lock;              /* 刚进过门 ⇒ 不重复触发 */
+static unsigned char s_force_full;  /* 新一层：强制整屏重铺，清掉上一层的交互物像素 */
 static unsigned char s_used[ROOM_COUNT];     /* 道具房：这一轮的道具已经拿过了 */
 static unsigned char s_spawned[ROOM_COUNT];  /* 特殊房内容（道具/Boss）这一轮已经生成过 */
 static unsigned char s_reward[ROOM_COUNT];   /* 房间清理奖励：0..5 coin */
@@ -84,21 +85,6 @@ static int room_degree(int room)
         if (nb >= 0 && s_room_def[nb].type != ROOM_NONE) ++n;
     }
     return n;
-}
-
-/*  degree == 1 的叶子房间，唯一邻居是谁；没有/不是叶子返回 -1  */
-static int room_only_neighbor(int room)
-{
-    int d, one = -1, n = 0;
-
-    for (d = 0; d < 4; ++d) {
-        int nb = room_neighbor(room, d);
-        if (nb >= 0 && s_room_def[nb].type != ROOM_NONE) {
-            one = nb;
-            ++n;
-        }
-    }
-    return (n == 1) ? one : -1;
 }
 
 /*  这一类型的房间用哪张"特殊门"；普通房（START/EMPTY）返回 -1。  */
@@ -171,54 +157,95 @@ static int room_has_2x2(void)
     return 0;
 }
 
-/*  在已生成的房间列表里挑两间做道具房 / Boss 房：
- *    · 两间特殊房 8 邻域不能相邻；
+/*  从起点做 4 邻域 BFS，dist[i] = 走到第 i 间房要经过几道门。
+ *  -1 = 不可达（正常生成不应出现，validate 会拦）。  */
+static void room_dist_from_start(int dist[ROOM_COUNT])
+{
+    int q[ROOM_COUNT];
+    int head = 0, tail = 0;
+    int i, d;
+
+    for (i = 0; i < ROOM_COUNT; ++i) dist[i] = -1;
+    if (s_start_room < 0 || s_start_room >= ROOM_COUNT) return;
+    if (s_room_def[s_start_room].type == ROOM_NONE) return;
+
+    dist[s_start_room] = 0;
+    q[tail++] = s_start_room;
+    while (head < tail) {
+        int r = q[head++];
+
+        for (d = 0; d < 4; ++d) {
+            int nb = room_neighbor(r, d);
+
+            if (nb >= 0 && s_room_def[nb].type != ROOM_NONE && dist[nb] < 0) {
+                dist[nb] = dist[r] + 1;
+                q[tail++] = nb;
+            }
+        }
+    }
+}
+
+/*  在已生成的房间列表里挑三间做道具房 / 商店房 / Boss 房：
+ *    · 三间特殊房【两两】8 邻域不能相邻（也不直连）；
  *    · **特殊房必须是叶子：只能接一间普通房**（room_degree == 1）；
- *    · **Boss 房不能直接连起点房**（道具房可以）；
- *    · 起点房不能是特殊房；
- *    · 普通房可以同时接多间特殊房（不限制）。  */
+ *    · **Boss 房必须放在离起点最远的叶子上**（BFS 门数最大；同距离任选）；
+ *    · **Boss 房不能直接连起点房**（Boss 距离必须 ≥ 2）；
+ *    · 道具房 / 商店房可以连起点。
+ *  三间必须同时找到；找不到就返回 0 让外层重新生成。  */
+static int room_special_near(int a, int b)
+{
+    int dx = (int)s_room_def[a].gx - (int)s_room_def[b].gx;
+    int dy = (int)s_room_def[a].gy - (int)s_room_def[b].gy;
+
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    return dx <= 1 && dy <= 1;
+}
+
 static int room_try_specials(const int *rooms, int n)
 {
-    int i, j;
+    int dist[ROOM_COUNT];
+    int leaves[ROOM_COUNT];
+    int nl = 0, i, j, k, maxd = -1;
+
+    room_dist_from_start(dist);
 
     for (i = 0; i < n; ++i) {
-        int a = rooms[i];
+        int r = rooms[i];
 
-        if (a == s_start_room) continue;
-        for (j = i + 1; j < n; ++j) {
-            int b = rooms[j];
-            int item, boss, dx, dy, pa, pb;
+        if (r == s_start_room) continue;
+        if (s_room_def[r].type == ROOM_NONE) continue;
+        if (room_degree(r) != 1) continue;          /* 必须是叶子 */
+        leaves[nl++] = r;
+        if (dist[r] > maxd) maxd = dist[r];
+    }
 
-            if (b == s_start_room) continue;
+    if (nl < 3 || maxd < 2) return 0;               /* 至少 3 片叶子，Boss 不挨起点 */
 
-            dx = (int)s_room_def[a].gx - (int)s_room_def[b].gx;
-            dy = (int)s_room_def[a].gy - (int)s_room_def[b].gy;
-            if (dx < 0) dx = -dx;
-            if (dy < 0) dy = -dy;
-            if (dx <= 1 && dy <= 1) continue;   /* 特殊房不能空间相邻 */
-            if (room_degree(a) != 1 || room_degree(b) != 1) continue;  /* 只接一间普通房 */
+    /*  Boss 只在"最远那一档"里选；道具 / 商店从其余叶子里挑，
+     *  并且三间两两不能 8 邻域相邻。  */
+    for (i = 0; i < nl; ++i) {
+        int boss = leaves[i];
 
-            /*  连起点的那间只能当道具房；两间都连起点 ⇒ 这个布局不能要  */
-            pa = room_only_neighbor(a);
-            pb = room_only_neighbor(b);
-            if (pa == s_start_room && pb == s_start_room) continue;
+        if (dist[boss] != maxd) continue;
 
-            if (pa == s_start_room) {
-                item = a;
-                boss = b;
-            } else if (pb == s_start_room) {
-                item = b;
-                boss = a;
-            } else if (room_rand() & 1u) {
-                item = b;
-                boss = a;
-            } else {
-                item = a;
-                boss = b;
+        for (j = 0; j < nl; ++j) {
+            int item = leaves[j];
+
+            if (item == boss || room_special_near(boss, item)) continue;
+
+            for (k = 0; k < nl; ++k) {
+                int shop = leaves[k];
+
+                if (shop == boss || shop == item) continue;
+                if (room_special_near(boss, shop)) continue;
+                if (room_special_near(item, shop)) continue;
+
+                s_room_def[item].type = ROOM_ITEM;
+                s_room_def[shop].type = ROOM_SHOP;
+                s_room_def[boss].type = ROOM_BOSS;
+                return 1;
             }
-            s_room_def[item].type = ROOM_ITEM;
-            s_room_def[boss].type = ROOM_BOSS;
-            return 1;
         }
     }
     return 0;
@@ -272,31 +299,37 @@ static int room_try_generate(void)
     return 1;
 }
 
-/*  极端兜底：一条 14 格的阶梯路径（仍是算法生成的，不是写死表）。
- *    item = 路径 0（叶子），boss = 路径 13（叶子），start = 路径 7（中间）。
- *    和原来的长直蛇形相比，阶梯路径多拐弯，不会一眼看过去全是重复直走廊。  */
+/*  极端兜底：13 格的三叶 T 形（仍是算法摆出来的，不是写死的地图表）。
+ *
+ *        (4,0)
+ *        (4,1)
+ *        (4,2)
+ *  (0,3)(1,3)(2,3)(3,3)(4,3)(5,3)
+ *        (1,2)      (3,4)
+ *        (1,1)      (3,5)
+ *
+ *  start = (2,3)；三片特殊叶子：
+ *    item = (1,1) 距离 3，shop = (3,5) 距离 3，boss = (4,0) 距离 5（最远）。
+ *  三间两两不 8 邻域相邻，且各自只接一间普通房；没有 2×2 四房块。  */
 static void room_fallback(void)
 {
+    static const unsigned char cells[13][2] = {
+        {0,3},{1,3},{2,3},{3,3},{4,3},{5,3},
+        {1,2},{1,1},
+        {3,4},{3,5},
+        {4,2},{4,1},{4,0}
+    };
     int i;
-    int path[14];
 
     room_clear();
-    for (i = 0; i < 14; ++i) {
-        int x, y;
+    for (i = 0; i < 13; ++i)
+        s_room_def[cell_id(cells[i][0], cells[i][1])].type = ROOM_EMPTY;
 
-        if (i < 3)       { x = i;            y = 0; }
-        else if (i < 6)  { x = i - 1;        y = 1; }
-        else if (i < 8)  { x = 4;            y = i - 4; }
-        else if (i < 11) { x = 5;            y = i - 5; }
-        else             { x = 4 - (i - 11); y = 5; }
-
-        path[i] = cell_id(x, y);
-        s_room_def[path[i]].type = ROOM_EMPTY;
-    }
-    s_start_room = path[7];
+    s_start_room = cell_id(2, 3);
     s_room_def[s_start_room].type = ROOM_START;
-    s_room_def[path[0]].type = ROOM_ITEM;
-    s_room_def[path[13]].type = ROOM_BOSS;
+    s_room_def[cell_id(1, 1)].type = ROOM_ITEM;
+    s_room_def[cell_id(3, 5)].type = ROOM_SHOP;
+    s_room_def[cell_id(4, 0)].type = ROOM_BOSS;
 }
 
 static void room_layout_generate(void)
@@ -481,10 +514,11 @@ int game_room_door_asset(int dir)
 }
 
 /*  启动自检（由 game_init() 调用，非 0 拒绝启动）：
- *    · 起点 1、道具 1、Boss 1；
+ *    · 起点 1、道具 1、商店 1、Boss 1；
  *    · 特殊房之间 8 邻域不相邻；
  *    · **特殊房只能接一间普通房**（叶子）；
  *    · **Boss 房不能直接连起点房**；
+ *    · **Boss 房必须是离起点最远的叶子**（BFS 门数）；
  *    · 所有房间从起点连通。
  *  普通房可以同时接多间特殊房（不限制）。  */
 int game_room_validate(void)
@@ -504,7 +538,7 @@ int game_room_validate(void)
     if (start != 1) ++bad;
     if (item != 1) ++bad;
     if (boss != 1) ++bad;
-    if (shop > 1) ++bad;
+    if (shop != 1) ++bad;
 
     /*  特殊房之间 8 邻域不相邻  */
     for (i = 0; i < ROOM_COUNT; ++i) {
@@ -542,6 +576,24 @@ int game_room_validate(void)
             int nb = room_neighbor(i, d);
             if (nb == s_start_room) ++bad;
         }
+    }
+
+    /*  Boss 房必须是离起点最远的叶子（和生成规则同一条判据）  */
+    {
+        int dist[ROOM_COUNT];
+        int max_leaf = -1, boss_dist = -1;
+
+        room_dist_from_start(dist);
+        for (i = 0; i < ROOM_COUNT; ++i) {
+            int type = (int)s_room_def[i].type;
+
+            if (type == ROOM_NONE) continue;
+            if (i != s_start_room && room_degree(i) == 1) {
+                if (dist[i] > max_leaf) max_leaf = dist[i];
+            }
+            if (type == ROOM_BOSS) boss_dist = dist[i];
+        }
+        if (max_leaf < 0 || boss_dist != max_leaf) ++bad;
     }
 
     /*  普通房可以同时接多间特殊房（每个方向看邻居类型各自渲染门），不再限制  */
@@ -631,6 +683,7 @@ void game_room_new_run(void)
 
     room_layout_generate();
     s_room = s_start_room;
+    s_force_full = 1;                       /* 下一层的地图指针虽然相同，但必须整屏重铺 */
     for (i = 0; i < ROOM_COUNT; ++i) {
         s_used[i] = 0;
         s_spawned[i] = 0;
@@ -638,10 +691,13 @@ void game_room_new_run(void)
     g.exit_active = 0;
     g.exit_dirty = 2;                       /* 把旧 exit 擦掉（两块缓冲） */
     g.boss_wait_until = 0u;
+    g.boss_drop_pending = 0;                /* 上一关没捡的 Boss 饰品不带进新一关 */
+    g.item.active = 0;
     game_mobs_reset();
     game_coins_reset();
     game_web_reset();
     game_stones_reset();
+    game_shop_reset();
     game_minimap_reset();                   /* 新一层：地图从初始房间重新点亮 */
     game_minimap_refresh();
     game_vital_refill();                    /* 新一关血量补满，命数保留 */
@@ -699,6 +755,7 @@ void game_room_reset(void)
 
     room_layout_generate();
     s_room = s_start_room;
+    s_force_full = 1;                       /* 下一层的地图指针虽然相同，但必须整屏重铺 */
     s_pending = 0;
     s_lock = 0;
     s_entry_dir = -1;
@@ -710,6 +767,7 @@ void game_room_reset(void)
     game_coins_reset();
     game_web_reset();
     game_stones_reset();
+    game_shop_reset();
 
     game_world_select(s_room);
     doors_build();
@@ -777,6 +835,12 @@ int game_room_commit(void)
     game_minimap_refresh();                 /* 进入新房间：刷新小地图 */
 
     same_layout = (game_world_map() == old_map) && (game_world_rot() == old_rot);
+    if (s_force_full) {
+        /*  下一层：交互物 / exit / 旧精灵的 old_* 已被 reset，
+         *  不能再走 same_layout 快速路径，否则旧像素没人擦。  */
+        same_layout = 0;
+        s_force_full = 0;
+    }
 
     doors_build();
 

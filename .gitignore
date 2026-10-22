@@ -25,7 +25,7 @@ docs/比赛汇报
 
 res/pic/character/_基础设定
 res/pic/character/_preview
-res/func/output
+tools/img2hex/output/
 # ── 仿真：TB 源码要入库，只忽略 ModelSim 的生成物和临时目录 ─────────────────
 sim
 

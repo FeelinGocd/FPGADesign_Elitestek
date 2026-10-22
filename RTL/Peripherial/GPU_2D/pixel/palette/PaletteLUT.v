@@ -15,7 +15,7 @@
 //
 //  为什么没有写口
 //      调色板在【生成 bit 阶段】就烧进初值：索引、调色板、素材表全部由 C 代码 +
-//      res/func/pic2pram.py 生成初值文件，综合时走 BlockRAM 的 INIT_FILE_PATH 进 RAM。
+//      tools/img2hex/pic2pram.py 生成初值文件，综合时走 BlockRAM 的 INIT_FILE_PATH 进 RAM。
 //      运行期不装载、不写、也就没有竞态 ⇒ 这里一根写线都不留。
 //
 //  为什么一拍查 4 个

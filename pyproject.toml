@@ -2,15 +2,13 @@
 #  pyproject.toml —— PC 侧 Python 工具的环境（用 uv 管理）
 #  ---------------------------------------------------------------------------
 #  这些脚本都不是游戏的一部分，只是电脑上跑的小工具：
-#      tools/game_pad.py            键盘 → 串口（虚拟手柄）
-#      res/func/pic2pram.py         素材 → assets.hex / palette.hex / assets_desc.h
-#      res/func/preview_alpha.py    素材 α 预览
-#      res/func/preview_screen.py   离线渲染预览
+#      tools/GamePad/game_pad.py            键盘 → 串口（虚拟手柄）
+#      tools/img2hex/pic2pram.py            素材 → assets.hex / palette.hex / assets_desc.h / report.txt
 #
 #  用法：
 #      uv sync                       # 建 .venv 并装依赖（第一次 / 换机器时跑）
-#      uv run tools/game_pad.py -p COM5
-#      uv run res/func/pic2pram.py
+#      uv run tools/GamePad/game_pad.py -p COM5
+#      uv run tools/img2hex/pic2pram.py
 #
 #  ★ 编辑器（VS Code + Pylance）请把解释器选成 .venv\Scripts\python.exe，
 #    这样 import serial / from PIL import Image 才不会报"无法解析导入"。

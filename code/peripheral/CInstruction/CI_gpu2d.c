@@ -66,11 +66,10 @@ static u32 sprite_param(u32 stride, u32 rotate90)
     return (stride & 0xFFFu) | (rotate90 ? 0x00800000u : 0u);
 }
 
-/* 画布一行的字节数: 跟显示模式走(硬件那边同一套: 全屏 5760 / 分屏 2880) */
+/* 画布一行的字节数：用 lineBuffer 的软件缓存，避免每条绘图命令都读 APB STATUS */
 static u32 ci_line_bytes(void)
 {
-    return lineBuffer_isSplit() ? (LINEBUFFER_LINE_BYTES / 2u)
-                                :  LINEBUFFER_LINE_BYTES;
+    return lineBuffer_lineBytes();
 }
 
 /* NOP(功能号 0): 不产生任何绘制命令, 但硬件照样回一个 rsp -> 拿它验通路 */

@@ -9,15 +9,40 @@
 //  上一级是谁  : game/game_main.c（每帧）、game_player.c / game_boss.c（生成）
 //  接口契约    :
 //    · 固定 256 槽的池子，不开动态内存；其中 32 槽永远留给玩家（PLAYER_RESERVE）
-//    · ★ 判定只用【子弹中心点】× 【身体矩形】，不用 32×32 的包围盒
+//    · ★ 判定只用【子弹中心点】× 【脚到眼睛的身体矩形】，不用整张贴图包围盒
 //    · 素材只有"朝右"一套，四个朝向靠 镜像 / ROT90 / ROT90+MY 拼出来
 //  为什么这么做:
 //    · 直线弹幕太单调 ⇒ 弹道做成"速度 + 模式"两件套，图案只负责给参数
-//    · 判定用包围盒会让"擦着边就受伤"，弹幕游戏手感全毁 ⇒ 用身体矩形 + 子弹中心
+//    · 判定用整张包围盒会让"擦着边就受伤" ⇒ 用身体矩形 + 子弹中心
 //  参考        : docs/spec/硬件_加速器.md §1.6.1（ROT90）/ 软件_驱动与API.md §8.1
 //==============================================================================
 #include "game.h"
 #include "CI_gpu2d.h"
+
+/*  池子管理：不扫 256 槽。
+ *    · s_alive / s_enemy_alive 是权威计数，生成/释放时维护；
+ *    · s_free 是空闲槽栈，生成 O(1)，释放时压回去。  */
+static int s_alive;
+static int s_enemy_alive;
+static int s_free_n;
+static unsigned char s_free[N_BULLETS];
+
+static int bullet_alloc(void)
+{
+    if (s_free_n <= 0) return -1;
+    return (int)s_free[--s_free_n];
+}
+
+static void bullet_release(int i)
+{
+    bullet_t *b = &g.bullets[i];
+
+    if (!b->active) return;
+    b->active = 0;
+    --s_alive;
+    if (b->enemy) --s_enemy_alive;
+    if (s_free_n < N_BULLETS) s_free[s_free_n++] = (unsigned char)i;
+}
 
 /* 朝向 → 翻转位（朝右是原图）。辣椒那张美术要求"不转"，单独一套。 */
 static const u32 dir_flip[4]       = { 0u, GPU2D_FLIP_X, GPU2D_ROT90, GPU2D_ROT90 | GPU2D_FLIP_Y };
@@ -26,8 +51,9 @@ static const u32 dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
 /*----------------------------------------------------------------------------*/
 static int bullet_asset(const bullet_t *b)
 {
-    /*  敌方（Boss）走 A_base + 硬件 MODE=4 实时 tint；
-     *  玩家的 B/C 弹走各自素材。C_Uranus 只给玩家，不给 Boss。  */
+    /*  ★ 敌方（Boss）没有专属素材：预染的 bullet_type_A_enemy 已从素材目录删除
+     *     （2026-10-22，不再进 PRAM），敌方弹一律走 A_base + 硬件 MODE=4 实时 tint
+     *     （见 bullet_draw_one）。玩家的 B/C 弹走各自素材；C_Uranus 只给玩家。  */
     if (b->enemy)                 return ASSET_bullet_type_A_base;
     if (b->type == BULLET_CHILI)  return ASSET_bullet_type_B_chili_NOTROT90;
     if (b->type == BULLET_URANUS) return ASSET_bullet_type_C_Uranus;
@@ -59,6 +85,7 @@ static int pt_in(int px, int py, int x, int y, int w, int h)
 int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enemy)
 {
     int i;
+    bullet_t *b;
 
     /* 敌弹上限：既给玩家留槽（不哑火），也压住每帧命令数（一颗弹≈3 条命令）。
        关卡越往后上限越高，但封顶 160 —— 再多帧率就压不住了。 */
@@ -66,34 +93,32 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
         int cap = ENEMY_CAP + (g.stage - 1) * 10;
 
         if (cap > 160) cap = 160;
-        if (game_bullets_alive() >= cap) return -1;
+        if (s_alive >= cap) return -1;
     }
 
-    for (i = 0; i < N_BULLETS; ++i) {
-        bullet_t *b;
-
-        if (g.bullets[i].active) continue;
-        b = &g.bullets[i];
-        b->x = x;
-        b->y = y;
-        b->vx = vx;
-        b->vy = vy;
-        b->mode = mode;
-        b->age = 0;
-        b->base_x = x;
-        b->type = type;
-        b->dist = 0;
-        /*  寿命：自机弹按【距离】（射程），敌方弹按【时间】（帧数）。
-         *  两种都给上了，谁先到谁先消失。  */
-        b->range = enemy ? 0 : PLAYER_BULLET_RANGE;
-        b->life  = enemy ? BOSS_BULLET_LIFE : 0;
-        b->enemy = enemy;
-        b->use8 = 0;
-        b->vx8 = 0; b->vy8 = 0; b->rx = 0; b->ry = 0;
-        b->active = 1;
-        return i;
-    }
-    return -1;
+    i = bullet_alloc();
+    if (i < 0) return -1;
+    b = &g.bullets[i];
+    b->x = x;
+    b->y = y;
+    b->vx = vx;
+    b->vy = vy;
+    b->mode = mode;
+    b->age = 0;
+    b->base_x = x;
+    b->type = type;
+    b->dist = 0;
+    /*  寿命：自机弹按【距离】（射程），敌方弹按【时间】（帧数）。
+     *  两种都给上了，谁先到谁先消失。  */
+    b->range = enemy ? 0 : PLAYER_BULLET_RANGE;
+    b->life  = enemy ? BOSS_BULLET_LIFE : 0;
+    b->enemy = enemy;
+    b->use8 = 0;
+    b->vx8 = 0; b->vy8 = 0; b->rx = 0; b->ry = 0;
+    b->active = 1;
+    ++s_alive;
+    if (enemy) ++s_enemy_alive;
+    return i;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -227,32 +252,32 @@ void game_bullets_step(u32 now)
         b = &g.bullets[i];
 
         /* 追踪弹有寿命：玩家一直躲的话它会在天上待到池子满 */
-        if (b->mode == MOTION_HOME && b->age > 600) { b->active = 0; continue; }
+        if (b->mode == MOTION_HOME && b->age > 600) { bullet_release(i); continue; }
 
         bullet_move(b);
 
         /*  ★ 寿命（射程 / 存活帧）：
          *    自机弹按【距离】熄火 —— 不用飞到屏幕外才消失，打出去有"射程"感；
          *    敌方弹按【时间】退休 —— 免得追踪/加速弹在场上赖着不走把池子占满。  */
-        if (b->range > 0 && b->dist >= b->range * 8) { b->active = 0; continue; }
-        if (b->life > 0 && --b->life <= 0)       { b->active = 0; continue; }
+        if (b->range > 0 && b->dist >= b->range * 8) { bullet_release(i); continue; }
+        if (b->life > 0 && --b->life <= 0)           { bullet_release(i); continue; }
 
         cx = b->x + BW / 2;             /* 判定点 = 子弹中心 */
         cy = b->y + BH / 2;
 
         /*  可交互石头：玩家弹 / Boss 弹撞上都直接消失；石头本身不可破坏  */
         if (game_stone_hit_at(cx, cy)) {
-            b->active = 0;
+            bullet_release(i);
             continue;
         }
 
         if (b->enemy) {
-            /* 打到角色的【身体】（头不判、脚不判） */
+            /* 打到角色的【脚到眼睛】矩形（头不判，脚参与） */
             if (pt_in(cx, cy, g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H)) {
                 /*  扣血/死亡/无敌全交给 game_vital；这里只管"这一发打中了"  */
                 if (game_vital_hit(now) != 0) g.hurt_until = now + HURT_MS;
                 if (game_perf_pinned()) bullet_recycle(b, i);
-                else { b->active = 0; continue; }
+                else { bullet_release(i); continue; }
             }
         } else {
             /* 打到 Boss：锁血时判定框换成护盾（子弹打在玻璃上碎掉，不掉血） */
@@ -264,20 +289,20 @@ void game_bullets_step(u32 now)
 
             if (hit) {
                 game_boss_hit(now);
-                b->active = 0;
+                bullet_release(i);
                 continue;
             }
 
             /*  没打中 Boss：再看当前房间的 slime  */
             if (game_mobs_try_hit(cx, cy)) {
-                b->active = 0;
+                bullet_release(i);
                 continue;
             }
         }
 
         if (b->x < 0 || b->x + BW > SCR_W || b->y < 0 || b->y + BH > SCR_H) {
             if (game_perf_pinned()) bullet_recycle(b, i);
-            else b->active = 0;
+            else bullet_release(i);
         }
     }
 }
@@ -305,16 +330,18 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
     (void)now; (void)buf;
 
     /*  ★ Boss 弹幕走硬件 MODE=4：A_base + spriteAlphaTintRect 实时红 tint；
-     *     base 的 α=128 软边保留。玩家 B/C 弹走普通 alpha。  */
+     *     base 的 α=128 软边保留。玩家 B/C 弹走普通 alpha。
+     *     ★ bullet_type_A_enemy 已删除，敌方弹的素材就是 bullet_asset() 返回的
+     *       A_base（ai），这里不再另外写死一个 ASSET_ 名字。  */
     if (b->enemy) {
         CI_gpu2d_spriteAlphaTintRect(
-            g_assets[ASSET_bullet_type_A_base].base_word,
-            g_assets[ASSET_bullet_type_A_base].stride_word,
+            g_assets[ai].base_word,
+            g_assets[ai].stride_word,
             fb, (u32)b->x, (u32)b->y, BW, BH,
-            0x00FF0000u,   /* 纯红 */
-            255u,          /* 浓度拉满：base 的白/蓝底不再透出来 */
+            0x00FF2020u,   /* 柔和红：= 旧预染弹 bullet_type_A_enemy 的配色 */
+            170u,          /* 浓度 170/255：保留 base 的明暗层次，不会糊成一片纯红 */
             1u,            /* 插值染色 */
-            bullet_flip(b, ASSET_bullet_type_A_base));
+            bullet_flip(b, ai));
     } else {
         CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
             fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
@@ -342,21 +369,14 @@ void game_bullets_submit(void)
 /*----------------------------------------------------------------------------*/
 int game_bullets_alive(void)
 {
-    int i, n = 0;
-
-    for (i = 0; i < N_BULLETS; ++i) if (g.bullets[i].active) ++n;
-    return n;
+    return s_alive;
 }
 
 /*----------------------------------------------------------------------------*/
 /*  只数敌方弹 —— "上一招清完了没有"要用它（玩家自己的弹一直在飞）  */
 int game_enemy_bullets_alive(void)
 {
-    int i, n = 0;
-
-    for (i = 0; i < N_BULLETS; ++i)
-        if (g.bullets[i].active && g.bullets[i].enemy) ++n;
-    return n;
+    return s_enemy_alive;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -365,19 +385,25 @@ void game_bullets_clear(void)
     int i;
 
     /* GAME OVER 保留倒计时，但旧弹幕不再移动、碰撞或重绘。 */
-    for (i = 0; i < N_BULLETS; ++i)
-        g.bullets[i].active = 0;
+    for (i = 0; i < N_BULLETS; ++i) g.bullets[i].active = 0;
+    s_alive = 0;
+    s_enemy_alive = 0;
+    s_free_n = 0;
+    for (i = 0; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned char)i;
 }
 
 /*----------------------------------------------------------------------------*/
 void game_bullets_perf_fill(int count)
 {
-    int i;
+    int i, n = count;
 
-    for (i = 0; i < N_BULLETS; ++i) {
+    if (n < 0) n = 0;
+    if (n > N_BULLETS) n = N_BULLETS;
+
+    game_bullets_clear();
+    for (i = 0; i < n; ++i) {
         bullet_t *b = &g.bullets[i];
 
-        b->active = (i < count);
         b->x = 16 + (i % 24) * 40;
         b->y = 40 + (i / 24) * 80;
         b->vx = 0;
@@ -397,5 +423,12 @@ void game_bullets_perf_fill(int count)
         b->ry = 0;
         if (i & 1) b->vy = ENEMY_BULLET_SPEED;
         else       b->vx = -PLAYER_BULLET_SPEED;
+        b->active = 1;
+        ++s_alive;
+        if (b->enemy) ++s_enemy_alive;
     }
+
+    /* active 是 0..n-1，空闲槽从 n 开始 */
+    s_free_n = 0;
+    for (i = n; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned char)i;
 }

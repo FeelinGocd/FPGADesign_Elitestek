@@ -27,7 +27,7 @@
 | `pixel/DDR/DDRSource.v` | 新输入 `line_flags`；内部 `my_line` 判"要不要我"、`bg_rd` 判"读源行还是读目的行" | 背景 = 读回目的自己；`row_addr = bg_rd ? 目的行 : 源行`，相位/读长/拆笔一个字不改 |
 | `pixel/palette/PaletteSource.v` | 新内部 `my_line`（本来就是 PRAM 源那一半） | 同上 |
 | `factory/DDRPacker.v`·`Factory.v` | 行首 `cnt_byte <= dst_off`（**拍对齐下沉**，前置改动） | 源侧只做“像素对齐” ⇒ 合成器拿到的永远是 4 个整像素，α 才配得上 |
-| `res/func/pic2pram.py` | `palette.hex` 输出 `AARRGGBB`；α = 该索引下所有像素的最大 α；索引 0 强制 0；半透明像素保留原色 | 素材侧唯一要跟着改的地方；索引数据 `assets.hex` **逐字节没变** |
+| `tools/img2hex/pic2pram.py` | `palette.hex` 输出 `AARRGGBB`；α = 该索引下所有像素的最大 α；索引 0 强制 0；半透明像素保留原色 | 素材侧唯一要跟着改的地方；索引数据 `assets.hex` **逐字节没变** |
 | `CInstruction/CI_gpu2d.c`·`.h` | 新增 `CI_gpu2d_spriteAlpha` / `spriteAlphaRect` | 原来只能发 `MODE=1`，不补 API 上板没法试 |
 
 ### ★ 和初稿不同的地方（原因）
@@ -113,14 +113,14 @@ assign src1_rd_en = src_en_r[1] & ((pixel_ready & pixel_valid) | row_done_r);
 `tb_alphaCompositor` 新增第 9 例；全套 10 个 TB 全过。
 
 **注意**：加了玻璃之后调色板会重新训练（共用调色板），`sim/tb/*/palette.hex` 这些**运行目录副本要跟着更新**，
-否则 TB 的 DUT（读运行目录）和参考（读 `res/func/output/`）会用两份不同的调色板，报一堆假错。
+否则 TB 的 DUT 和参考会读到两份不同的调色板，报一堆假错（`tb_m3palette` 现在读同目录的副本）。
 ## 4. 上板前要注意的三件事
 
 1. **必须重新综合**：`palette.hex` 和素材都是 BRAM 初值（生成 bit 阶段烧进去的），
    调色板从 24 位变 32 位、内容也变了。
 2. **固件要重编**：新增了 `CI_gpu2d_spriteAlpha()`；`assets_desc.h` 也重新生成过（内容未变）。
 3. **素材要按 α 档位画**：一个索引 = 一种 (颜色, α)，用固定档位（0/128/255），
-   别用连续渐变的透明度，否则 256 项装不下。生成完 `res/func/output/report.txt` 里会打出 α 档位统计。
+   别用连续渐变的透明度，否则 256 项装不下。生成完 `tools/img2hex/output/report.txt` 里会打出 α 档位统计。
 
 ## 5. 怎么发一条 alpha 命令
 

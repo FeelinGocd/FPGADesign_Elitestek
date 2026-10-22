@@ -11,6 +11,7 @@ if (Test-Path work) { Remove-Item -Recurse -Force work }
 $F = @(
   "$P\GPU_2D\pixel\palette\PaletteRAM.v", "$P\GPU_2D\pixel\palette\PaletteLUT.v",
   "$P\GPU_2D\pixel\palette\PaletteDecoder.v", "$P\GPU_2D\pixel\palette\PaletteSource.v",
+  "$P\GPU_2D\process\colorKey.v",
   "$P\GPU_2D\lineBuffer\PingPongBuffer\BlockRAM.v",
   "$TbTop.v"
 )

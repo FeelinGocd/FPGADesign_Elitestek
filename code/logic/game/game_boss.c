@@ -90,7 +90,65 @@ static void rain_wave(void)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  最近的敌人中心（现在场上只有 Boss；以后加小怪就在这个函数里遍历）  */
+/*  当前【朝向方向】里最近的敌人中心；没有返回 0。
+ *  方向按“主轴”分：横向差 >= 纵向差 ⇒ 左/右，否则上/下。
+ *  这样玩家背对/侧对怪物时不会自动转火，必须自己把朝向转过去。  */
+int game_enemy_in_dir(int dir, int *tx, int *ty)
+{
+    int i, best = -1, bestd = 0x7fffffff;
+    int px = g.x + PW / 2;
+    int py = g.y + PH / 2;
+
+    /*  Boss 房：Boss 优先（Boss 房不会同时有 slime）  */
+    if (g.phase == PHASE_FIGHT && g.boss_hp > 0) {
+        int bx = g.boss_x + BB_OFF_X + BB_W / 2;
+        int by = g.boss_y + BB_OFF_Y + BB_H / 2;
+        int dx = bx - px, dy = by - py;
+        int adx = dx < 0 ? -dx : dx;
+        int ady = dy < 0 ? -dy : dy;
+        int match;
+
+        if (dir == LEFT)       match = (dx < 0 && adx >= ady);
+        else if (dir == RIGHT) match = (dx > 0 && adx >= ady);
+        else if (dir == UP)    match = (dy < 0 && ady >= adx);
+        else                   match = (dy > 0 && ady >= adx);
+
+        if (match) {
+            *tx = bx;
+            *ty = by;
+            return 1;
+        }
+        return 0;
+    }
+
+    for (i = 0; i < N_MOBS; ++i) {
+        const mob_t *m = &g.mobs[i];
+        int dx, dy, adx, ady, d, match;
+
+        if (!m->active) continue;
+        dx = m->x + 16 - px;
+        dy = m->y + 16 - py;
+        adx = dx < 0 ? -dx : dx;
+        ady = dy < 0 ? -dy : dy;
+
+        if (dir == LEFT)       match = (dx < 0 && adx >= ady);
+        else if (dir == RIGHT) match = (dx > 0 && adx >= ady);
+        else if (dir == UP)    match = (dy < 0 && ady >= adx);
+        else                   match = (dy > 0 && ady >= adx);
+        if (!match) continue;
+
+        d = adx + ady;
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    if (best < 0) return 0;
+
+    *tx = g.mobs[best].x + 16;
+    *ty = g.mobs[best].y + 16;
+    return 1;
+}
+
+/*----------------------------------------------------------------------------*/
+/*  最近的敌人中心（保留给非射击用途；玩家自动开火改用 game_enemy_in_dir）。  */
 int game_nearest_enemy(int *tx, int *ty)
 {
     int i, best = -1, bestd = 0x7fffffff;
@@ -235,8 +293,14 @@ void game_boss_hit(u32 now)
         g.door_dirty  = 2;                              /* 无怪物了：把锁死的门重画成开着的 */
         bsp_printf("EXIT: room %d at (%d,%d)\r\n", g.exit_room, g.exit_x, g.exit_y);
 
-        /*  Boss 房也发清理奖励 0..5 coin  */
-        game_coins_spawn(game_room_take_reward());
+        /*  Boss 击破：掉一个随机饰品（不再发金币）。
+         *  ★ game_room_take_reward() 只用来把本房标记成"已清"，返回值不要；
+         *    普通房清怪仍然走 game_coins_spawn()。  */
+        (void)game_room_take_reward();
+        game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
+                               (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
+        g.boss_drop_pending = 1;
+        bsp_printf("BOSS DROP: accessory #%d\r\n", g.item.type);
     }
 }
 

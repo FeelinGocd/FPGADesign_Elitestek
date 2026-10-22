@@ -18,10 +18,13 @@
 #define MOB_H          32
 #define MOB_HP         3
 #define BUG_HP         2
-#define MOB_BODY_X     5
-#define MOB_BODY_Y     12
-#define MOB_BODY_W     22
-#define MOB_BODY_H     18
+/*  32×32 贴图里真正有像素的范围（两张 slime / 两张 bug 的并集）：
+ *    slime x1..31 y4..30；bug x0..30 y2..25
+ *  取覆盖全部像素的 32×32 大方块（透明边最多 4 px），不再用 22×18 的小身子。  */
+#define MOB_BODY_X     0
+#define MOB_BODY_Y     0
+#define MOB_BODY_W     32
+#define MOB_BODY_H     32
 
 #define MOB_SLIME      0
 #define MOB_BUG        1
@@ -42,6 +45,14 @@ static u32 mob_rand(void)
 static int pt_in(int px, int py, int x, int y, int w, int h)
 {
     return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+/*  两个矩形是否相交（玩家身体 vs 小怪大方块）  */
+static int rect_hit(int ax, int ay, int aw, int ah,
+                    int bx, int by, int bw, int bh)
+{
+    return ax < bx + bw && ax + aw > bx &&
+           ay < by + bh && ay + ah > by;
 }
 
 void game_mobs_reset(void)
@@ -191,10 +202,11 @@ void game_mobs_step(u32 now)
             }
         }
 
-        /*  接触伤害：只看 slime 的身体 vs 玩家肚子  */
+        /*  接触伤害：玩家【脚到眼睛】矩形 vs 小怪【大方块】  */
         if (!game_vital_dead(now) &&
-            pt_in(g.x + PB_OFF_X + PB_W / 2, g.y + PB_OFF_Y + PB_H / 2,
-                  m->x + MOB_BODY_X, m->y + MOB_BODY_Y, MOB_BODY_W, MOB_BODY_H)) {
+            rect_hit(g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H,
+                     m->x + MOB_BODY_X, m->y + MOB_BODY_Y,
+                     MOB_BODY_W, MOB_BODY_H)) {
             if (game_vital_hit(now) != 0) g.hurt_until = now + HURT_MS;
         }
     }

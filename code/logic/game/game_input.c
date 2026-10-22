@@ -12,7 +12,7 @@
 //    · 只在"有新帧"时刷新，掩码在 PAD_TIMEOUT 内一直有效 ⇒ PC 工具只需在变化时发
 //  为什么这么做:
 //    · 板载只有 4 个按键，玩弹幕太反人类；串口是现成的双向通道，不用改硬件。
-//  参考        : tools/game_pad.py（PC 端）、docs/spec/软件_驱动与API.md §8.3
+//  参考        : tools/GamePad/game_pad.py（PC 端）、docs/spec/软件_驱动与API.md §8.3
 //==============================================================================
 #include "game.h"
 #include "bsp.h"        /* BSP_UART_TERMINAL / uart_readOccupancy / uart_read */
@@ -24,6 +24,7 @@
 /*  ---- 串口【文本命令】----
  *  和"虚拟手柄"的二进制帧共存：帧头 0xA5 不是可打印字符，所以
  *  可打印 ASCII 一律当命令收集，遇到回车执行。
+ *      T      → 切换无敌（无限血量，不掉血；打开时补满心）
  *      debug0 → 无敌（不掉血）
  *      debug1 → 恢复正常（会被打）
  */
@@ -46,12 +47,18 @@ static void cmd_exec(void)
 
     if (cmd_is(s_cmd, "debug0")) {
         game_debug_invuln = 1;
+        game_vital_refill();                /* 打开时顺手补满心，直观看到"无限血" */
         bsp_printf("DEBUG: invincible ON (debug0)\r\n");
     } else if (cmd_is(s_cmd, "debug1")) {
         game_debug_invuln = 0;
         bsp_printf("DEBUG: invincible OFF (debug1)\r\n");
+    } else if (cmd_is(s_cmd, "T") || cmd_is(s_cmd, "t")) {
+        game_debug_invuln = !game_debug_invuln;
+        if (game_debug_invuln) game_vital_refill();
+        bsp_printf("DEBUG: invincible %s (T)\r\n",
+                   game_debug_invuln ? "ON" : "OFF");
     } else if (s_cmd[0] != 0) {
-        bsp_printf("DEBUG: unknown cmd '%s' (debug0 / debug1)\r\n", s_cmd);
+        bsp_printf("DEBUG: unknown cmd '%s' (T / debug0 / debug1)\r\n", s_cmd);
     }
 }
 

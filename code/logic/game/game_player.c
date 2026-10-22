@@ -66,8 +66,14 @@ void game_player_step(u32 keys, u32 now)
 
     /*  目标速度：按下就是满速，松开就是 0。
      *  实际速度每帧朝目标逼近 —— 这就是"加速 / 减速"，子弹会继承它（动量）。  */
-    if (mx && my) { tvx = mx * PLAYER_DIAG_V8; tvy = my * PLAYER_DIAG_V8; }
-    else          { tvx = mx * PLAYER_MAX_V8;  tvy = my * PLAYER_MAX_V8;  }
+    {
+        int maxv = g.stats.move_v8;
+        int diagv = maxv * 2 / 3;           /* 保持 24 → 16 的斜向比例 */
+
+        if (diagv < 1) diagv = 1;
+        if (mx && my) { tvx = mx * diagv; tvy = my * diagv; }
+        else          { tvx = mx * maxv;  tvy = my * maxv;  }
+    }
 
     /*  站在蜘蛛网上：目标速度降到 45%（离开就恢复）  */
     if (game_web_slow_at(g.x + PB_OFF_X + PB_W / 2,
@@ -93,7 +99,7 @@ void game_player_step(u32 keys, u32 now)
     else if (my < 0) g.dir = UP;
     else if (my > 0) g.dir = DOWN;
 
-    /*  ★ 撞墙 = 【肚子】撞到场地边界（基岩），不是贴图包围盒。
+    /*  ★ 撞墙 = 【脚到眼睛】的身体矩形撞到场地边界（基岩），不是整张贴图包围盒。
      *    头/脚/尾巴可以探进墙里；正对着门时门洞那一段再往外放一点，让人走进门。  */
     {
         int bx0 = ARENA_X0 - PB_OFF_X, by0 = ARENA_Y0 - PB_OFF_Y;
@@ -107,7 +113,7 @@ void game_player_step(u32 keys, u32 now)
         if (ny > by1) { ny = by1; g.vy8 = 0; g.ry = 0; }
     }
 
-    /*  ★ 可交互石头：按【肚子】挡；分轴处理，可以贴着石头滑动  */
+    /*  ★ 可交互石头：石头在上挡脚底、石头在下挡最上一排（眼睛）；分轴处理，可以贴着石头滑动  */
     if (game_stone_block(nx, ny)) {
         if (!game_stone_block(nx, g.y)) {
             ny = g.y;
@@ -131,7 +137,7 @@ void game_player_step(u32 keys, u32 now)
     else g.anim = (g.anim + 1u) % (ANIM_FRAMES * ANIM_HOLD);
     g.anim_step = g.moving ? (g.anim / ANIM_HOLD) : 0u;
 
-    if (++g.fire_tick >= FIRE_EVERY) {
+    if (++g.fire_tick >= (u32)g.stats.fire_every) {
         g.fire_tick = 0u;
         game_player_fire();
     }
@@ -159,41 +165,30 @@ static void player_shot(int angle, int speed)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  自动瞄准：枪口朝"最近的敌人"，只打上下左右。
- *  · 背对敌人不开火；场上没敌人不开火
+/*  自动开火：只有【当前朝向方向】里真的有敌人时才发，且沿朝向直射。
+ *  · 背对/侧对敌人不开火，必须自己转过去；
  *  · g.fire_triple（inner_eyes）时一次发三发：正前 + 左右各 45°，速度更慢  */
 void game_player_fire(void)
 {
-    int sx = g.x + PW / 2;                   /* 枪口 = 人物横向中心 */
-    int sy = g.y + PLAYER_MUZ_DY;            /*      + 头和身体的交界 */
-    int tx, ty, dx, dy, adx, ady, a;
-    int fx = 0, fy = 0;                      /* 当前朝向的单位向量 */
+    int tx, ty, a;
 
-    if (g.dir == LEFT)       fx = -1;
-    else if (g.dir == RIGHT) fx =  1;
-    else if (g.dir == UP)    fy = -1;
-    else                     fy =  1;
+    switch (g.dir) {
+    case LEFT:  a = 32; break;
+    case RIGHT: a = 0;  break;
+    case UP:    a = 48; break;
+    default:    a = 16; break;
+    }
 
-    if (!game_nearest_enemy(&tx, &ty)) return;   /* 场上没敌人：不放空枪 */
-
-    dx = tx - sx; dy = ty - sy;
-    adx = dx < 0 ? -dx : dx;
-    ady = dy < 0 ? -dy : dy;
-
-    /*  只打【上下左右】四个方向：横向差得多就横着打，否则竖着打。  */
-    if (adx >= ady) a = (dx < 0) ? 32 : 0;
-    else            a = (dy < 0) ? 48 : 16;
-
-    /*  背对敌人不开火：把瞄准角换成单位向量，和朝向点积（< 0 就是背后）  */
-    if (g_sin_tab[(a + ANGLE_STEPS / 4) & 63] * fx + g_sin_tab[a] * fy < 0) return;
+    if (!game_enemy_in_dir(g.dir, &tx, &ty)) return;   /* 朝向没怪：不放空枪 */
+    (void)tx; (void)ty;
 
     if (g.fire_triple) {
         /* 三向：正前 + 左右各偏 PLAYER_TRIPLE_SPREAD 格（默认 4 格 = 22.5°），速度 3 */
-        player_shot(a - PLAYER_TRIPLE_SPREAD, PLAYER_TRIPLE_SPEED);
-        player_shot(a,                        PLAYER_TRIPLE_SPEED);
-        player_shot(a + PLAYER_TRIPLE_SPREAD, PLAYER_TRIPLE_SPEED);
+        player_shot(a - PLAYER_TRIPLE_SPREAD, g.stats.triple_speed);
+        player_shot(a,                        g.stats.triple_speed);
+        player_shot(a + PLAYER_TRIPLE_SPREAD, g.stats.triple_speed);
     } else {
-        player_shot(a, PLAYER_BULLET_SPEED);
+        player_shot(a, g.stats.bullet_speed);
     }
 }
 
@@ -251,15 +246,26 @@ void game_player_draw(u32 fb, u32 now, int buf)
     }
 
     /*  拾取后把道具【举在头顶】（原来是压在脸上，看着像长在头上）。
-     *  水平居中、竖直往上 ITEM_HELD_DY；负坐标会被当成巨大无符号数 ⇒ 先在屏内才画。  */
+     *  heart 不是道具池里的道具，单独画 24×24 心形，避免举成上一个道具的图标。  */
     if (picking && !hurt) {
-        int icon = game_item_icon(g.held_type);
-        int ix = g.x + (PW - ITEM_W) / 2;
-        int iy = g.y + ITEM_HELD_DY;
+        int icon, iw = ITEM_W, ih = ITEM_H;
 
-        if (game_visible(ix, iy, ITEM_W, ITEM_H))
-            CI_gpu2d_spriteAlphaRect(g_assets[icon].base_word, g_assets[icon].stride_word,
-                fb, (u32)ix, (u32)iy, ITEM_W, ITEM_H, 0u);
+        if (g.held_type == HELD_HEART) {
+            icon = ASSET_SpecialEffect_heart;
+            iw = 24;
+            ih = 24;
+        } else {
+            icon = game_item_icon(g.held_type);
+        }
+
+        {
+            int ix = g.x + (PW - iw) / 2;
+            int iy = g.y + ITEM_HELD_DY;
+
+            if (game_visible(ix, iy, iw, ih))
+                CI_gpu2d_spriteAlphaRect(g_assets[icon].base_word, g_assets[icon].stride_word,
+                    fb, (u32)ix, (u32)iy, iw, ih, 0u);
+        }
     }
 
     g.old_player[buf].active = 1;

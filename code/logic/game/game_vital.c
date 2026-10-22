@@ -83,6 +83,16 @@ void game_vital_extra_life(void)
     if (s_lives < 99) ++s_lives;
 }
 
+/*  商店 heart：只回 1 格，不提升 HP_MAX；满血 / 死亡中返回 0  */
+int game_vital_heal_one(void)
+{
+    if (s_hp <= 0 || s_hp >= HP_MAX) return 0;
+    ++s_hp;
+    s_last_hp2[0] = s_last_hp2[1] = -1;
+    s_redraw = 2;
+    return 1;
+}
+
 int game_vital_invuln(u32 now)
 {
     return (s_invuln_until != 0u) && ((int)(now - s_invuln_until) < 0);
