@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DEBUG · 房间编辑器</title>
+<title>MAP DESIGNER · 房间设计器</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="app">
   <header>
-    <h1>DEBUG · 房间编辑器</h1>
-    <span class="sub">40 × 23 · 1280 × 720 · 32 px/格</span>
+    <h1>MAP DESIGNER · 房间设计器</h1>
+    <span class="sub">40 × 23 · 1280 × 720 · 32 px/格 · 地形 + 对象</span>
     <span id="dirty" class="dirty" title="有未保存的修改"></span>
     <span class="spacer"></span>
     <span id="cursor">—</span>
@@ -25,8 +25,21 @@
 
   <aside class="panel left">
     <div class="section">
-      <h2>素材笔刷</h2>
+      <h2>编辑图层</h2>
+      <div id="layerRow" class="layer-row">
+        <button id="layerTile" type="button" class="on">地形</button>
+        <button id="layerObject" type="button">对象</button>
+      </div>
+      <div id="layerHint" class="hint">地形层：画地板、墙、门、角块。切到对象层后，左键放对象、右键擦对象。</div>
+    </div>
+    <div class="section">
+      <h2>地形笔刷</h2>
       <div id="palette" class="palette"></div>
+    </div>
+    <div class="section">
+      <h2>对象笔刷</h2>
+      <div id="objectPalette" class="palette"></div>
+      <div class="hint">小怪：slime / bug；交互物：web / stone / box / crate / exit。</div>
     </div>
     <div class="section">
       <h2>角落翻转</h2>
@@ -49,10 +62,11 @@
     <div class="section">
       <h2>操作</h2>
       <div class="keys">
-        <kbd>左键</kbd><span>绘制</span>
-        <kbd>右键</kbd><span>擦除</span>
+        <kbd>左键</kbd><span>绘制 / 放对象</span>
+        <kbd>右键</kbd><span>擦除 / 删对象</span>
         <kbd>R</kbd><span>循环旋转 / 角块翻转</span>
-        <kbd>1 – 4</kbd><span>直接选角度 / 角块</span>
+        <kbd>O</kbd><span>切换地形 / 对象层</span>
+        <kbd>1 – 7</kbd><span>对象层选对象；地形层选角度</span>
         <kbd>B W D E</kbd><span>地板 / 墙 / 门 / 空白</span>
         <kbd>Ctrl+Z</kbd><span>撤销（Ctrl+Y 重做）</span>
         <kbd>Ctrl+S</kbd><span>保存到 output</span>
@@ -75,6 +89,18 @@
 
   <aside class="panel right">
     <div class="scroll">
+    <div class="section">
+      <h2>房间模板</h2>
+      <label class="field-label" for="roomType">固定到哪种房间类型</label>
+      <select id="roomType">
+        <option value="start">起点房 START</option>
+        <option value="empty" selected>普通房 EMPTY</option>
+        <option value="item">道具房 ITEM</option>
+        <option value="shop">商店房 SHOP</option>
+      </select>
+      <div class="hint">生成 C 会写 MAP_TEMPLATE_ROOM；固件按这个类型决定是否使用固定布局。</div>
+    </div>
+
     <div class="section">
       <h2>房间约束</h2>
       <div class="info">
@@ -112,7 +138,8 @@
         <button id="btnRefresh" type="button">刷新列表</button>
         <button id="btnDelete" type="button">删除</button>
       </div>
-      <label class="check"><input id="alsoEmit" type="checkbox" checked>保存时同时生成 C</label>
+      <label class="check"><input id="alsoEmit" type="checkbox">保存时同时生成 C（可选导出）</label>
+      <div class="hint">保存会写 output/&lt;name&gt;.txt 和同名 .json；.json 是给固件/工具加载的约定文件，不会改 code/。</div>
     </div>
 
     <div class="section">
@@ -122,7 +149,7 @@
         <button id="btnEmitC" class="primary" type="button">生成</button>
         <button id="btnDownloadC" type="button">下载 .c</button>
       </div>
-      <div class="hint">写到 tools/sandbox/output/。导入时可以直接选这个文件，或者选 game_world.c。</div>
+      <div class="hint">C 是可选导出，写到 tools/map_designer/output/，不会改 code/。日常存档用保存生成的 .json；对象层会进 room_objects 数组。</div>
     </div>
 
     <div class="section">
@@ -131,9 +158,10 @@
       <div class="row mt">
         <button id="btnCopy" type="button">复制</button>
         <button id="btnDownloadTxt" type="button">下载 .txt</button>
+        <button id="btnDownloadJson" type="button">下载 .json</button>
         <button id="btnPng" type="button">PNG</button>
       </div>
-      <textarea id="importText" class="mt" spellcheck="false" placeholder="粘贴 23 行地图，或贴一段 C（含 room_map_shared）"></textarea>
+      <textarea id="importText" class="mt" spellcheck="false" placeholder="粘贴 23 行地图，或贴一段 C（含 room_map_shared / room_objects）"></textarea>
       <div class="row mt">
         <button id="btnImportText" type="button">导入文本</button>
         <label class="filebtn">导入文件<input id="filePicker" type="file" accept=".txt,.c,text/plain"></label>

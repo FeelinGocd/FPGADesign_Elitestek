@@ -40,6 +40,124 @@ u32 game_ms(void)
     return (u32)(clint_getTime(BSP_CLINT) / (BSP_CLINT_HZ / 1000u));
 }
 
+/*==============================================================================
+ *  相机：显示窗口 = 1920×1080 帧缓冲里的一个 1280×720 窗口
+ *    · 普通房世界就是 1280×720/736 ⇒ cam 固定 0
+ *    · Boss 房世界 1440×1120 ⇒ cam_x 0..160, cam_y 0..400（房间 1056×800，比一屏窄，
+ *    相机在世界里跟随 ⇒ 房间在画面里左右/上下滑动，黑边随之露出）
+ *  场景/实体按【世界坐标】画进 fb；HUD 画进 fb + cam（屏幕上位置不变）。
+ *  game_present() 把 fb + cam 写给 lineBuffer 的 C/D 基址，窗口就移动了。
+ *============================================================================*/
+u32 game_view_fb(u32 fb)
+{
+    return fb + (u32)g.cam_y * 5760u + (u32)g.cam_x * 3u;
+}
+
+static int cam_clamp(int v, int hi)
+{
+    if (v < 0) return 0;
+    if (v > hi) return hi;
+    return v;
+}
+
+/*  ★ 硬件能力自检（2026-10-23）
+ *    老 bitstream 的 APB0_GPU_2D 会【丢弃非 16B 对齐的全屏基址】（PWDATA[3:0]==0 那道门），
+ *    相机平移的字节偏移就写不进去 ⇒ 现象是：平移时背景按 16 px 台阶跳、
+ *    HUD 文字互相重影、右边 ITEM 看着不刷新。
+ *    这里写一个非对齐基址再读回：读不回 = 老硬件 ⇒ 相机改成 16 px 量化。  */
+int g_cam_quant = 0;
+
+static void lb_detect_unaligned(void)
+{
+    u32 probe = (u32)FB_C + 12u;
+
+    lineBuffer_setFullBase(probe, probe);
+    g_cam_quant = (lineBuffer_getFullBaseC() == probe) ? 0 : 16;
+    lineBuffer_setFullBase((u32)FB_C, (u32)FB_D);
+    bsp_printf("LB ALIGN: %s (cam step %d)\r\n",
+               g_cam_quant ? "OLD-BITSTREAM" : "OK", g_cam_quant ? g_cam_quant : 1);
+}
+
+/*  老硬件才需要：把相机横向对齐到 g_cam_quant 的整数倍（3*16=48 ⇒ 16B 对齐）  */
+static void cam_align(void)
+{
+    if (g_cam_quant > 0)
+        g.cam_x -= g.cam_x % g_cam_quant;
+}
+
+/*  换房/复位：直接对准，不做过渡（避免新房间第一帧从旧位置滑进来）  */
+void game_camera_snap(void)
+{
+    if (game_world_is_boss()) {
+        int maxx = game_world_w() - SCR_W;
+        int maxy = game_world_h() - SCR_H;
+
+        g.cam_x = cam_clamp(g.x + PW / 2 - SCR_W / 2, maxx);
+        g.cam_y = cam_clamp(g.y + PH / 2 - SCR_H / 2, maxy);
+    } else {
+        g.cam_x = 0;
+        g.cam_y = 0;
+    }
+    cam_align();
+    /* 不在这里清 cam_prev：同布局换房没有整屏重铺，game_draw 要靠
+     * prev != cam 来擦旧 HUD。整屏重铺的路径画完后再调 game_camera_synced()。 */
+}
+
+/*  整屏重铺之后调用：告诉 HUD 逻辑"新位置已经画好了，不用再擦旧 HUD"  */
+void game_camera_synced(void)
+{
+    g.cam_prev_x = g.cam_x;
+    g.cam_prev_y = g.cam_y;
+    g.hud_cam_x[0] = g.hud_cam_x[1] = g.cam_x;
+    g.hud_cam_y[0] = g.hud_cam_y[1] = g.cam_y;
+}
+
+/*  每帧：Boss 房跟随（死区 + 每帧限速）
+ *    · 玩家中心落在屏幕中心的 CAM_DEAD_W × CAM_DEAD_H 里 ⇒ 相机【完全不动】
+ *      （弹幕游戏里小幅走位不该带着整屏抖）；
+ *    · 出了死区才把玩家"推回死区边缘"，每帧最多 CAM_MAX_STEP 像素；
+ *    · 最后 clamp 到 [0, 世界 - 窗口]，撞边就是硬停。  */
+void game_camera_step(void)
+{
+    int tx, ty, dx, dy;
+    int half, left, right, top, bottom;
+
+    if (!game_world_is_boss()) {
+        g.cam_x = 0;
+        g.cam_y = 0;
+        return;
+    }
+
+    tx = g.cam_x;
+    ty = g.cam_y;
+
+    half  = (SCR_W - CAM_DEAD_W) / 2;
+    left  = g.cam_x + half;
+    right = left + CAM_DEAD_W;
+    if      (g.x + PW / 2 < left)  tx = g.x + PW / 2 - half;
+    else if (g.x + PW / 2 > right) tx = g.x + PW / 2 - half - CAM_DEAD_W;
+
+    half   = (SCR_H - CAM_DEAD_H) / 2;
+    top    = g.cam_y + half;
+    bottom = top + CAM_DEAD_H;
+    if      (g.y + PH / 2 < top)    ty = g.y + PH / 2 - half;
+    else if (g.y + PH / 2 > bottom) ty = g.y + PH / 2 - half - CAM_DEAD_H;
+
+    tx = cam_clamp(tx, game_world_w() - SCR_W);
+    ty = cam_clamp(ty, game_world_h() - SCR_H);
+
+    dx = tx - g.cam_x;
+    dy = ty - g.cam_y;
+    if (dx >  CAM_MAX_STEP) dx =  CAM_MAX_STEP;
+    if (dx < -CAM_MAX_STEP) dx = -CAM_MAX_STEP;
+    if (dy >  CAM_MAX_STEP) dy =  CAM_MAX_STEP;
+    if (dy < -CAM_MAX_STEP) dy = -CAM_MAX_STEP;
+
+    g.cam_x += dx;
+    g.cam_y += dy;
+    cam_align();
+}
+
 /*----------------------------------------------------------------------------*/
 /*  FENCE 完成是命令侧事件；初始化期间显示关着，frame_done 可能根本不动，
  *  所以这里等"帧完成计数"，并带超时。  */
@@ -61,7 +179,7 @@ int game_present(u32 fb)
 {
     u32 before, wait = 0u;
 
-    lineBuffer_setFullBase(fb, fb);
+    lineBuffer_setFullBase(game_view_fb(fb), game_view_fb(fb));
 #if IRQ_FRAME_USE
     before = IRQ_frame_count();
     while (IRQ_frame_count() == before && wait < 200000u) {
@@ -94,7 +212,10 @@ void game_reset_state(void)
     g.vx8 = 0; g.vy8 = 0; g.rx = 0; g.ry = 0;
     g.fire_triple = 0;
     g.item_mask = 0u;                       /* 道具池清空 */
-    g.item_order_n = 0;                     /* 拾取顺序也清空 */
+    g.inv_n = 0;                            /* 实例数组清空 */
+    ++g.inv_rev;                            /* 池子内容版本变化 */
+    g.last_room = -1;                       /* 还没有“上一间房” */
+    g.last_door = -1;
     game_vital_reset();                     /* 3 颗心、3 条命 */
 
     /*  ★ 重开时地砖会整屏重铺 ⇒ 上一帧的字全被盖掉了。
@@ -108,7 +229,7 @@ void game_reset_state(void)
     g.stats.move_v8      = PLAYER_MAX_V8;
     g.stats.fire_every   = (int)FIRE_EVERY;
     g.stats.bullet_speed = PLAYER_BULLET_SPEED;
-    g.stats.triple_speed = PLAYER_TRIPLE_SPEED;
+    g.stats.range        = PLAYER_RANGE;
     g.stats.damage       = 1;
     g.pickup_until = 0u;
     g.hurt_until = 0u;
@@ -197,6 +318,7 @@ void game_flow_enter_room(void)
 {
     int type = game_room_type();
     int id = game_room_id();
+    int respawn = game_room_take_respawn(id);
 
     /*  换房：小怪按房间重建；金币 / 网 / 石头都带 room 持久化，不在这里清  */
     game_mobs_reset();
@@ -214,7 +336,7 @@ void game_flow_enter_room(void)
     switch (type) {
     case ROOM_EMPTY:
         g.phase = PHASE_EXPLORE;
-        if (!game_room_is_spawned(id) && !game_room_is_cleared(id)) {
+        if (respawn || (!game_room_is_spawned(id) && !game_room_is_cleared(id))) {
             game_mobs_spawn(2);             /* 普通房：2 只 slime */
             game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
@@ -228,6 +350,11 @@ void game_flow_enter_room(void)
         /*  单槽道具：进道具房就以这间的道具为准；上一间 Boss 没捡的饰品作废  */
         g.boss_drop_pending = 0;
         if (game_room_is_used(id)) {
+            if (respawn) {
+                game_mobs_spawn(2);
+                game_mobs_spawn_bug(1);
+                game_room_mark_spawned(id);
+            }
             bsp_printf("ROOM: item (already taken)\r\n");
         } else if (!game_room_is_spawned(id)) {
             /*  ★ 道具房：这一轮第一次进来才随机挑一个，放在【房间中心】 */
@@ -239,12 +366,19 @@ void game_flow_enter_room(void)
             bsp_printf("ROOM: item (random #%d)\r\n", g.item.type);
         } else {
             /*  之前生成过、还没拿：原样恢复，不重掷  */
+            if (respawn) {
+                game_mobs_spawn(2);
+                game_mobs_spawn_bug(1);
+                game_room_mark_spawned(id);
+            }
             g.item.active = 1;
             bsp_printf("ROOM: item (kept #%d)\r\n", g.item.type);
         }
         break;
 
     case ROOM_BOSS:
+        /*  死亡卡回退：Boss 还活着才重置；Boss 已死时保持房间原样。  */
+        if (respawn && g.boss_hp > 0) game_room_clear_spawned(id);
         if (!game_room_is_spawned(game_room_id())) {
             game_boss_spawn();              /* 满血到场中，先等 1 s 再出招 */
             game_room_mark_spawned(game_room_id());
@@ -345,11 +479,12 @@ int game_restart(void)
     cmd0 = gpu2d_getCmdDone();
     gpu2d_exclusive_begin();
     for (bi = 0; bi < 2; ++bi) game_draw_floor(fb[bi]);
-    lineBuffer_setFullBase(FB_C, FB_D);
+    lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
     if (gpu2d_exclusive_end(cmd0 + 2u * game_floor_cmd_count()) != 0) {
         bsp_printf("RESTART ERROR: timeout\r\n");
         return 0;
     }
+    game_camera_synced();
     return game_present(FB_C);
 }
 
@@ -380,6 +515,12 @@ int game_init(void)
     bsp_printf("INIT 2/7: full-screen mode\r\n");
     lineBuffer_setSplit(0);
 
+    /*  ★ 硬件能力自检：老 bitstream 的 APB 会丢弃非 16B 对齐的全屏基址。
+     *    必须在画第一帧之前测；新 bitstream 返回 0（相机可 1 px 步进），
+     *    老 bitstream 返回 16（cam_x 量化到 16 px，避免 HUD 搬家错位）。
+     *    以前这个函数写了却没人调用，g_cam_quant 永远是 0。  */
+    if (!g_cam_quant) lb_detect_unaligned();
+
     /* 等一个帧边界，让显示侧先锁存"全屏"几何，再开始画。 */
     bsp_printf("INIT 3/7: wait display boundary\r\n");
     bsp_uDelay(20000u);
@@ -391,13 +532,14 @@ int game_init(void)
     }
 
     bsp_printf("INIT 6/7: wait GPU\r\n");
-    lineBuffer_setFullBase(FB_C, FB_D);
+    lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
     if (gpu2d_exclusive_end(init_cmd0 + 2u * game_floor_cmd_count()) != 0) {
         bsp_printf("INIT ERROR: initial floor timeout\r\n");
         return 0;
     }
 
     bsp_printf("INIT 7/7: %dx%d ready, display re-enabled\r\n", SCR_W, SCR_H);
+    game_camera_synced();
     if (!game_present(FB_C)) return 0;
     return 1;
 }

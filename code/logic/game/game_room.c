@@ -24,15 +24,19 @@
 typedef struct {
     signed char type;       /* ROOM_NONE / START / EMPTY / ITEM / SHOP / BOSS */
     signed char gx, gy;
+    unsigned char w, h;     /* 构造：普通 1×1；Boss 2×2 的 anchor 填 2/2 */
+    signed char owner;      /* -1 = 自己；>=0 = 被 2×2 房间覆盖时的 anchor */
 } room_def_t;
 
 static room_def_t s_room_def[ROOM_COUNT];
 static int s_start_room;            /* 本轮起点房间的格子编号 */
+static int s_boss_anchor = -1;      /* Boss 2×2 的左上角（规范房间 id） */
+static int s_boss_entry = -1;       /* 生成时选中的 Boss 入口格（验证距离用） */
 
 /*  当前房间里那 4 扇门：门格 + 门洞（两格）+ 朝向  */
 typedef struct {
     int dx, dy;     /* 地图上 D 格（门洞的第一格） */
-    int cx, cy;     /* 入口用的格子（门内侧 2 格，给 place_at_door 用） */
+    int cx, cy;     /* 入口用的格子（门内侧 1 格，给 place_at_door 用） */
     int dir;        /* 0 上 / 1 右 / 2 下 / 3 左  */
 } door_info_t;
 
@@ -44,6 +48,7 @@ static int s_lock;              /* 刚进过门 ⇒ 不重复触发 */
 static unsigned char s_force_full;  /* 新一层：强制整屏重铺，清掉上一层的交互物像素 */
 static unsigned char s_used[ROOM_COUNT];     /* 道具房：这一轮的道具已经拿过了 */
 static unsigned char s_spawned[ROOM_COUNT];  /* 特殊房内容（道具/Boss）这一轮已经生成过 */
+static unsigned char s_respawn[ROOM_COUNT];  /* 死亡卡：这间房下次进入要重新刷怪 */
 static unsigned char s_reward[ROOM_COUNT];   /* 房间清理奖励：0..5 coin */
 static unsigned char s_cleared[ROOM_COUNT];  /* 房间已经清过（奖励只发一次） */
 
@@ -87,6 +92,121 @@ static int room_degree(int room)
     return n;
 }
 
+/*  Boss 2×2：把一个叶子 Boss 格扩成 2×2；要求另外 3 格为空，
+ *  且 2×2 外围只有它原本那一个普通邻居（保证只有一扇外门）。  */
+static int room_boss_expand(int boss)
+{
+    static const signed char ox[4] = { -1, 0, -1, 0 };
+    static const signed char oy[4] = { -1, -1, 0, 0 };
+    int k;
+
+    for (k = 0; k < 4; ++k) {
+        int x0 = (int)s_room_def[boss].gx + ox[k];
+        int y0 = (int)s_room_def[boss].gy + oy[k];
+        int dx, dy, ok = 1;
+        int ext_n = 0;
+        int ext[8];
+
+        if (x0 < 0 || y0 < 0 || x0 + 1 >= ROOM_GRID_W || y0 + 1 >= ROOM_GRID_H) continue;
+        for (dy = 0; dy < 2 && ok; ++dy)
+            for (dx = 0; dx < 2; ++dx) {
+                int id = cell_id(x0 + dx, y0 + dy);
+
+                if (id == boss) continue;
+                if (s_room_def[id].type != ROOM_NONE) { ok = 0; break; }
+            }
+        if (!ok) continue;
+
+        /*  数 2×2 外围的普通邻居（去重）。  */
+        for (dy = 0; dy < 2 && ok; ++dy)
+            for (dx = 0; dx < 2 && ok; ++dx) {
+                int cx = x0 + dx, cy = y0 + dy;
+                int d;
+
+                for (d = 0; d < 4; ++d) {
+                    static const signed char nx[4] = { 0, 1, 0, -1 };
+                    static const signed char ny[4] = { -1, 0, 1, 0 };
+                    int xx = cx + nx[d], yy = cy + ny[d], id, j;
+
+                    if (xx < x0 || xx > x0 + 1 || yy < y0 || yy > y0 + 1) {
+                        if (xx < 0 || xx >= ROOM_GRID_W || yy < 0 || yy >= ROOM_GRID_H) continue;
+                        id = cell_id(xx, yy);
+                        if (s_room_def[id].type == ROOM_NONE) continue;
+                        for (j = 0; j < ext_n; ++j) if (ext[j] == id) break;
+                        if (j == ext_n) {
+                            if (ext_n >= 8) { ok = 0; break; }
+                            ext[ext_n++] = id;
+                        }
+                    }
+                }
+            }
+        if (!ok || ext_n != 1) continue;
+
+        {
+            int anchor = cell_id(x0, y0);
+
+            for (dy = 0; dy < 2; ++dy)
+                for (dx = 0; dx < 2; ++dx) {
+                    int id = cell_id(x0 + dx, y0 + dy);
+
+                    s_room_def[id].type = ROOM_BOSS;
+                    if (id == anchor) {
+                        s_room_def[id].w = 2;
+                        s_room_def[id].h = 2;
+                        s_room_def[id].owner = -1;
+                    } else {
+                        s_room_def[id].w = 0;
+                        s_room_def[id].h = 0;
+                        s_room_def[id].owner = (signed char)anchor;
+                    }
+                }
+            s_boss_anchor = anchor;
+            s_boss_entry = boss;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static void room_boss_reset(void)
+{
+    int dx, dy;
+
+    if (s_boss_anchor < 0) return;
+    for (dy = 0; dy < 2; ++dy)
+        for (dx = 0; dx < 2; ++dx) {
+            int id = s_boss_anchor + dy * ROOM_GRID_W + dx;
+
+            if (s_room_def[id].type == ROOM_BOSS) {
+                s_room_def[id].type = ROOM_NONE;
+                s_room_def[id].w = 1;
+                s_room_def[id].h = 1;
+                s_room_def[id].owner = -1;
+            }
+        }
+    s_boss_anchor = -1;
+    s_boss_entry = -1;
+}
+
+/*  这个普通特殊房是否和整个 Boss 2×2 的 8 邻域相邻。  */
+static int room_boss_near(int other)
+{
+    int i;
+
+    if (other < 0) return 0;
+    for (i = 0; i < ROOM_COUNT; ++i) {
+        int dx, dy;
+
+        if (s_room_def[i].type != ROOM_BOSS) continue;
+        dx = (int)s_room_def[i].gx - (int)s_room_def[other].gx;
+        dy = (int)s_room_def[i].gy - (int)s_room_def[other].gy;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        if (dx <= 1 && dy <= 1) return 1;
+    }
+    return 0;
+}
+
 /*  这一类型的房间用哪张"特殊门"；普通房（START/EMPTY）返回 -1。  */
 static int room_special_door(int type)
 {
@@ -113,7 +233,12 @@ static void room_clear(void)
         s_room_def[i].type = ROOM_NONE;
         s_room_def[i].gx = (signed char)(i % ROOM_GRID_W);
         s_room_def[i].gy = (signed char)(i / ROOM_GRID_W);
+        s_room_def[i].w = 1;
+        s_room_def[i].h = 1;
+        s_room_def[i].owner = -1;
     }
+    s_boss_anchor = -1;
+    s_boss_entry = -1;
 }
 
 /*  候选格 nb 放下去后，会不会形成 2×2 四格全是房间（回字形）  */
@@ -149,10 +274,16 @@ static int room_has_2x2(void)
 
     for (y = 0; y + 1 < ROOM_GRID_H; ++y)
         for (x = 0; x + 1 < ROOM_GRID_W; ++x) {
-            if (s_room_def[cell_id(x, y)].type != ROOM_NONE &&
-                s_room_def[cell_id(x + 1, y)].type != ROOM_NONE &&
-                s_room_def[cell_id(x, y + 1)].type != ROOM_NONE &&
-                s_room_def[cell_id(x + 1, y + 1)].type != ROOM_NONE) return 1;
+            int t00 = (int)s_room_def[cell_id(x, y)].type;
+            int t10 = (int)s_room_def[cell_id(x + 1, y)].type;
+            int t01 = (int)s_room_def[cell_id(x, y + 1)].type;
+            int t11 = (int)s_room_def[cell_id(x + 1, y + 1)].type;
+
+            /*  Boss 本身就是 2×2 一整间房，不算“四房回字形”。  */
+            if (t00 == ROOM_BOSS || t10 == ROOM_BOSS ||
+                t01 == ROOM_BOSS || t11 == ROOM_BOSS) continue;
+            if (t00 != ROOM_NONE && t10 != ROOM_NONE &&
+                t01 != ROOM_NONE && t11 != ROOM_NONE) return 1;
         }
     return 0;
 }
@@ -241,9 +372,15 @@ static int room_try_specials(const int *rooms, int n)
                 if (room_special_near(boss, shop)) continue;
                 if (room_special_near(item, shop)) continue;
 
+                if (!room_boss_expand(boss)) continue;
+
+                if (room_boss_near(item) || room_boss_near(shop)) {
+                    room_boss_reset();
+                    continue;
+                }
+
                 s_room_def[item].type = ROOM_ITEM;
                 s_room_def[shop].type = ROOM_SHOP;
-                s_room_def[boss].type = ROOM_BOSS;
                 return 1;
             }
         }
@@ -329,7 +466,30 @@ static void room_fallback(void)
     s_room_def[s_start_room].type = ROOM_START;
     s_room_def[cell_id(1, 1)].type = ROOM_ITEM;
     s_room_def[cell_id(3, 5)].type = ROOM_SHOP;
-    s_room_def[cell_id(4, 0)].type = ROOM_BOSS;
+
+    /*  Boss 占 2×2：(4,0)(5,0)(4,1)(5,1)；只有 (4,2) 一个外门。  */
+    {
+        int anchor = cell_id(4, 0);
+        int dx, dy;
+
+        for (dy = 0; dy < 2; ++dy)
+            for (dx = 0; dx < 2; ++dx) {
+                int id = cell_id(4 + dx, 0 + dy);
+
+                s_room_def[id].type = ROOM_BOSS;
+                if (id == anchor) {
+                    s_room_def[id].w = 2;
+                    s_room_def[id].h = 2;
+                    s_room_def[id].owner = -1;
+                } else {
+                    s_room_def[id].w = 0;
+                    s_room_def[id].h = 0;
+                    s_room_def[id].owner = (signed char)anchor;
+                }
+            }
+        s_boss_anchor = anchor;
+        s_boss_entry  = anchor;
+    }
 }
 
 static void room_layout_generate(void)
@@ -356,12 +516,16 @@ static void room_layout_generate(void)
 /*  门洞几何 / 进门  */
 /*============================================================================*/
 
-/*  一扇门的门洞 = 地图上 D 格 + 它旁边那格（竖直门向下，横向门向右），共 2 格。  */
+/*  一扇门的门洞 = 地图上 D 格 + 朝向房间内的那一格，共 2 格：
+ *    上/下门：D 格 + 它下面一格；
+ *    左门  ：D 格 + 它右边一格；
+ *    右门  ：D 格 + 它左边一格（D 在场地右边界外，内半格在场地内）。
+ *  ★ 右门如果也往右算，门洞会落到场地外的黑边里，玩家永远触发不了传送。  */
 static void door_slot(const door_info_t *door, int *x0, int *y0, int *w, int *h)
 {
     int horiz = (door->dir & 1) != 0;              /* 90° / 270° ⇒ 横向门 */
 
-    *x0 = door->dx * TILE;
+    *x0 = ((door->dir == 1) ? door->dx - 1 : door->dx) * TILE;
     *y0 = door->dy * TILE;
     *w  = horiz ? 2 * TILE : TILE;
     *h  = horiz ? TILE : 2 * TILE;
@@ -370,9 +534,11 @@ static void door_slot(const door_info_t *door, int *x0, int *y0, int *w, int *h)
 /*  从地图里扫出 4 扇门：门格 + 入口格 + 朝向  */
 static void doors_build(void)
 {
-    const char (*m)[MAP_COLS + 1] = game_world_map();
-    const unsigned char (*r)[MAP_COLS] = game_world_rot();
+    const char (*m)[MAP_MAX_COLS + 1] = game_world_map();
+    const unsigned char (*r)[MAP_MAX_COLS] = game_world_rot();
     int x, y, n = 0;
+    int cols = game_world_cols();
+    int rows = game_world_rows();
 
     s_door_count = 0;
     for (x = 0; x < 4; ++x) {
@@ -383,8 +549,8 @@ static void doors_build(void)
         s_doors[x].dir = 0;
     }
 
-    for (y = 0; y < MAP_ROWS && n < 4; ++y)
-        for (x = 0; x < MAP_COLS && n < 4; ++x) {
+    for (y = 0; y < rows && n < 4; ++y)
+        for (x = 0; x < cols && n < 4; ++x) {
             int dir = r[y][x] & 3;
 
             if (m[y][x] != 'D') continue;
@@ -392,17 +558,19 @@ static void doors_build(void)
             s_doors[n].dx = x;
             s_doors[n].dy = y;
             s_doors[n].dir = dir;
-            if (dir == 0)      { s_doors[n].cx = x;     s_doors[n].cy = y + 2; }
+            /*  ★ 入口格固定在门内侧一格：这一格被 cell_blocked() 保护，不会长石头。 */
+            if (dir == 0)      { s_doors[n].cx = x;     s_doors[n].cy = y + 1; }
             else if (dir == 2) { s_doors[n].cx = x;     s_doors[n].cy = y - 1; }
-            else if (dir == 1) { s_doors[n].cx = x - 2; s_doors[n].cy = y;     }
-            else               { s_doors[n].cx = x + 2; s_doors[n].cy = y;     }
+            else if (dir == 1) { s_doors[n].cx = x - 1; s_doors[n].cy = y;     }
+            else               { s_doors[n].cx = x + 1; s_doors[n].cy = y;     }
             ++n;
         }
 
     s_door_count = n;
 }
 
-/*  移动边界：只有玩家【肚子中心】对准开着门的门洞时，才把那一小段墙放行。  */
+/*  移动边界：只要这个方向【有邻居房间】，就把那一段门洞放行。
+ *  ★ 有没有怪只影响 trigger_hit() 的传送判定，不再把玩家挡在门外。  */
 void game_room_door_bounds(int px, int py, int *x0, int *y0, int *x1, int *y1)
 {
     int cx = px + PB_OFF_X + PB_W / 2;
@@ -413,7 +581,10 @@ void game_room_door_bounds(int px, int py, int *x0, int *y0, int *x1, int *y1)
         const door_info_t *door = &s_doors[i];
         int sx, sy, sw, sh;
 
-        if (!game_room_door_open(door->dir)) continue;
+        /*  ★ 门洞的【可走性】只看有没有邻居房间，不看有没有怪。
+         *    有怪时玩家可以走进门洞，但 trigger_hit() 用
+         *    game_room_door_open() 判定"能不能传送"，所以不会换房。  */
+        if (!game_room_door_exists(door->dir)) continue;
         door_slot(door, &sx, &sy, &sw, &sh);
 
         if (door->dir == 0) {
@@ -450,13 +621,15 @@ int game_room_type(void)
 /*  小地图用：当前房间在网格里的坐标 / 任意格子的房间类型（无房间 = ROOM_NONE）  */
 void game_room_pos(int *gx, int *gy)
 {
-    if (s_room < 0 || s_room >= ROOM_COUNT) {
+    int id = game_room_id();
+
+    if (id < 0 || id >= ROOM_COUNT) {
         *gx = -1;
         *gy = -1;
         return;
     }
-    *gx = (int)s_room_def[s_room].gx;
-    *gy = (int)s_room_def[s_room].gy;
+    *gx = (int)s_room_def[id].gx;
+    *gy = (int)s_room_def[id].gy;
 }
 
 int game_room_type_at(int gx, int gy)
@@ -468,24 +641,39 @@ int game_room_type_at(int gx, int gy)
 /*  邻居格有没有房间（门本身存在，不看是否被怪锁住）  */
 int game_room_door_exists(int dir)
 {
-    int nb;
+    int i, nb;
 
     if (s_room < 0 || s_room >= ROOM_COUNT) return 0;
+
+    /*  Boss 2×2：从四个 Boss 格里任意一格找同方向的外部普通邻居。
+     *  这样即使玩家被摆在 anchor（左上角），也仍能找到那扇外门。  */
+    if (s_room_def[s_room].type == ROOM_BOSS) {
+        for (i = 0; i < ROOM_COUNT; ++i) {
+            if (s_room_def[i].type != ROOM_BOSS) continue;
+            nb = room_neighbor(i, dir & 3);
+            if (nb >= 0 && s_room_def[nb].type != ROOM_NONE &&
+                s_room_def[nb].type != ROOM_BOSS) return 1;
+        }
+        return 0;
+    }
+
     nb = room_neighbor(s_room, dir & 3);
     return (nb >= 0 && s_room_def[nb].type != ROOM_NONE);
 }
 
+/*  这个方向的门【能不能传送玩家】。
+ *  ★ 门的贴图不要用这个函数判断 —— 贴图永远按 game_room_door_exists()
+ *    渲染，有没有怪只影响传送（见 game_world.c 的 is_door）。  */
 int game_room_door_open(int dir)
 {
     if (s_room < 0 || s_room >= ROOM_COUNT) return 0;
 
-    /*  Boss 还活着（战斗阶段）：Boss 房的所有门都锁死，玩家不能离开。
-     *  用 phase 而不是只看 HP：进房时先放人、再 spawn Boss，否则进门那一帧
-     *  门已经被锁死，place_at_door 找不到门，人会被放到房间中间。  */
+    /*  Boss 还活着（战斗阶段）：Boss 房的门不能传送。
+     *  用 phase 而不是只看 HP：进房时先放人、再 spawn Boss。  */
     if (s_room_def[s_room].type == ROOM_BOSS &&
         g.phase == PHASE_FIGHT && g.boss_hp > 0) return 0;
 
-    /*  当前房间还有小怪：门也锁死（清理完 slime 才开）  */
+    /*  当前房间还有小怪：不能传送（门贴图仍然是门）  */
     if (game_mobs_alive() > 0) return 0;
 
     return game_room_door_exists(dir);
@@ -533,12 +721,40 @@ int game_room_validate(void)
         if (type == ROOM_START) ++start;
         else if (type == ROOM_ITEM) ++item;
         else if (type == ROOM_SHOP) ++shop;
-        else if (type == ROOM_BOSS) ++boss;
+        else if (type == ROOM_BOSS &&
+                 s_room_def[i].w == 2 && s_room_def[i].h == 2 &&
+                 s_room_def[i].owner < 0) ++boss;   /* 一条 2×2 房间记录 */
     }
     if (start != 1) ++bad;
     if (item != 1) ++bad;
-    if (boss != 1) ++bad;
+    if (boss != 1) ++bad;               /* 一条 Boss 房间记录，覆盖 4 格 */
     if (shop != 1) ++bad;
+
+    /*  构造记录：普通房 1×1；Boss 一个 2×2 anchor + 三个 owner 覆盖格。  */
+    {
+        int anchors = 0, covered = 0;
+
+        for (i = 0; i < ROOM_COUNT; ++i) {
+            int t = (int)s_room_def[i].type;
+
+            if (t == ROOM_BOSS) {
+                if (s_room_def[i].w == 2 && s_room_def[i].h == 2 &&
+                    s_room_def[i].owner < 0) {
+                    ++anchors;
+                } else if (s_room_def[i].w == 0 && s_room_def[i].h == 0 &&
+                           s_room_def[i].owner >= 0 &&
+                           s_room_def[s_room_def[i].owner].type == ROOM_BOSS) {
+                    ++covered;
+                } else {
+                    ++bad;
+                }
+            } else if (t != ROOM_NONE) {
+                if (s_room_def[i].w != 1 || s_room_def[i].h != 1 ||
+                    s_room_def[i].owner != -1) ++bad;
+            }
+        }
+        if (anchors != 1 || covered != 3) ++bad;
+    }
 
     /*  特殊房之间 8 邻域不相邻  */
     for (i = 0; i < ROOM_COUNT; ++i) {
@@ -547,6 +763,8 @@ int game_room_validate(void)
             int dx, dy;
 
             if (room_special_door((int)s_room_def[j].type) < 0) continue;
+            /*  Boss 2×2 内部四格是同一间房，不互相算“特殊房相邻”。  */
+            if (s_room_def[i].type == ROOM_BOSS && s_room_def[j].type == ROOM_BOSS) continue;
             dx = (int)s_room_def[i].gx - (int)s_room_def[j].gx;
             dy = (int)s_room_def[i].gy - (int)s_room_def[j].gy;
             if (dx < 0) dx = -dx;
@@ -561,6 +779,7 @@ int game_room_validate(void)
         int one = -1;
 
         if (room_special_door(type) < 0) continue;
+        if (type == ROOM_BOSS) continue;            /* Boss 是 2×2 整间，不按普通叶子算 */
         if (room_degree(i) != 1) { ++bad; continue; }
         for (d = 0; d < 4; ++d) {
             int nb = room_neighbor(i, d);
@@ -576,24 +795,6 @@ int game_room_validate(void)
             int nb = room_neighbor(i, d);
             if (nb == s_start_room) ++bad;
         }
-    }
-
-    /*  Boss 房必须是离起点最远的叶子（和生成规则同一条判据）  */
-    {
-        int dist[ROOM_COUNT];
-        int max_leaf = -1, boss_dist = -1;
-
-        room_dist_from_start(dist);
-        for (i = 0; i < ROOM_COUNT; ++i) {
-            int type = (int)s_room_def[i].type;
-
-            if (type == ROOM_NONE) continue;
-            if (i != s_start_room && room_degree(i) == 1) {
-                if (dist[i] > max_leaf) max_leaf = dist[i];
-            }
-            if (type == ROOM_BOSS) boss_dist = dist[i];
-        }
-        if (max_leaf < 0 || boss_dist != max_leaf) ++bad;
     }
 
     /*  普通房可以同时接多间特殊房（每个方向看邻居类型各自渲染门），不再限制  */
@@ -630,6 +831,16 @@ int game_room_validate(void)
 }
 
 /*  剧情跳转（Boss 击破后回起点）：target = 房间格子编号。  */
+/*  调试传送：按房间类型找一间房（网格里第一个命中）  */
+int game_room_find_type(int type)
+{
+    int i;
+
+    for (i = 0; i < ROOM_COUNT; ++i)
+        if (s_room_def[i].type == type) return i;
+    return -1;
+}
+
 void game_room_request(int target, int entry_dir)
 {
     if (target < 0 || target >= ROOM_COUNT) return;
@@ -638,6 +849,16 @@ void game_room_request(int target, int entry_dir)
     s_target    = target;
     s_entry_dir = (entry_dir < 0) ? -1 : (entry_dir & 3);
     s_pending   = 1;
+}
+
+/*  死亡卡回退：强制整屏重铺，避免把死亡房间的怪/Boss 旧像素带到上一房间。  */
+void game_room_request_full(int target, int entry_dir)
+{
+    if (target < 0 || target >= ROOM_COUNT) return;
+    if (s_room_def[target].type == ROOM_NONE) return;
+
+    s_force_full = 1;
+    game_room_request(target, entry_dir);
 }
 
 void game_room_mark_used(int room)
@@ -658,6 +879,23 @@ void game_room_mark_spawned(int room)
 int game_room_is_spawned(int room)
 {
     return (room >= 0 && room < ROOM_COUNT) ? (int)s_spawned[room] : 0;
+}
+
+void game_room_clear_spawned(int room)
+{
+    if (room >= 0 && room < ROOM_COUNT) s_spawned[room] = 0;
+}
+
+void game_room_mark_respawn(int room)
+{
+    if (room >= 0 && room < ROOM_COUNT) s_respawn[room] = 1;
+}
+
+int game_room_take_respawn(int room)
+{
+    if (room < 0 || room >= ROOM_COUNT || !s_respawn[room]) return 0;
+    s_respawn[room] = 0;
+    return 1;
 }
 
 int game_room_is_cleared(int room)
@@ -687,8 +925,11 @@ void game_room_new_run(void)
     for (i = 0; i < ROOM_COUNT; ++i) {
         s_used[i] = 0;
         s_spawned[i] = 0;
+        s_respawn[i] = 0;
     }
     g.exit_active = 0;
+    g.last_room = -1;
+    g.last_door = -1;
     g.exit_dirty = 2;                       /* 把旧 exit 擦掉（两块缓冲） */
     g.boss_wait_until = 0u;
     g.boss_drop_pending = 0;                /* 上一关没捡的 Boss 饰品不带进新一关 */
@@ -705,6 +946,13 @@ void game_room_new_run(void)
 
 int game_room_id(void)
 {
+    /*  Boss 占 2×2：四格统一用左上角做规范 id（状态/刷怪/门/回退都用它）。  */
+    if (s_room >= 0 && s_room < ROOM_COUNT &&
+        s_room_def[s_room].type == ROOM_BOSS) {
+        if (s_room_def[s_room].owner >= 0) return s_room_def[s_room].owner;
+        if (s_room_def[s_room].w == 2 && s_room_def[s_room].h == 2) return s_room;
+        if (s_boss_anchor >= 0) return s_boss_anchor;
+    }
     return s_room;
 }
 
@@ -718,7 +966,10 @@ int game_room_pending(void)
     return s_pending;
 }
 
-/*  把玩家摆进"某一扇门内侧"：从哪扇门进来，就落在那一侧墙内 8 px。  */
+/*  把玩家摆到"门朝向的那一格中心点"：
+ *  从哪扇门进来，就取那扇门 cx/cy 所指的格子（门内侧一格；这一格不长石头），
+ *  让【身体矩形中心】正好落在该格中心 (cx*32+16, cy*32+16)。
+ *  ★ 不再沿门轴贴到 ARENA 边内 8 px —— 那样不同朝向/不同贴图尺寸会偏。 */
 static void place_at_door(int dir)
 {
     int i;
@@ -731,11 +982,7 @@ static void place_at_door(int dir)
         x = s_doors[i].cx * TILE + TILE / 2 - (PB_OFF_X + PB_W / 2);
         y = s_doors[i].cy * TILE + TILE / 2 - (PB_OFF_Y + PB_H / 2);
 
-        if (dir == 0)      y = ARENA_Y0 + 8;
-        else if (dir == 2) y = ARENA_Y1 - PH - 8;
-        else if (dir == 3) x = ARENA_X0 + 8;
-        else               x = ARENA_X1 - PW - 8;
-
+        /*  极端情况兜底：格子中心已经在场地内，正常不会触发。  */
         if (x < ARENA_X0 - PB_OFF_X) x = ARENA_X0 - PB_OFF_X;
         if (x > ARENA_X1 - PB_OFF_X - PB_W) x = ARENA_X1 - PB_OFF_X - PB_W;
         if (y < ARENA_Y0 - PB_OFF_Y) y = ARENA_Y0 - PB_OFF_Y;
@@ -762,6 +1009,7 @@ void game_room_reset(void)
     for (i = 0; i < ROOM_COUNT; ++i) {
         s_used[i] = 0;
         s_spawned[i] = 0;
+        s_respawn[i] = 0;
     }
     game_mobs_reset();
     game_coins_reset();
@@ -776,10 +1024,11 @@ void game_room_reset(void)
 
     g.x = (ARENA_X0 + ARENA_X1) / 2 - PW / 2;
     g.y = (ARENA_Y0 + ARENA_Y1) / 2 - PH / 2;
+    game_camera_snap();
 }
 
 /*----------------------------------------------------------------------------*/
-/*  每帧：玩家肚子中心是否走进了某个门洞  */
+/*  每帧：玩家肚子中心是否走进了某个门洞，且这扇门现在允许传送。  */
 static int trigger_hit(int i)
 {
     const door_info_t *door = &s_doors[i];
@@ -823,15 +1072,20 @@ void game_room_step(void)
 int game_room_commit(void)
 {
     static const u32 fb[2] = { FB_C, FB_D };
-    const char          (*old_map)[MAP_COLS + 1] = game_world_map();
-    const unsigned char (*old_rot)[MAP_COLS]     = game_world_rot();
+    const char          (*old_map)[MAP_MAX_COLS + 1] = game_world_map();
+    const unsigned char (*old_rot)[MAP_MAX_COLS]     = game_world_rot();
     u32 cmd0;
     int bi;
     int same_layout;
 
+    /*  死亡卡：记录“从哪间房来、上一间房往死亡房间开的门”。
+     *  s_entry_dir 是新房间的入口方向，旧房间对应的出口方向是 ^2。  */
+    g.last_room = game_room_id();
+    g.last_door = (s_entry_dir < 0) ? -1 : ((s_entry_dir ^ 2) & 3);
+
     s_room = s_target;
     s_pending = 0;
-    game_world_select(s_room);
+    game_world_select(game_room_id());
     game_minimap_refresh();                 /* 进入新房间：刷新小地图 */
 
     same_layout = (game_world_map() == old_map) && (game_world_rot() == old_rot);
@@ -856,7 +1110,9 @@ int game_room_commit(void)
     } else {
         place_at_door(s_entry_dir);
     }
+
     s_lock = 1;
+    game_camera_snap();                 /* 换房后窗口立即对准新位置，不做过渡 */
 
     if (same_layout) {
         g.door_dirty = 2;
@@ -879,9 +1135,10 @@ int game_room_commit(void)
     cmd0 = gpu2d_getCmdDone();
     gpu2d_exclusive_begin();
     for (bi = 0; bi < 2; ++bi) game_draw_floor(fb[bi]);
-    lineBuffer_setFullBase(FB_C, FB_D);
+    lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
     if (gpu2d_exclusive_end(cmd0 + 2u * game_floor_cmd_count()) != 0) return 0;
     if (!game_present(FB_C)) return 0;
+    game_camera_synced();               /* 整屏已重铺，HUD 也在新位置画好了 */
 
     g.door_dirty = 0;
     game_flow_enter_room();

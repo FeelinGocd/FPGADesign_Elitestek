@@ -3,12 +3,14 @@
 //
 //  验什么
 //    1) 每笔 ≤256 拍、不跨 4KB 线、cmd_write 恒 0
-//    2) 每行写进 buffer 正好 LINE_BEATS 拍, block_done 与最后一拍同拍
-//    3) 行基址逐行 +LINE_BYTES, 行号 0..FRAME_LINES-1
+//    2) 全屏: 每行 241 拍(240 + 1 拍对齐余量), block_done 与最后一拍同拍
+//       ★ 行首地址 【向下 16B 对齐】后再发命令, line_skip = 行首 addr[3:0]
+//    3) 行基址逐行 +ROW_STRIDE(5760), 行号 0..FRAME_LINES-1
 //    4) 帧尾停手: 收完最后一行不再发命令, 直到 frame_start
-//    5) cmd_err: 本行补 0 到 LINE_BEATS 拍, 块大小仍然精确
+//    5) cmd_err: 本行补 0 到 241 拍, 块大小仍然精确
 //    6) enable=0 不出命令; 读侧没让出 bank(block_ready=0) 也不出命令
-//    7) 分屏(mode=1): 一行拆两段各 180 拍, 段0/段1 各自 +=2880, 逐笔地址连续
+//    7) 分屏(mode=1): 一行拆两段各 120 拍(1920B), 段0/段1 各自 +=2880,
+//       逐笔地址连续; 分屏不做字节对齐, line_skip 恒 0
 //
 //  编译运行(ModelSim)
 //    vlog bufferControler.v ; vlog tb_bufferControler.v
@@ -18,20 +20,24 @@
 
 module tb_bufferControler;
 
-localparam  LINE_BYTES  = 5760;
-localparam  LINE_BEATS  = LINE_BYTES/16;        // 360
-parameter   FRAME_LINES = 4;                    // 默认缩到 4 行; -gFRAME_LINES=1080 可跑整帧
+localparam  LINE_BYTES  = 3856;                 // 3840(240 拍) + 16 对齐余量
+localparam  ROW_STRIDE  = 5760;                 // 物理行距(1080p 布局)
+localparam  LINE_BEATS  = LINE_BYTES/16;        // 241
+parameter   FRAME_LINES = 4;                    // 默认缩到 4 行
 localparam  AR_LAT      = 4;                    // 假 DDR 的命令往返
-localparam  BASE0       = 32'h0020_0A00;        // 页内偏移 2560 → 第 0 行要拆 3 笔
-localparam  BASE1       = 32'h0030_0000;
+localparam  BASE0       = 32'h0020_0A05;        // 行首 skip = 5，验证对齐读取
+localparam  BASE1       = 32'h0030_0A05;
 
-// 分屏(mode=1)用: 一行两段, 每段 180 拍 = 2880 字节
-localparam  SEG_BYTES   = LINE_BYTES/2;         // 2880
-localparam  SEG_BEATS   = SEG_BYTES/16;         // 180
-localparam  SEG0_BASE   = 32'h0010_0000;        // 段0 页内偏移 0    -> 一笔 180 拍
+// 分屏(mode=1)用: 一行两段, 每段 120 拍 = 1920 字节
+localparam  SEG_BYTES   = 1920;
+localparam  SEG_BEATS   = SEG_BYTES/16;         // 120
+localparam  SEG_STRIDE  = ROW_STRIDE/2;         // 2880
+localparam  SEG0_BASE   = 32'h0010_0000;        // 段0 页内偏移 0    -> 一笔 120 拍
 localparam  SEG1_BASE   = 32'h0018_0800;        // 段1 页内偏移 2048 -> 拆 128+52 两笔
 localparam  SPLIT_LINES = 4;                    // 分屏验收几行
-localparam  ERR_LINE    = 1;                    // 主流程在【第 1 行】拉开 slv_err_en 造错
+
+integer     err_row;                            // 故意让 AXI 报错的行号(-1 = 不造错)
+integer     err_burst1;                          // 该行第一笔的拍数(算应补几拍用)
 
 integer exp_line;                               // 期望的行号(假从机和检查都要用)
 localparam  CLK_HALF    = 5.0;
@@ -46,6 +52,7 @@ reg         slv_err_en;                         // 让某一笔报错
 wire        buffer_wr_en;
 wire [127:0] buffer_wr_data;
 wire        buffer_wr_block_done;
+wire [3:0]  line_skip;
 wire        cmd_valid, cmd_write;
 wire [31:0] cmd_addr;
 wire [7:0]  cmd_len;
@@ -63,6 +70,7 @@ bufferControler #(
     .AXI_DATA_WIDTH (128),
     .AXI_LEN_WIDTH  (8),
     .LINE_BYTES     (LINE_BYTES),
+    .ROW_STRIDE_BYTES (ROW_STRIDE),
     .FRAME_LINES    (FRAME_LINES),
     .LINE_WIDTH     (11)
 ) u_dut (
@@ -72,6 +80,7 @@ bufferControler #(
     .lineBuffer_mode            (lineBuffer_mode),
     .lineBuffer_addr            (lineBuffer_addr),
     .lineBuffer_frame_start     (lineBuffer_frame_start),
+    .line_skip                  (line_skip),
     .buffer_wr_en               (buffer_wr_en),
     .buffer_wr_data             (buffer_wr_data),
     .buffer_wr_block_done       (buffer_wr_block_done),
@@ -91,6 +100,7 @@ bufferControler #(
 
 //------------------------------------------------------------------------------
 // 假 DDR: 收命令 → 等 AR_LAT → 按地址吐数据, 最后一拍 rd_last
+//   每个字节 = 该字节地址的低 8 位，方便对齐检查
 //------------------------------------------------------------------------------
 reg  [31:0] slv_addr;
 reg  [9:0]  slv_left;
@@ -100,21 +110,14 @@ reg         slv_busy;
 assign cmd_ready = ~slv_busy;
 assign cmd_done  = rd_valid && rd_last;          // 简化: 末拍即命令完成
 assign cmd_err   = slv_err_en;                   // 场景控制
-assign rd_data   = {112'd0, slv_addr[7:0]} +
-                   {104'd0, (slv_addr[7:0] + 8'd1), 8'd0} +
-                   {96'd0,  (slv_addr[7:0] + 8'd2), 16'd0} +
-                   {88'd0,  (slv_addr[7:0] + 8'd3), 24'd0} +
-                   {80'd0,  (slv_addr[7:0] + 8'd4), 32'd0} +
-                   {72'd0,  (slv_addr[7:0] + 8'd5), 40'd0} +
-                   {64'd0,  (slv_addr[7:0] + 8'd6), 48'd0} +
-                   {56'd0,  (slv_addr[7:0] + 8'd7), 56'd0} +
-                   {48'd0,  (slv_addr[7:0] + 8'd8), 64'd0} +
-                   {40'd0,  (slv_addr[7:0] + 8'd9), 72'd0} +
-                   {32'd0,  (slv_addr[7:0] + 8'd10), 80'd0} +
-                   {24'd0,  (slv_addr[7:0] + 8'd11), 88'd0} +
-                   {16'd0,  (slv_addr[7:0] + 8'd12), 96'd0} +
-                   {8'd0,   (slv_addr[7:0] + 8'd13), 104'd0} +
-                   {(slv_addr[7:0] + 8'd14), (slv_addr[7:0] + 8'd15), 112'd0};   // 16 字节: 逐字节 = addr+i
+
+genvar gi;
+generate
+    for (gi = 0; gi < 16; gi = gi + 1) begin : g_bytes
+        localparam [7:0] OFF = gi;
+        assign rd_data[gi*8 +: 8] = slv_addr[7:0] + OFF;
+    end
+endgenerate
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -162,6 +165,9 @@ end
 //------------------------------------------------------------------------------
 // 检查
 //------------------------------------------------------------------------------
+localparam  EXP_BEATS_FULL  = LINE_BEATS;          // 241
+localparam  EXP_BEATS_SPLIT = SEG_BEATS*2;         // 240
+
 integer line_beats;         // 本行已写入的拍数
 integer lines_done;         // 已交完的块数
 integer cmd_cnt;            // 命令笔数
@@ -169,9 +175,10 @@ integer cmd_during_wait;    // 在读侧没让位时发命令的次数(应为 0)
 integer cmd_when_disabled;  // enable=0 时发命令的次数(应为 0)
 integer zero_beats;         // 本行写进去的全零拍数(出错行用来核对补零)
 integer split_addr_err;     // 分屏模式: 每笔起始地址不符的次数(应为 0)
+integer skip_err;           // line_skip 不符的次数(应为 0)
+integer beatalign_err;      // 全屏首发地址没向下 16B 对齐的次数(应为 0)
 integer split_base;         // 进分屏用例那一刻的 lines_done(用来判断跑够了没)
 reg  [31:0] split_exp_addr; // 分屏模式: 本笔应有的起始地址
-integer err_burst_beats;    // 出错那一笔的拍数
 
 task check(input [255:0] name, input integer got, input integer exp);
 begin
@@ -185,8 +192,9 @@ endtask
 initial begin
     line_beats = 0; lines_done = 0; cmd_cnt = 0; exp_line = 0;
     cmd_during_wait = 0; cmd_when_disabled = 0; err_cnt = 0;
-    zero_beats = 0; err_burst_beats = 0;
+    zero_beats = 0; err_row = -1; err_burst1 = 0;
     split_addr_err = 0; split_base = 0; split_exp_addr = 32'd0;
+    skip_err = 0; beatalign_err = 0;
 end
 
 // 命令检查
@@ -200,20 +208,32 @@ always @(posedge clk) begin
             $display("  FAIL 跨 4KB: addr=%08h off=%0d len=%0d", cmd_addr, cmd_addr[11:0], cmd_len+1);
         end
         if (!lineBuffer_mode) begin
-            // 全屏: 一行一段, 行距 5760 —— 每行第一笔必须是行基址
+            // ---- 全屏: 一行一段 241 拍, 行距 5760, 行首向下 16B 对齐 ----
             if (line_beats == 0) begin
-                if (cmd_addr !== (BASE0 + exp_line * LINE_BYTES)) begin
+                if (cmd_addr !== ((BASE0 + exp_line * ROW_STRIDE) & 32'hFFFF_FFF0)) begin
                     err_cnt = err_cnt + 1;
-                    $display("  FAIL 行%0d 首地址: got=%08h exp=%08h", exp_line, cmd_addr, BASE0 + exp_line*LINE_BYTES);
+                    beatalign_err = beatalign_err + 1;
+                    $display("  FAIL 行%0d 首地址: got=%08h exp=%08h",
+                             exp_line, cmd_addr, (BASE0 + exp_line*ROW_STRIDE) & 32'hFFFF_FFF0);
+                end
+                if (line_skip !== ((BASE0 + exp_line * ROW_STRIDE) & 32'hF)) begin
+                    skip_err = skip_err + 1;
+                    $display("  FAIL 行%0d line_skip: got=%0d exp=%0d",
+                             exp_line, line_skip, (BASE0 + exp_line*ROW_STRIDE) & 32'hF);
                 end
             end
         end
         else begin
-            // 分屏: 一行两段各 180 拍, 段地址各自 +=2880 —— 逐笔核对地址连续性
-            if (line_beats == 0)
-                split_exp_addr = SEG0_BASE + exp_line * SEG_BYTES;   // 段0 第一笔
+            // ---- 分屏: 一行两段各 120 拍, 段地址各自 +=2880 ----
+            if (line_beats == 0) begin
+                split_exp_addr = SEG0_BASE + exp_line * SEG_STRIDE;
+                if (line_skip !== 4'd0) begin
+                    skip_err = skip_err + 1;
+                    $display("  FAIL 分屏 行%0d line_skip 应为 0, got=%0d", exp_line, line_skip);
+                end
+            end
             else if (line_beats == SEG_BEATS)
-                split_exp_addr = SEG1_BASE + exp_line * SEG_BYTES;   // 段1 第一笔
+                split_exp_addr = SEG1_BASE + exp_line * SEG_STRIDE;
 
             if (cmd_addr !== split_exp_addr) begin
                 split_addr_err = split_addr_err + 1;
@@ -222,14 +242,13 @@ always @(posedge clk) begin
                              exp_line, line_beats, cmd_addr, split_exp_addr);
             end
 
-            // 推下一笔: 本笔正好把段0 收完 -> 换到段1; 否则段内地址连续
             if ((line_beats < SEG_BEATS) && ((line_beats + (cmd_len + 1)) >= SEG_BEATS))
-                split_exp_addr = SEG1_BASE + exp_line * SEG_BYTES;
+                split_exp_addr = SEG1_BASE + exp_line * SEG_STRIDE;
             else
                 split_exp_addr = cmd_addr + ((cmd_len + 1) * 16);
         end
-        if (!lineBuffer_mode && line_beats == 0 && exp_line == ERR_LINE)
-            err_burst_beats = cmd_len + 1;              // 出错行: 记下第一笔拍数(只在全屏阶段)
+        if (!lineBuffer_mode && line_beats == 0 && exp_line == err_row)
+            err_burst1 = cmd_len + 1;                   // 出错行: 记下第一笔拍数
         if (!buffer_wr_block_ready) cmd_during_wait = cmd_during_wait + 1;
         if (!lineBuffer_enable)     cmd_when_disabled = cmd_when_disabled + 1;
     end
@@ -238,16 +257,14 @@ end
 // 写拍 / 收尾检查
 always @(posedge clk) begin
     if (rst_n) begin
-        // ★ 必须写在同一个 always 里: 块结束与最后一拍同拍,
-        //   分成两块会因为进程执行顺序不定而多数/少数一拍
+        // ★ 块结束与最后一拍同拍
         if (buffer_wr_block_done) begin
             if (buffer_wr_data == 128'd0) zero_beats = zero_beats + 1;  // 最后一拍也算了
-            check("块拍数", line_beats + 1, LINE_BEATS);  // 最后一拍同拍
-            if (!lineBuffer_mode && exp_line == ERR_LINE) begin
-                // 出错行: 出错那一笔之后剩下的拍数必须全部补零(只在全屏阶段)	
-                check("出错行补零拍数", zero_beats, LINE_BEATS - err_burst_beats);
+            check("块拍数", line_beats + 1, lineBuffer_mode ? EXP_BEATS_SPLIT : EXP_BEATS_FULL);
+            if (!lineBuffer_mode && exp_line == err_row) begin
+                check("出错行补零拍数", zero_beats, LINE_BEATS - err_burst1);
                 $display("  [info] 行%0d 出错补零: 实读 %0d 拍 + 补零 %0d 拍 = %0d",
-                         exp_line, err_burst_beats, zero_beats, err_burst_beats + zero_beats);
+                         exp_line, err_burst1, zero_beats, err_burst1 + zero_beats);
             end
             zero_beats = 0;
             line_beats = 0;
@@ -264,7 +281,6 @@ end
 //------------------------------------------------------------------------------
 // 主流程
 //------------------------------------------------------------------------------
-integer i;
 initial begin
     rst_n = 1'b0;
     lineBuffer_enable = 1'b0; lineBuffer_mode = 1'b0;
@@ -279,11 +295,13 @@ initial begin
     check("enable=0 无命令", cmd_cnt, 0);
 
     // ---- 2) 开使能 + 帧起始: 跑 FRAME_LINES 行 ----
+    //   第 1 行故意让 AXI 报错。行首对齐后这一行【正好一笔 241 拍】，
+    //   错误就报在这笔的 rd_last 上 = 行的最后一拍 —— 专门测"没什么可补"那条边
+    err_row = 1;
     lineBuffer_enable = 1'b1;
     lineBuffer_frame_start = 1'b1;              // ★ 和使能同一拍给出
     @(posedge clk); lineBuffer_frame_start = 1'b0;
 
-    // 第 1 行(exp_line=1)故意让 AXI 报错, 测补零
     wait (exp_line == 1);
     slv_err_en = 1'b1;
     wait (exp_line == 2);
@@ -310,9 +328,26 @@ initial begin
 
     check("读侧没让位时没发命令", cmd_during_wait, 0);
     check("enable=0 期间没发命令", cmd_when_disabled, 0);
+    check("全屏首发地址对齐错次", beatalign_err, 0);
+    check("line_skip 错次", skip_err, 0);
 
-    // ---- 6) 分屏(mode=1): 一行两段, 每段 180 拍, 段地址各自 +=2880 ----
-    //      逐笔核对地址: 段0 从 SEG0 起, 收满 180 拍换 SEG1, 下一行再回 SEG0+2880
+    // ---- 6) 出错落在【行中间】: 第 2 行是两笔(144 + 97) ----
+    //      第 1 笔收完报错 -> 剩下 97 拍必须补零, 块仍然是 241 拍
+    err_row = 2;
+    lineBuffer_enable = 1'b1;
+    exp_line = 0;
+    @(posedge clk); lineBuffer_frame_start = 1'b1;
+    @(posedge clk); lineBuffer_frame_start = 1'b0;
+    split_base = lines_done;
+    wait (exp_line == 2);
+    slv_err_en = 1'b1;
+    wait (exp_line == 3);
+    slv_err_en = 1'b0;
+    wait (lines_done >= (split_base + FRAME_LINES));    // 跑完这一帧再换模式
+    repeat (10) @(posedge clk);
+    err_row = -1;
+
+    // ---- 7) 分屏(mode=1): 一行两段, 每段 120 拍, 段地址各自 +=2880 ----
     lineBuffer_enable = 1'b1;
     lineBuffer_mode   = 1'b1;
     lineBuffer_addr   = {SEG0_BASE, SEG1_BASE};
@@ -323,6 +358,7 @@ initial begin
     split_base = lines_done;
     wait (lines_done >= (split_base + SPLIT_LINES));
     check("分屏 每笔起始地址错次", split_addr_err, 0);
+    check("分屏 line_skip 错次", skip_err, 0);
     $display("  [info] 分屏: 跑完 %0d 行, 地址错次 %0d", lines_done - split_base, split_addr_err);
 
     if (err_cnt == 0) $display("---- ALL CHECKS PASSED ----");
@@ -331,7 +367,7 @@ initial begin
 end
 
 initial begin
-    #(20000 * FRAME_LINES);                     // 超时门限随帧高走
+    #2_000_000;
     $display("TIMEOUT");
     $display("---- FAIL ----");
     $finish;

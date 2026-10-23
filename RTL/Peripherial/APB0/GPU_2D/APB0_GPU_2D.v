@@ -191,8 +191,10 @@ assign  PSLVERROR       = read_err | write_err;
 //==============================================================================
 // 写寄存器（只有显示子块有 RW / W1S；观测子块写进来一律忽略）
 //==============================================================================
-//   基址必须 16 字节对齐(AXI 起始地址按传输大小对齐)。
+//   分屏两半的基址必须 16 字节对齐(AXI 起始地址按传输大小对齐)。
 //   不对齐的写【直接丢掉】, 读回还是旧值 —— 软件据此能发现写错了
+//   ★ 全屏 C/D 例外: 相机平移后基址 = FB + cam_y*5760 + cam_x*3, 低 4 位是
+//     lineAligner 的 skip，必须原样收下
 assign  acc_wr_set      = write_en & ~write_err & sel_disp & (reg_sel_disp == 4'd11) & PWDATA[0];
 assign  acc_evt         = (acc_frame_done | acc_wr_set) & ~done_gpu2d_r;
 assign  cpu_evt         = write_en & ~write_err & sel_disp & (reg_sel_disp == 4'd10) & PWDATA[0] & ~done_cpu_r;
@@ -268,8 +270,10 @@ always @(posedge clk or negedge rst_n) begin
                 4'd2    : if (PWDATA[3:0] == 4'h0) framea_cpu_r  <= PWDATA;   // 0x2048
                 4'd3    : if (PWDATA[3:0] == 4'h0) frameb_acc_r  <= PWDATA;   // 0x204C
                 4'd4    : if (PWDATA[3:0] == 4'h0) frameb_cpu_r  <= PWDATA;   // 0x2050
-                4'd5    : if (PWDATA[3:0] == 4'h0) framec_full_r <= PWDATA;   // 0x2054
-                4'd6    : if (PWDATA[3:0] == 4'h0) framed_full_r <= PWDATA;   // 0x2058
+                // ★ 全屏 C/D: 允许非 16B 对齐 —— 相机平移时基址 = FB + cam_y*5760 + cam_x*3，
+                //   低 4 位就是 lineAligner 的 skip，必须原样留住，不能丢写
+                4'd5    : framec_full_r <= PWDATA;                            // 0x2054
+                4'd6    : framed_full_r <= PWDATA;                            // 0x2058
                 4'd7    : status_r <= {30'd0, PWDATA[1:0]};                   // 0x205C
                 4'd12   : if (PWDATA[0]) IRQ_frame_evt_r <= 1'b0;             // 0x2070 W1C
                 4'd13   : IRQ_frame_en_r <= PWDATA[0];                        // 0x2074 使能

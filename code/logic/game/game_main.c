@@ -34,6 +34,24 @@ static int  g_hud_need;                         /* 本帧要不要重画 HUD 文
 static int  g_toast_on;                         /* 本帧要不要画拾取字幕 */
 static int  g_toast_fade;                       /* 同上（拾取字幕） */
 static int  g_bossbar_fade;                     /* 血条消失后还要擦几帧（它不在面板行里） */
+static int  g_hud_static_need;                  /* 相机移动后：静态 HUD（底板/标签）要重画 */
+static int  g_hud_full;                         /* 相机移动过：本帧整块 HUD 强制全画一遍 */
+
+/*  ★ HUD 数字快照（2026-10-23）
+ *    双缓冲是【隔帧】画的：若每帧都取实时值，两块缓冲会显示两个不同的数，
+ *    屏幕上看到的就是"数字来回跳 + 闪烁"（相机一动、HUD 每帧重画时最明显）。
+ *    每两帧才更新一次快照 ⇒ 两块缓冲拿到的永远是同一份数。  */
+static int      s_hv_fps, s_hv_bullets, s_hv_cmd, s_hv_coins;
+static unsigned s_hv_tick;
+
+static void hud_vals_update(int fps, int bullets, int cmd, int coins)
+{
+    if ((s_hv_tick++ & 1u) != 0u) return;       /* 两块缓冲各画一次才换一次数 */
+    s_hv_fps     = fps;
+    s_hv_bullets = bullets;
+    s_hv_cmd     = cmd;
+    s_hv_coins   = coins;
+}
 
 /*  分段计时（CLINT 原始 tick → us）。默认开；只想省代码/不想看日志时改 0。  */
 #define GAME_PROFILE 1
@@ -104,12 +122,10 @@ static void game_update(u32 keys, u32 now)
 {
     if (game_perf_frozen()) return;     /* 压测 mode 1：冻结玩法，只跑绘制 */
 
-    /*  串口手柄按一下 T / 串口命令 T：切换"无敌"（调试用）  */
-    if (game_take_debug_toggle()) {
-        game_debug_invuln = !game_debug_invuln;
-        if (game_debug_invuln) game_vital_refill();
-        bsp_printf("DEBUG: invincible %s (key T)\r\n",
-                   game_debug_invuln ? "ON" : "OFF");
+    /*  P：在玩家脚下生成一个道具（调试用；当前池子只刷 MagicCard）  */
+    {
+        int spawn_req = game_take_spawn_item();
+        if (spawn_req && g.phase != PHASE_GAMEOVER) game_item_spawn_at_player();
     }
 
     game_vital_step(now);               /* 死亡动画 / 补满 / 命数 */
@@ -129,6 +145,7 @@ static void game_update(u32 keys, u32 now)
      *    Boss 继续动、弹幕继续飞。玩家不画，所以不会留下残影。  */
     if (g.phase != PHASE_GAMEOVER && !game_vital_dead(now))
         game_player_step(keys, now);
+    game_camera_step();                 /* Boss 房窗口跟随玩家；普通房固定 0 */
     if (g.phase != PHASE_GAMEOVER)
         game_room_step();
     game_boss_step(now);
@@ -136,14 +153,6 @@ static void game_update(u32 keys, u32 now)
     game_mobs_step(now);                /* slime：动画 / 追玩家 / 清房奖励 */
     game_coins_step(now);               /* 金币拾取：肚子碰到 +1 */
     game_shop_step(now);                /* 商店：身体碰商品 → 扣币 / 回血 / 给道具 */
-}
-
-/*----------------------------------------------------------------------------*/
-/*  精灵的脏区有没有压到 HUD 那几格（压到了就得重画 HUD，否则字会被擦掉）  */
-static int hud_cells_touched(unsigned char dirty[GRID_H][GRID_W])
-{
-    (void)dirty;
-    return game_dirty_touches(0, 0, HUD_CELLS_X, HUD_CELLS_Y);
 }
 
 /*==============================================================================
@@ -168,6 +177,13 @@ static void scene_restore(u32 fb, u32 now, int buf, int arg)
 /*----------------------------------------------------------------------------*/
 /*  HUD：每一块单独一个 z（game.h 的 Z_HUD_*），从下往上依次登记。
  *  ★ 这里只管"画"，擦除 / 标脏已经在帧首的脏区里做完了。  */
+static void hud_static(u32 fb, u32 now, int buf, int arg)
+{
+    (void)now; (void)buf; (void)arg;
+    game_hud_static(fb);                /* 内部加相机偏移 */
+    g_hud_static_need = 0;
+}
+
 static void hud_toast(u32 fb, u32 now, int buf, int arg)
 {
     (void)now; (void)buf; (void)arg;
@@ -189,7 +205,10 @@ static void exit_draw(u32 fb, u32 now, int buf, int arg)
 static void hud_panel(u32 fb, u32 now, int buf, int arg)
 {
     (void)now; (void)arg;
-    game_hud_frame(fb, buf, g.fps, g.cmd_frame, g_alive, g.coins, game_hud_need_full);
+    /*  ★ full 只用于"相机移动 / 整屏重铺"；瓦片擦除波及的相邻行由
+     *    game_hud_prepare_overlap() 精确补进 s_draw，不整面板重画。 */
+    game_hud_frame(fb, buf, s_hv_fps, s_hv_cmd, s_hv_bullets, s_hv_coins,
+                   game_hud_need_full || g_hud_full);
 }
 
 static void hud_vital(u32 fb, u32 now, int buf, int arg)
@@ -201,7 +220,7 @@ static void hud_vital(u32 fb, u32 now, int buf, int arg)
 static void hud_pool(u32 fb, u32 now, int buf, int arg)
 {
     (void)now; (void)arg;
-    game_item_draw_pool(fb, buf, game_hud_need_full);
+    game_item_draw_pool(fb, buf, game_hud_need_full || g_hud_full);
 }
 
 static void hud_minimap(u32 fb, u32 now, int buf, int arg)
@@ -223,6 +242,8 @@ static void hud_gameover(u32 fb, u32 now, int buf, int arg)
 /*  这一帧要画哪些 HUD 元素；登记顺序 = z 从下到上  */
 static void hud_submit(void)
 {
+    if (g_hud_static_need)
+        rl_push(Z_HUD, hud_static, 0);              /* 相机移动：先重画底板/标签 */
     if (g_toast_on)
         rl_push(Z_HUD_TOAST, hud_toast, 0);
     if (g.phase == PHASE_FIGHT)
@@ -239,11 +260,65 @@ static void hud_submit(void)
 }
 
 /*----------------------------------------------------------------------------*/
+/*  相机移动后：把【旧相机位置】的 HUD 区域标脏，让脏区恢复把旧字擦掉。
+ *  HUD 在屏幕上的位置固定，但它在 framebuffer 里的世界坐标 = cam + 屏幕坐标。  */
+static void mark_hud_rects_at(int camx, int camy)
+{
+    int x, y, w, h;
+
+    /* 左侧面板（标签 + 数值 + 心/命数） */
+    game_mark_dirty(g_dirty, camx + 0, camy + 0, 204, HUD_CELLS_Y * TILE);
+
+    /* 顶部 Boss 血条 */
+    game_mark_dirty(g_dirty, camx + HUD_HP_X, camy + 0,
+                    HUD_HP_W, HUD_HP_Y + HUD_HP_H);
+
+    /* 右上角小地图 */
+    game_minimap_rect(&x, &y, &w, &h);
+    game_mark_dirty(g_dirty, camx + x, camy + y, w, h);
+
+    /* 右侧道具池 */
+    game_item_pool_rect(&x, &y, &w, &h);
+    game_mark_dirty(g_dirty, camx + x, camy + y, w, h);
+
+    /* 拾取字幕（显示期间 + 消失后的 3 帧擦除期） */
+    if (g.toast_until != 0u || g_toast_fade > 0)
+        game_mark_dirty(g_dirty, camx + SCR_W / 2 - 200, camy + HUD_TOAST_Y - 8,
+                        400, 32);
+
+    /* GAME OVER 窗口：它每帧都画，但相机一动旧窗口也得擦掉 */
+    if (g.phase == PHASE_GAMEOVER)
+        game_mark_dirty(g_dirty, camx + GAMEOVER_X, camy + GAMEOVER_Y,
+                        GAMEOVER_W, GAMEOVER_H);
+}
+
+/*----------------------------------------------------------------------------*/
 /*  ③ 绘制  */
 static void game_draw(u32 now, int buf)
 {
     u32 fb = g_fb[buf];
     int i;
+    int cam_moved;
+
+    /*  ★ 这两个是"本帧"标志：必须在帧首清掉。
+     *    g_hud_need 以前只置不清 ⇒ 一旦有过一次刷新就永远为 1，
+     *    连带动不动就 game_vital_invalidate()，把血量行每帧擦一遍。 */
+    g_hud_need = 0;
+
+    /*  ★ 相机移动：先擦【这块缓冲上次画 HUD 时】的位置，再在 new cam 处重画。
+     *    HUD 是"屏幕固定"的，但画进 framebuffer 时必须跟着相机走。
+     *    ★ 必须按 buf 各记一份：双缓冲下这块缓冲上次画可能是两帧前、相机更旧。  */
+    cam_moved = (g.cam_x != g.hud_cam_x[buf]) || (g.cam_y != g.hud_cam_y[buf]);
+    if (cam_moved) {
+        mark_hud_rects_at(g.hud_cam_x[buf], g.hud_cam_y[buf]);
+        g_hud_static_need = 1;
+        g_hud_need = 1;
+        g_hud_full = 1;                 /* 整块面板全画，不留"只画变了的那行"的缝 */
+        game_hud_need_full = 1;
+        game_hud_invalidate();
+        game_vital_invalidate();
+        game_item_invalidate();
+    }
 
     /*  ★ 换房后的两帧：把 4 扇门的两格标脏（两块缓冲各重画一次）。
      *    地图没变时 game_room_commit 不再整屏重铺，门开/关的变化就靠这里更新。  */
@@ -293,19 +368,28 @@ static void game_draw(u32 now, int buf)
     /* HUD 的文字：只有"数字变了"或"有精灵压在它那块"时才重画并标脏。
        平时一条命令都不花 —— 之前每帧都标 32 个格子，把帧率压下去了（移动发卡）。 */
     g_alive = game_bullets_alive();
+    hud_vals_update(g.fps, g_alive, g.cmd_frame, g.coins);
 
-    /* Keep HUD overlap separate from HUD value changes. Overlap needs a full
-     * panel redraw; a changed value only needs its own row. */
+    /*  ★ HUD 擦除 = 按【整瓦片】恢复场景。相机的 cam_y 不一定是 32 的倍数，
+     *    所以"只标脏一行 / 只补画一行"会把相邻行（STAGE、DMG ...）的像素
+     *    擦掉一截却没人补画 ⇒ 大房间里左侧面板持续闪烁、缺字。
+     *    顺序很重要：必须等 game_vital_prepare() / game_item_prepare() /
+     *    飘心标脏都做完，再按瓦片重查一次，把被波及的相邻行补进 s_draw。  */
     {
-        int hud_overlap = hud_cells_touched(g_dirty);
         int hud_changed = game_hud_prepare(g_dirty, buf,
-                                           g.fps, g.cmd_frame, g_alive, g.coins);
+                                           s_hv_fps, s_hv_cmd, s_hv_bullets, s_hv_coins);
 
         game_vital_prepare(g_dirty, buf);
         game_item_prepare(g_dirty, buf);
+        game_vital_mark_dirty(g_dirty);     /* 飘心也会压到面板上：先标脏再查重叠 */
 
-        game_hud_need_full = 0;   /* 遮挡不再整面板重画：prepare 已按行处理 */
-        g_hud_need = hud_overlap || hud_changed;
+        /*  ★ 第二次检查：vital / 飘心 / 实体的脏瓦片可能跨到相邻 HUD 行，
+         *    补画这些行（只置重画位，不重复标脏）。  */
+        if (game_hud_prepare_overlap(g_dirty, buf))
+            hud_changed = 1;
+
+        game_hud_need_full = 0;
+        g_hud_need = g_hud_need || hud_changed || g_hud_full;
         if (g_hud_need) {
             game_hud_mark_dirty(g_dirty);
             /*  面板重画会连第 4 行（心）一起盖掉；这里强制补画心/命数  */
@@ -333,11 +417,11 @@ static void game_draw(u32 now, int buf)
             g_toast_fade = 3;                   /* 之后 3 帧继续擦 */
         }
         if (g_toast_on) {
-            game_mark_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
+            game_mark_hud_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
             /* 字幕的脏区会按【整瓦片】擦，连带血条所在那行 ⇒ 一起标脏，血条随后重画 */
-            game_mark_dirty(g_dirty, HUD_HP_X, HUD_HP_Y, HUD_HP_W, HUD_HP_H);
+            game_mark_hud_dirty(g_dirty, HUD_HP_X, HUD_HP_Y, HUD_HP_W, HUD_HP_H);
         } else if (g_toast_fade > 0) {
-            game_mark_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
+            game_mark_hud_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
             --g_toast_fade;
         }
     }
@@ -351,18 +435,16 @@ static void game_draw(u32 now, int buf)
         if (bar_on) {
             g_bossbar_fade = 3;
         } else if (g_bossbar_fade > 0) {
-            game_mark_dirty(g_dirty, HUD_HP_X, 0, HUD_HP_W,
-                            HUD_HP_Y + HUD_HP_H);
+            game_mark_hud_dirty(g_dirty, HUD_HP_X, 0, HUD_HP_W,
+                                HUD_HP_Y + HUD_HP_H);
             --g_bossbar_fade;
         }
     }
 
-    /*  左下角生命显示：和 HUD 一样是"浮在场景上的东西"，每帧标脏让它重画  */
     /*  ★ 帧首：把"这块缓冲里已经过期"的 HUD 行 / 血量行 / 道具池标脏，
      *    让下面的脏区恢复统一擦掉 —— 擦除只在帧首做，绘制层不再贴地砖，
-     *    否则会把走到面板上的人物一起盖掉。  */
-    game_vital_mark_dirty(g_dirty);
-
+     *    否则会把走到面板上的人物一起盖掉。
+     *    （飘心的标脏已提前到上面的 HUD 重叠检查之前。）  */
     game_bullets_sync(buf);             /* 脏区用：记下这一帧每颗弹画在哪 */
     game_coins_sync(buf);               /* 金币同样：擦完旧位置再把 old_coin 对齐到这一帧 */
     game_web_sync(buf);                 /* 网 / 石头：同样按当前房间对齐 old 位置 */
@@ -370,8 +452,12 @@ static void game_draw(u32 now, int buf)
     game_shop_sync(buf);                /* 商店商品：房间 + 位置的 old 对齐 */
 
     /*  ★ 先提交、再统一排序绘制：z 小的在下、z 大的在上（同 z 保持提交顺序）。
-     *    实体的 z 在各自的 submit() 里 = Z_ACTOR + 底边 y ⇒ 自然的透视遮挡。  */
+     *    实体的 z 在各自的 submit() 里 = Z_ACTOR + 底边 y ⇒ 自然的透视遮挡。
+     *  ★ HUD 必须【最先】入队：rl_push 满员时丢弃后来的元素，而 HUD 的 z 最大、
+     *    入队早晚不影响绘制顺序（排序只看 z）。以前 HUD 最后入队 ⇒ Boss 房弹幕一多
+     *    队列就满、先丢 HUD ⇒ 表现正是"字母/血量闪烁、数字变 00"。  */
     rl_begin();
+    hud_submit();                         /* z 最大：先入队，永远不会被丢弃 */
     rl_push(Z_SCENE, scene_restore, 0);   /* 脏区恢复（擦旧精灵）必须最先 */
     if (g.exit_active && game_room_id() == g.exit_room)
         rl_push(Z_SCENE + 5, exit_draw, 0);  /* exit 在地板上、人物下面 */
@@ -384,9 +470,14 @@ static void game_draw(u32 now, int buf)
     game_web_submit();
     game_stones_submit();
     game_item_submit();
-    hud_submit();                         /* toast → 血条 → ... → 道具池 → GAME OVER */
 
     rl_draw_all(fb, now, buf);
+
+    g_hud_full = 0;
+    g.hud_cam_x[buf] = g.cam_x;
+    g.hud_cam_y[buf] = g.cam_y;
+    g.cam_prev_x = g.cam_x;
+    g.cam_prev_y = g.cam_y;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -452,13 +543,13 @@ static int frame_end(u32 now, int buf)
 void game_demo_run(void)
 {
     bsp_printf("\r\nGAME: KEY0=left KEY1=right KEY2=down KEY3=up, auto fire\r\n");
-    bsp_printf("DEBUG CMDS: T = toggle invincible, debug0 = ON, debug1 = OFF (type + Enter)\r\n");
+    bsp_printf("DEBUG CMDS: R = restart, P = spawn item (type + Enter)\r\n");
     if (PERF_TEST_MODE == 1)
-        bsp_printf("PERF TEST: fixed model, bullet levels 16/32/64/96/128/192/256\r\n");
+        bsp_printf("PERF TEST: fixed model, bullet levels 16/32/64/96/128/160/192\r\n");
     else if (PERF_TEST_MODE == 2)
-        bsp_printf("PERF TEST: 256 moving bullets, background restore ON\r\n");
+        bsp_printf("PERF TEST: 192 moving bullets, background restore ON\r\n");
     else if (PERF_TEST_MODE == 3)
-        bsp_printf("PERF TEST: 256 moving bullets, background restore OFF\r\n");
+        bsp_printf("PERF TEST: 192 moving bullets, background restore OFF\r\n");
 
     if (!game_init()) return;
 

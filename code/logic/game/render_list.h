@@ -22,8 +22,10 @@
 
 #include "type.h"
 
-/* 一帧最多登记多少个元素：256 发子弹 + 场景/角色/Boss/道具/护盾/HUD ≈ 270 */
-#define RL_MAX   280
+/* 一帧最多登记多少个元素：192 发子弹 + 56 金币 + 16 怪 + 石头/网/场景/HUD ≈ 350。
+ * ★ 余量要留够：满员时 rl_push 丢后来的元素，虽然 HUD 现在最先入队，
+ *   但子弹/金币被丢会造成实体闪烁。  */
+#define RL_MAX   400
 
 /* 画法：fb = 后台帧缓存, now = 毫秒时钟, buf = 0/1（双缓冲下标）, arg = 元素下标 */
 typedef void (*rl_draw_fn)(u32 fb, u32 now, int buf, int arg);

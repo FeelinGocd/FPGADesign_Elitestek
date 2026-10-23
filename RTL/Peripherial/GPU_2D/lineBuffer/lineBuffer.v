@@ -3,7 +3,9 @@
 //------------------------------------------------------------------------------
 //  里面是什么
 //      bufferAPBHandler : 把 APB 寄存器的值翻译成有效信号(翻页/选地址/帧率)
-//      bufferControler  : 按 {段0,段1} 基址把一行 360 拍从 DDR 搬进 PingPong
+//      bufferControler  : 按 {段0,段1} 基址把一行从 DDR 搬进来
+//                         (全屏 241 拍, 分屏 2x120 拍)
+//      lineAligner      : 行首非 16B 对齐时丢掉前 skip 个字节, 241 拍 -> 240 拍
 //      async_PingPongBuffer : 双 bank, 跨 100MHz <-> 148.5MHz
 //      bufferUnpacker   : 16 字节/拍 -> 3 字节/像素
 //      HDMI_Top         : 真 1080p60 时序 + TMDS
@@ -11,8 +13,9 @@
 //      frame_start 跨域桥: 读域 HDMI_frame_start_o -> toggle -> 写域 2FF+seen
 //
 //  两级时钟
-//      clk(100MHz)        : APB 寄存器值 / handler / controller / PingPong 写侧 / AXI
+//      clk(100MHz)        : APB 寄存器值 / handler / controller / aligner / PingPong 写侧 / AXI
 //      clk_HDMI_x1(148.5M): PingPong 读侧 / unpacker / HDMI / frame_start 的产生
+//      ★ aligner 只在写域: 74.25/148.5MHz 那条像素通路一个字节都不动
 //
 //  和外面怎么连
 //      进: APB 寄存器层的值(enable / split_pending / DONE / 三个 64 位基址)
@@ -110,6 +113,10 @@ module lineBuffer #(
 );
 
 localparam  aPingPongBuffer_DEPTH   = 512;
+// 显示一行可见多少拍（1280 px = 3840B = 240 拍），lineAligner 的输出块长
+localparam  DISPLAY_BEATS           = LINE_BYTES/(AXI_DATA_WIDTH/8);
+// 全屏取数拍数 = 240 + 1：行首可能不是 16B 对齐(相机平移)，多读一拍给 lineAligner
+localparam  FETCH_BYTES             = LINE_BYTES + (AXI_DATA_WIDTH/8);
 
 //==============================================================================
 // wire / reg
@@ -120,8 +127,16 @@ localparam  aPingPongBuffer_DEPTH   = 512;
 
 
 //------------------------------------------------------------------------------
-// PingPong 写口(来自 controller) / 读口(给 unpacker)
+// controller -> lineAligner -> PingPong 写口
 //------------------------------------------------------------------------------
+wire                                ctrl_wr_en;             // controller 写口(241 拍/行)
+wire  [AXI_DATA_WIDTH-1:0]          ctrl_wr_data;
+wire                                ctrl_wr_block_done;
+wire                                ctrl_wr_block_ready;    // 反压: aligner 能收 + bank 空闲
+wire  [3:0]                         ctrl_line_skip;         // 行首字节偏移
+wire                                align_in_ready;
+
+// PingPong 写口(来自 lineAligner，固定 240 拍/行) / 读口(给 unpacker)
 wire                                buffer_wr_en;
 wire  [AXI_DATA_WIDTH-1:0]          buffer_wr_data;
 wire                                buffer_wr_block_done;
@@ -224,14 +239,14 @@ assign  lineBuffer_frame_start = (rd_frame_start_flip_dd != wr_frame_start_r);
 //==============================================================================
 // 例化
 //==============================================================================
-//==============================================================================
-// 行预取控制器: 按 {段0,段1} 把一行 360 拍搬进 PingPong
+// 行预取控制器: 按 {段0,段1} 把一行的拍数搬进 PingPong
+//   ★ 全屏取 241 拍(多 1 拍给 lineAligner), 分屏两段各 120 拍
 //==============================================================================
 bufferControler # (
     .AXI_ADDR_WIDTH             (AXI_ADDR_WIDTH),
     .AXI_DATA_WIDTH             (AXI_DATA_WIDTH),
     .AXI_LEN_WIDTH              (AXI_LEN_WIDTH),
-    .LINE_BYTES                 (LINE_BYTES),
+    .LINE_BYTES                 (FETCH_BYTES),
     .ROW_STRIDE_BYTES           (ROW_STRIDE_BYTES),
     .FRAME_LINES                (FRAME_LINES)
   ) u_bufferControler (
@@ -242,11 +257,12 @@ bufferControler # (
     .lineBuffer_mode            (lineBuffer_mode),
     .lineBuffer_addr            (lineBuffer_addr),
     .lineBuffer_frame_start     (lineBuffer_frame_start),
+    .line_skip                  (ctrl_line_skip),
 
-    .buffer_wr_en               (buffer_wr_en),
-    .buffer_wr_data             (buffer_wr_data),
-    .buffer_wr_block_done       (buffer_wr_block_done),
-    .buffer_wr_block_ready      (buffer_wr_block_ready),
+    .buffer_wr_en               (ctrl_wr_en),
+    .buffer_wr_data             (ctrl_wr_data),
+    .buffer_wr_block_done       (ctrl_wr_block_done),
+    .buffer_wr_block_ready      (ctrl_wr_block_ready),
 
     .cmd_valid                  (cmd_valid),
     .cmd_write                  (cmd_write),
@@ -261,6 +277,34 @@ bufferControler # (
     .rd_last                    (rd_last),
     .rd_ready                   (rd_ready)
   );
+
+//==============================================================================
+// 行首字节对齐: 把 controller 的 241 拍削成 240 拍/行
+//   全屏 skip = 行首 addr[3:0]; 分屏 skip = 0(纯直通)
+//   输出侧仍然是"240 拍/行 + 块尾单拍"，下游 unpacker/HDMI 完全不知道它的存在
+//==============================================================================
+lineAligner # (
+    .DIN_WIDTH                  (AXI_DATA_WIDTH),
+    .OUT_BEATS                  (DISPLAY_BEATS)
+  ) u_lineAligner (
+    .clk                        (clk),
+    .rst_n                      (rst_n_wr),
+    .enable                     (1'b1),
+    .skip                       (ctrl_line_skip),
+    .in_valid                   (ctrl_wr_en),
+    .in_ready                   (align_in_ready),
+    .in_data                    (ctrl_wr_data),
+    .in_block_done              (ctrl_wr_block_done),
+    .out_valid                  (buffer_wr_en),
+    .out_ready                  (buffer_wr_block_ready),
+    .out_data                   (buffer_wr_data),
+    .out_block_done             (buffer_wr_block_done)
+  );
+
+// controller 的"能收": aligner 收得下 且 当前 bank 可写
+//   ★ 只给 aligner 的 in_ready 是不够的: 空闲时它恒为 1(out_valid=0),
+//     会让 controller 在 bank 还没让出来时就发读命令
+assign  ctrl_wr_block_ready = buffer_wr_block_ready & align_in_ready;
 
 //==============================================================================
 // 双 bank 跨域缓冲

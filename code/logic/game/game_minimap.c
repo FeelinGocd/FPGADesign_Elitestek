@@ -55,6 +55,20 @@ void game_minimap_refresh(void)
         int ny = gy + dy[d];
         if (game_room_type_at(nx, ny) != ROOM_NONE) s_seen[ny][nx] = 1;
     }
+
+    /*  Boss 占 2×2：只要看见其中一格，就把四格一起点亮。  */
+    {
+        int x, y, any = 0;
+
+        for (y = 0; y < ROOM_GRID_H; ++y)
+            for (x = 0; x < ROOM_GRID_W; ++x)
+                if (s_seen[y][x] && game_room_type_at(x, y) == ROOM_BOSS) any = 1;
+        if (any) {
+            for (y = 0; y < ROOM_GRID_H; ++y)
+                for (x = 0; x < ROOM_GRID_W; ++x)
+                    if (game_room_type_at(x, y) == ROOM_BOSS) s_seen[y][x] = 1;
+        }
+    }
     s_mm_valid = 1;
 }
 
@@ -68,12 +82,18 @@ static u32 mm_color(int type)
     }
 }
 
+void game_minimap_rect(int *x, int *y, int *w, int *h)
+{
+    *x = MM_BG_X; *y = MM_BG_Y; *w = MM_BG_W; *h = MM_BG_H;
+}
+
 void game_minimap_draw(u32 fb)
 {
     int x, y;
 
     if (!s_mm_valid) return;
 
+    fb = game_view_fb(fb);
     /* 固定底板 */
     CI_gpu2d_fillRect(fb, MM_BG_X, MM_BG_Y, MM_BG_W, MM_BG_H, 0x00101018u);
 
@@ -92,7 +112,7 @@ void game_minimap_draw(u32 fb)
         }
     }
 
-    /* 房间块；当前房间白块 */
+    /* 房间块；Boss 的四格本身就是 2×2；当前房间只画一个小白块。 */
     for (y = 0; y < ROOM_GRID_H; ++y) {
         for (x = 0; x < ROOM_GRID_W; ++x) {
             int t;
@@ -101,10 +121,26 @@ void game_minimap_draw(u32 fb)
             if (!s_seen[y][x]) continue;
             t = game_room_type_at(x, y);
             if (t == ROOM_NONE) continue;
-            c = (x == s_cur_x && y == s_cur_y) ? 0x00FFFFFFu : mm_color(t);
+
+            c = mm_color(t);
             CI_gpu2d_fillRect(fb, (u32)(MM_CELL_X + x * MM_STEP),
                                   (u32)(MM_CELL_Y + y * MM_STEP),
                                   MM_CELL, MM_CELL, c);
+
+            if (x == s_cur_x && y == s_cur_y) {
+                int wx, wy;
+
+                if (t == ROOM_BOSS) {
+                    /*  2×2 房间：白块画在 2×2 的正中间。  */
+                    int span = 2 * MM_CELL + MM_GAP;
+                    wx = MM_CELL_X + x * MM_STEP + span / 2 - 2;
+                    wy = MM_CELL_Y + y * MM_STEP + span / 2 - 2;
+                } else {
+                    wx = MM_CELL_X + x * MM_STEP + (MM_CELL - 4) / 2;
+                    wy = MM_CELL_Y + y * MM_STEP + (MM_CELL - 4) / 2;
+                }
+                CI_gpu2d_fillRect(fb, (u32)wx, (u32)wy, 4, 4, 0x00FFFFFFu);
+            }
         }
     }
 }

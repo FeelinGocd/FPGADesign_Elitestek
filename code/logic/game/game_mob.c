@@ -4,7 +4,7 @@
 //  干什么      :
 //    · 换房时 reset；第一次进房生成 slime + bug；各自追玩家、接触扣血。
 //    · 玩家子弹命中：扣 1 HP；清完后发房间清理奖励（0~5 coin）。
-//    · 有怪时房间门锁死（game_room_door_open 查 game_mobs_alive）。
+//    · 有怪时禁止传送（game_room_door_open 查 game_mobs_alive），但门贴图照常渲染。
 //  上一级是谁  : game/game_main.c（每帧）、game/game_state.c（进房生成 / 清房奖励）
 //  接口契约    :
 //    · 固定 N_MOBS 槽；只服务【当前房间】，换房时整个池子清空。
@@ -59,7 +59,10 @@ void game_mobs_reset(void)
 {
     int i, b;
 
-    for (i = 0; i < N_MOBS; ++i) g.mobs[i].active = 0;
+    for (i = 0; i < N_MOBS; ++i) {
+        g.mobs[i].active = 0;
+        g.mobs[i].hit_until = 0u;
+    }
     for (b = 0; b < 2; ++b)
         for (i = 0; i < N_MOBS; ++i) g.old_mob[b][i].active = 0;
     s_spawned = 0;
@@ -83,6 +86,7 @@ void game_mobs_spawn(int count)
         m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
         m->move_next = game_ms() + 250u + (mob_rand() % 350u);
         m->hop_until = 0u;
+        m->hit_until = 0u;
         ++n;
     }
     s_spawned = 1;
@@ -106,6 +110,7 @@ void game_mobs_spawn_bug(int count)
         m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
         m->move_next = game_ms() + 100u + (mob_rand() % 200u);
         m->hop_until = game_ms() + BUG_FRAME_MS;
+        m->hit_until = 0u;
         ++n;
     }
     s_spawned = 1;
@@ -134,6 +139,9 @@ int game_mobs_try_hit(int cx, int cy)
         if (--m->hp == 0) {
             m->active = 0;
             g.score += 10;
+        } else {
+            /*  命中闪红：和玩家/Boss 一样按【时间】算，不按帧数。  */
+            m->hit_until = game_ms() + HIT_FLASH_MS;
         }
         return 1;
     }
@@ -211,7 +219,7 @@ void game_mobs_step(u32 now)
         }
     }
 
-    /*  最后一只死掉的当帧：发清理奖励 + 开门  */
+    /*  最后一只死掉的当帧：发清理奖励 + 恢复门的传送  */
     if (s_spawned && game_mobs_alive() == 0) {
         int n = game_room_take_reward();
 
@@ -244,26 +252,36 @@ static void mob_draw_one(u32 fb, u32 now, int buf, int i)
         if (hop > 6u) hop = 6u;
     }
 
-    if (m->type == MOB_BUG) {
+    {
+        int dx = (int)m->x;
+        int dy = (int)m->y;
         u32 flip = 0u;
-        unsigned char f = (unsigned char)(m->frame & 3u);
 
-        if (f == 0u) {
-            a = &g_assets[ASSET_mobs_bug_00_standUp];
-        } else if (f == 1u) {
-            a = &g_assets[ASSET_mobs_bug_01_Right];
-        } else if (f == 2u) {
-            a = &g_assets[ASSET_mobs_bug_01_Right];
-            flip = GPU2D_FLIP_X;
+        if (m->type == MOB_BUG) {
+            unsigned char f = (unsigned char)(m->frame & 3u);
+
+            if (f == 1u) {
+                a = &g_assets[ASSET_mobs_bug_01_Right];
+            } else if (f == 2u) {
+                a = &g_assets[ASSET_mobs_bug_01_Right];
+                flip = GPU2D_FLIP_X;
+            } else {
+                a = &g_assets[ASSET_mobs_bug_00_standUp];
+            }
         } else {
-            a = &g_assets[ASSET_mobs_bug_00_standUp];
+            a = &g_assets[jumping ? ASSET_mobs_slime_01 : ASSET_mobs_slime_00];
+            dy = (int)m->y - (int)hop;
         }
-        CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
-                                 (u32)m->x, (u32)m->y, MOB_W, MOB_H, flip);
-    } else {
-        a = &g_assets[jumping ? ASSET_mobs_slime_01 : ASSET_mobs_slime_00];
-        CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
-                                 (u32)m->x, (u32)((int)m->y - (int)hop), MOB_W, MOB_H, 0u);
+
+        /*  命中闪红：用 MODE=4（tint + alpha），保留小怪贴图的软边；
+         *    duration 由 game_mobs_try_hit() 按 HIT_FLASH_MS 写入。  */
+        if ((int)(now - m->hit_until) < 0)
+            CI_gpu2d_spriteAlphaTintRect(a->base_word, a->stride_word, fb,
+                                         (u32)dx, (u32)dy, MOB_W, MOB_H,
+                                         0x00FF2828u, 180u, 1u, flip);
+        else
+            CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
+                                     (u32)dx, (u32)dy, MOB_W, MOB_H, flip);
     }
 }
 
@@ -275,7 +293,7 @@ void game_mobs_submit(void)
         const mob_t *m = &g.mobs[i];
 
         if (!m->active) continue;
-        if (!game_visible(m->x, m->y - 8, MOB_W, MOB_H + 8)) continue;
+        if (!game_visible_world(m->x, m->y - 8, MOB_W, MOB_H + 8)) continue;
         rl_push(ACTOR_Z(m->y + MOB_H), mob_draw_one, i);
     }
 }

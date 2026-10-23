@@ -14,18 +14,35 @@
 #include "CI_gpu2d.h"
 
 #define STONE_SIZE 32
-#define SG_AW ((ARENA_X1 - ARENA_X0) / STONE_SIZE)   /* 23 */
-#define SG_AH ((ARENA_Y1 - ARENA_Y0) / STONE_SIZE)   /* 13 */
-#define SG_CX 11                                     /* 门中心 / 房间中心格 */
-#define SG_CY 6
+/*  ★ 竞技场尺寸随房间变（普通 23×13 / Boss 46×24）⇒ 网格按最大世界建表，
+ *    循环仍用当前 SG_AW/SG_AH。  */
+#define SG_MAX_AW 46                                /* Boss 房竞技场最大 46×24 格 */
+#define SG_MAX_AH 24
+#define SG_AW ((ARENA_X1 - ARENA_X0) / STONE_SIZE)
+#define SG_AH ((ARENA_Y1 - ARENA_Y0) / STONE_SIZE)
+#define SG_CX (SG_AW / 2)                            /* 门中心 / 房间中心格 */
+#define SG_CY (SG_AH / 2)
 
 static u32 s_seed;
 static unsigned char s_stone_done[ROOM_COUNT];   /* 每间房只随机生成一次 */
 
 /*  当前房间的石头占用表：32 px 格对齐，碰撞只查 1 个格 / 身体覆盖的几格。
  *  s_grid_room 与当前房间不一致时重建；换房/重刷后置 -1。  */
-static unsigned char s_stone_grid[SG_AH][SG_AW];
+/*  网格只存 0/1 ⇒ 按位压，46×24 = 1104 格只用 138 B/张。  */
+#define SG_CELLS (SG_MAX_AW * SG_MAX_AH)
+#define SG_BITS  ((SG_CELLS + 7) / 8)
+#define SG_IDX(i, j) ((j) * SG_MAX_AW + (i))
+#define SG_GET(a, i) (((a)[(i) >> 3] >> ((i) & 7)) & 1u)
+#define SG_SET(a, i) ((a)[(i) >> 3] |= (unsigned char)(1u << ((i) & 7)))
+
+static unsigned char s_stone_grid[SG_BITS];
 static signed char   s_grid_room = -1;
+
+/*  BFS 工作区：放静态区，不占 4 KB 栈（换了 Boss 大房间后网格变大，
+ *  原来那套"局部数组"会把默认 4 KB 栈顶爆）。  */
+static unsigned char s_bfs_block[SG_BITS];
+static unsigned char s_bfs_seen[SG_BITS];
+static short         s_bfs_q[SG_MAX_AW * SG_MAX_AH];
 
 static u32 stone_rand(void)
 {
@@ -61,20 +78,16 @@ static int cell_blocked(int i, int j)
 /*  32 px 网格 BFS：所有开着的门内侧格必须互相连通  */
 static int stone_bfs_ok(void)
 {
-    unsigned char block[SG_AH][SG_AW];
-    unsigned char seen[SG_AH][SG_AW];
-    short q[SG_AW * SG_AH];
+    short *q = s_bfs_q;
     int starts[4][2];
     int ns = 0, head = 0, tail = 0;
-    int k, i, j, d;
+    int k, i, j, d, b;
     static const int dx[4] = { 0, 1, 0, -1 };
     static const int dy[4] = { -1, 0, 1, 0 };
 
-    for (j = 0; j < SG_AH; ++j) {
-        for (i = 0; i < SG_AW; ++i) {
-            block[j][i] = 0;
-            seen[j][i] = 0;
-        }
+    for (b = 0; b < SG_BITS; ++b) {
+        s_bfs_block[b] = 0;
+        s_bfs_seen[b] = 0;
     }
     for (k = 0; k < N_STONES; ++k) {
         const stone_t *s = &g.stones[k];
@@ -82,7 +95,8 @@ static int stone_bfs_ok(void)
         if (!s->active || s->room != (signed char)game_room_id()) continue;
         i = (s->x - ARENA_X0) / STONE_SIZE;
         j = (s->y - ARENA_Y0) / STONE_SIZE;
-        if (i >= 0 && i < SG_AW && j >= 0 && j < SG_AH) block[j][i] = 1;
+        if (i >= 0 && i < SG_AW && j >= 0 && j < SG_AH)
+            SG_SET(s_bfs_block, SG_IDX(i, j));
     }
 
     if (game_room_door_exists(0)) { starts[ns][0] = SG_CX;        starts[ns][1] = 0;        ++ns; }
@@ -93,7 +107,7 @@ static int stone_bfs_ok(void)
     if (ns <= 1) return 1;                          /* 只有一扇门，不需要门门连通 */
 
     q[tail++] = (short)(starts[0][1] * SG_AW + starts[0][0]);
-    seen[starts[0][1]][starts[0][0]] = 1;
+    SG_SET(s_bfs_seen, SG_IDX(starts[0][0], starts[0][1]));
     while (head < tail) {
         int c = q[head++];
         int x = c % SG_AW;
@@ -104,17 +118,18 @@ static int stone_bfs_ok(void)
             int ny = y + dy[d];
 
             if (nx < 0 || nx >= SG_AW || ny < 0 || ny >= SG_AH) continue;
-            if (block[ny][nx] || seen[ny][nx]) continue;
-            seen[ny][nx] = 1;
+            if (SG_GET(s_bfs_block, SG_IDX(nx, ny)) ||
+                SG_GET(s_bfs_seen, SG_IDX(nx, ny))) continue;
+            SG_SET(s_bfs_seen, SG_IDX(nx, ny));
             q[tail++] = (short)(ny * SG_AW + nx);
         }
     }
 
     for (k = 1; k < ns; ++k)
-        if (!seen[starts[k][1]][starts[k][0]]) return 0;
+        if (!SG_GET(s_bfs_seen, SG_IDX(starts[k][0], starts[k][1]))) return 0;
 
     /*  单门房间（特殊房）还要保证从门能走到房间中心（玩家/道具/Boss）  */
-    if (!seen[SG_CY][SG_CX]) return 0;
+    if (!SG_GET(s_bfs_seen, SG_IDX(SG_CX, SG_CY))) return 0;
     return 1;
 }
 
@@ -124,8 +139,7 @@ static void stone_grid_build(void)
     int i, j, k;
     signed char room = (signed char)game_room_id();
 
-    for (j = 0; j < SG_AH; ++j)
-        for (i = 0; i < SG_AW; ++i) s_stone_grid[j][i] = 0;
+    for (i = 0; i < SG_BITS; ++i) s_stone_grid[i] = 0;
 
     for (k = 0; k < N_STONES; ++k) {
         const stone_t *s = &g.stones[k];
@@ -135,7 +149,7 @@ static void stone_grid_build(void)
         gx = (s->x - ARENA_X0) / STONE_SIZE;
         gy = (s->y - ARENA_Y0) / STONE_SIZE;
         if (gx >= 0 && gx < SG_AW && gy >= 0 && gy < SG_AH)
-            s_stone_grid[gy][gx] = 1;
+            SG_SET(s_stone_grid, SG_IDX(gx, gy));
     }
     s_grid_room = room;
 }
@@ -246,7 +260,7 @@ int game_stone_hit_at(int x, int y)
     gx = (x - ARENA_X0) / STONE_SIZE;
     gy = (y - ARENA_Y0) / STONE_SIZE;
     stone_grid_ensure();
-    return s_stone_grid[gy][gx] != 0;
+    return SG_GET(s_stone_grid, SG_IDX(gx, gy)) != 0u;
 }
 
 /*  矩形 (x,y,w,h) 和当前房间的石头相交？—— 金币落点避让用。
@@ -274,7 +288,7 @@ int game_stone_overlap(int x, int y, int w, int h)
     stone_grid_ensure();
     for (j = j0; j <= j1; ++j)
         for (i = i0; i <= i1; ++i)
-            if (s_stone_grid[j][i]) return 1;
+            if (SG_GET(s_stone_grid, SG_IDX(i, j))) return 1;
     return 0;
 }
 
@@ -316,7 +330,7 @@ void game_stones_submit(void)
         const stone_t *s = &g.stones[i];
 
         if (!s->active || s->room != room) continue;
-        if (!game_visible(s->x, s->y, STONE_SIZE, STONE_SIZE)) continue;
+        if (!game_visible_world(s->x, s->y, STONE_SIZE, STONE_SIZE)) continue;
         rl_push(ACTOR_Z(s->y + STONE_SIZE), stone_draw_one, i);
     }
 }

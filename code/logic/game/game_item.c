@@ -34,20 +34,24 @@ static int item_index(int item)
 
 const item_def_t g_item_defs[ITEM_COUNT] = {
     /* ITEM_CHILI  */ {
-        "YOU FEEL SO HOT", ASSET_accessory_chili,
+        "YOU FEEL SO HOT", ASSET_accessory_chili, 2, 0, 0,
         { 0, 0, 0, 0, 0, 0, 0, 0, BULLET_CHILI, 0 }
     },
     /* ITEM_URANUS */ {
-        "IT FEELS LIKE IRON", ASSET_accessory_Uranus,
-        { 0, 0, 0, 0, 0, 0, 0, 0, BULLET_URANUS, 0 }
+        "IT FEELS LIKE IRON", ASSET_accessory_Uranus, 2, 0, 0,
+        { 0, 0, 0, 2, -1, 2, 0, 2, BULLET_URANUS, 0 }
     },
     /* ITEM_EYES   */ {
-        "SLOWER BUT MORER", ASSET_accessory_Inner_eyes,
-        { 0, 0, 0, 0, 0, 0, 0, 0, -1, 1 }
+        "SLOWER BUT MORER", ASSET_accessory_Inner_eyes, 2, 0, 0,
+        { 0, 0, 0, 0, -5, 0, 0, -1, -1, 2 }
     },
     /* ITEM_1UP    */ {
-        "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE,
-        { 0, 0, 1, 0, 0, 0, 0, 0, -1, 0 }
+        "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE, 2, 0, 0,
+        { 1, 0, 1, 1, 0, 0, 0, 0, -1, 0 }
+    },
+    /* ITEM_MAGICCARD */ {
+        "TURN BACK", ASSET_accessory_MagicCard_, 3, 1, ITEM_FLAG_LIFE_PLUS,
+        { 0, 0, 0, 0, -3, -3, -1, 1, -1, 0 }
     }
 };
 
@@ -56,10 +60,11 @@ int  game_item_icon(int item)          { return g_item_defs[item_index(item)].ic
 int  game_item_bullet(int item)        { return g_item_defs[item_index(item)].mod.bullet_type; }
 int  game_item_fx(int item)
 {
-    const item_mod_t *m = &g_item_defs[item_index(item)].mod;
+    const item_def_t *d = &g_item_defs[item_index(item)];
 
-    if (m->triple) return FX_TRIPLE;
-    if (m->lives > 0) return FX_LIFE;
+    if (d->flags & ITEM_FLAG_LIFE_PLUS) return FX_LIFE;
+    if (d->mod.triple) return FX_TRIPLE;
+    if (d->mod.lives > 0) return FX_LIFE;
     return FX_NONE;
 }
 
@@ -67,19 +72,25 @@ int  game_item_fx(int item)
 /*  池子里已经有几件道具（HUD 用）  */
 int game_item_count(void)
 {
-    int i, n = 0;
-
-    for (i = 0; i < ITEM_COUNT; ++i) if (g.item_mask & (1u << i)) ++n;
-    return n;
+    return g.inv_n;
 }
 
 /*  道具刷新权重：
  *    · 没拿过的权重 2；
  *    · 拿过的权重 1（降一半）；
- *    · 都没拿过 / 都拿过时仍是等概率。  */
+ *    · 再乘品质权重：普通 100 / 稀有 45 / 史诗 15 / 传说 4；
+ *    · pool=0 的道具不参与随机。  */
 static int item_weight(int item)
 {
-    return (g.item_mask & (1u << item)) ? 1 : 2;
+    static const unsigned char level_w[4] = { 100u, 45u, 15u, 4u };
+    const item_def_t *d;
+    int base;
+
+    if (item < 0 || item >= ITEM_COUNT) return 0;
+    d = &g_item_defs[item];
+    if (!d->pool) return 0;
+    base = (g.item_mask & (1u << item)) ? 1 : 2;
+    return base * (int)level_w[d->level & 3u];
 }
 
 static int item_weighted_pick(u32 r)
@@ -101,6 +112,7 @@ static int item_weighted_pick(u32 r)
 }
 
 static u32 s_item_seed;
+static u32 s_pickup_lock_until;   /* P 生成后短暂禁止拾取，先让图标露个脸 */
 
 static u32 item_rand(void)
 {
@@ -115,27 +127,131 @@ int game_item_random_type(void)
     return item_weighted_pick(item_rand());
 }
 
+/*  从 inv[] 重算类型 mask（权重/旧代码快速判断用）。  */
+static void item_rebuild_mask(void)
+{
+    int i;
+
+    g.item_mask = 0u;
+    for (i = 0; i < g.inv_n; ++i)
+        g.item_mask |= (1u << g.inv[i].type);
+}
+
+static void item_add_slot(int type)
+{
+    if (g.inv_n >= INV_MAX) return;
+    g.inv[g.inv_n].type  = (unsigned char)type;
+    g.inv[g.inv_n].level = g_item_defs[type].level;
+    g.inv[g.inv_n].flags = g_item_defs[type].flags;
+    ++g.inv_n;
+    ++g.inv_rev;
+    item_rebuild_mask();
+}
+
+/*  道具消失后，从剩余背包【整体重算】属性，而不是只减一项。
+ *  这样 bullet_type / triple 这类“覆盖型/布尔型”字段也能正确恢复；
+ *  hp / lives 是拾取时的一次性收益，不参与重算（也不可逆）。  */
+static void item_recompute_stats(void)
+{
+    int i;
+
+    g.stats.move_v8      = PLAYER_MAX_V8;
+    g.stats.fire_every   = (int)FIRE_EVERY;
+    g.stats.bullet_speed = PLAYER_BULLET_SPEED;
+    g.stats.range        = PLAYER_RANGE;
+    g.stats.damage       = 1;
+    g.bullet_type        = BULLET_A;
+    g.fire_triple        = 0;
+
+    for (i = 0; i < g.inv_n; ++i) {
+        const item_mod_t *m = &g_item_defs[g.inv[i].type].mod;
+
+        g.stats.move_v8 += m->move_v8;
+        if (g.stats.move_v8 < 8)  g.stats.move_v8 = 8;
+        if (g.stats.move_v8 > 48) g.stats.move_v8 = 48;
+
+        g.stats.fire_every += m->fire_every;
+        if (g.stats.fire_every < 1)  g.stats.fire_every = 1;
+        if (g.stats.fire_every > 60) g.stats.fire_every = 60;
+
+        g.stats.bullet_speed += m->bullet_speed;
+        if (g.stats.bullet_speed < 1)  g.stats.bullet_speed = 1;
+        if (g.stats.bullet_speed > 12) g.stats.bullet_speed = 12;
+
+        g.stats.range += m->range;
+        if (g.stats.range < 1)  g.stats.range = 1;
+        if (g.stats.range > 99) g.stats.range = 99;
+
+        g.stats.damage += m->damage;
+        if (g.stats.damage < 1) g.stats.damage = 1;
+        if (g.stats.damage > 9) g.stats.damage = 9;
+
+        if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
+        if (m->triple) g.fire_triple = 1;
+    }
+}
+
+/*  道具有效期结束/被消耗：移除实例，并按剩余背包重算属性。  */
+static void item_remove_slot(int idx)
+{
+    int i;
+
+    if (idx < 0 || idx >= g.inv_n) return;
+    for (i = idx; i + 1 < g.inv_n; ++i) g.inv[i] = g.inv[i + 1];
+    --g.inv_n;
+    ++g.inv_rev;
+    item_rebuild_mask();
+    item_recompute_stats();
+    game_item_invalidate();
+}
+
+/*  死亡判定：按拾取顺序找第一个 LIFE_PLUS。找到就消费并回退。  */
+int game_item_try_death_save(u32 now)
+{
+    int i, death_room, target, entry;
+
+    for (i = 0; i < g.inv_n; ++i) {
+        if (g.inv[i].flags & ITEM_FLAG_LIFE_PLUS) break;
+    }
+    if (i >= g.inv_n) return 0;
+
+    death_room = game_room_id();
+    target = g.last_room;
+    entry  = g.last_door;
+    if (target < 0 || target >= ROOM_COUNT || target == death_room) {
+        target = game_room_start();
+        entry  = -1;
+    }
+    if (target < 0) return 0;
+
+    /*  死亡房间下次进入重新刷怪；Boss 已死不重置。  */
+    if (!(game_room_type() == ROOM_BOSS && g.boss_hp <= 0))
+        game_room_mark_respawn(death_room);
+
+    g.held_type = g.inv[i].type;
+    g.toast_type = g.held_type;
+    g.toast_until = now + HUD_TOAST_MS;
+    /*  受伤闪红 1 s + 无敌闪烁 1.5 s 会盖住举手姿势；
+     *  把 pickup 拉长到无敌结束以后，保证玩家能看到“举起道具”。  */
+    g.pickup_until = now + RETURN_INVULN_MS + PICKUP_MS;
+    item_remove_slot(i);
+
+    game_room_request_full(target, entry);
+    return 1;
+}
+
 /*  拿到一个道具的效果结算（拾取 / 商店购买共用）。
  *  只改背包与效果，不碰道具实体、不弹 toast。  */
 void game_item_apply(int type)
 {
-    const item_mod_t *m = &g_item_defs[type].mod;
-    int i, k, dup = 0;
+    const item_def_t *d = &g_item_defs[type];
+    const item_mod_t *m = &d->mod;
+    int i;
 
     g.held_type = type;
 
-    /*  ★ 道具池：拿过的永久记下来，效果【累加】，不会因为再拿一个就丢掉。
-     *    · 换弹种类（辣椒/天王星）：弹种以后拿的为准（"后面的盖前面的"）
-     *    · 三向（内眼）：一旦拿到就常驻（fire_triple 由池子算，不是开关）
-     *    · 加命（1UP）：每拿一次 +1                                    */
-    g.item_mask |= (1u << type);
-
-    /*  按【获取先后】进队列：同一个道具只排一次，新的追加到末尾  */
-    for (k = 0; k < g.item_order_n; ++k)
-        if (g.item_order[k] == type) dup = 1;
-
-    if (!dup && g.item_order_n < ITEM_COUNT)
-        g.item_order[g.item_order_n++] = type;
+    /*  ★ 道具池：每个实例按拾取顺序进数组；效果【累加】。  */
+    item_add_slot(type);
 
     /*  ---- 属性增减（HUD 展示还没设计，这里先结算数值） ---- */
     for (i = 0; i < m->hp; ++i) game_vital_heal_one();
@@ -154,9 +270,9 @@ void game_item_apply(int type)
     if (g.stats.bullet_speed < 1)  g.stats.bullet_speed = 1;
     if (g.stats.bullet_speed > 12) g.stats.bullet_speed = 12;
 
-    g.stats.triple_speed += m->triple_speed;
-    if (g.stats.triple_speed < 1)  g.stats.triple_speed = 1;
-    if (g.stats.triple_speed > 12) g.stats.triple_speed = 12;
+    g.stats.range += m->range;
+    if (g.stats.range < 1)  g.stats.range = 1;
+    if (g.stats.range > 99) g.stats.range = 99;
 
     g.stats.damage += m->damage;
     if (g.stats.damage < 1) g.stats.damage = 1;
@@ -164,7 +280,6 @@ void game_item_apply(int type)
 
     if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
     if (m->triple) g.fire_triple = 1;
-    g.fire_triple = (g.item_mask & (1u << ITEM_EYES)) ? 1 : 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -178,9 +293,20 @@ void game_item_spawn_random(int x, int y)
     g.item.x      = x;
     g.item.y      = y;
     g.item.active = 1;
+    s_pickup_lock_until = 0u;
 
     g.old_item[0].active = 0;       /* 新道具：不要把上一件的旧位置当脏区擦 */
     g.old_item[1].active = 0;
+}
+
+/*  P 键：在玩家脚下生成一个道具；400 ms 内不拾取，避免刚生成就消失。  */
+void game_item_spawn_at_player(void)
+{
+    int x = g.x + PW / 2 - ITEM_W / 2;
+    int y = g.y + PH / 2 - ITEM_H / 2;
+
+    game_item_spawn_random(x, y);
+    s_pickup_lock_until = game_ms() + 400u;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -190,12 +316,13 @@ void game_item_try_pickup(u32 now)
     int hy = g.y + PB_OFF_Y;
 
     if (!g.item.active) return;
+    if ((int)(now - s_pickup_lock_until) < 0) return;
     /*  用【脚到眼睛】的身体矩形去碰道具，头不算  */
     if (hx < g.item.x + ITEM_W && hx + PB_W > g.item.x &&
         hy < g.item.y + ITEM_H && hy + PB_H > g.item.y) {
         g.item.active = 0;
         g.boss_drop_pending = 0;        /* Boss 掉的饰品已经捡走，重进 Boss 房不再恢复 */
-        game_item_apply(g.item.type);   /* 背包 / 弹种 / 三向 / 加命统一结算 */
+        game_item_apply(g.item.type);   /* 背包 / 弹种 / 增加弹幕 / 加命统一结算 */
         g.pickup_until = now + PICKUP_MS;
         g.toast_type = g.item.type;             /* 屏幕上方弹一行说明 */
         g.toast_until = now + HUD_TOAST_MS;
@@ -213,6 +340,7 @@ void game_item_try_pickup(u32 now)
 #define POOL_ICON      32
 #define POOL_GAP       8
 #define POOL_X         (SCR_W - POOL_ICON - 10)
+#define POOL_MAX       13                     /* 720p 右侧最多列 13 个（再多要改布局） */
 #define POOL_LABEL_Y   140                    /* "ITEM" 标签的字顶（小地图下面，再下移 64） */
 #define POOL_LABEL_W   (4 * 16)               /* 标签 4 个字 = 64 px */
 /*  ★ 标签右端和图标列右端对齐（往左延伸 64 px），否则超出屏宽会被整块丢弃
@@ -225,7 +353,7 @@ void game_item_pool_rect(int *x, int *y, int *w, int *h)
     *x = POOL_LABEL_X - 4;
     *y = POOL_LABEL_Y - 4;
     *w = (POOL_X + POOL_ICON + 4) - *x;
-    *h = POOL_Y0 - POOL_LABEL_Y + ITEM_COUNT * (POOL_ICON + POOL_GAP) + 10;
+    *h = POOL_Y0 - POOL_LABEL_Y + POOL_MAX * (POOL_ICON + POOL_GAP) + 10;
 }
 
 static int s_pool_redraw[2];
@@ -249,11 +377,25 @@ void game_item_prepare(unsigned char dirty[GRID_H][GRID_W], int buf)
     int x, y, w, h;
 
     if (buf < 0 || buf > 1) buf = 0;
-    if (s_pool_last[buf] == g.item_mask) return;
-    s_pool_last[buf] = g.item_mask;
+
+    /*  ★ 右侧道具池同样会被"按瓦片"的脏区恢复擦到：弹幕/角色/石头走到
+     *    相机窗口右缘时，它们旧位置的脏瓦片会盖住池子。池子原本只在
+     *    item_mask 变化或相机移动时重画 ⇒ 那些帧里图标会"闪掉"。
+     *    这里先查一次池子所占瓦片，脏了就强制重画（不重复标脏：
+     *    场景恢复已经在帧首做过了）。  */
+    game_item_pool_rect(&x, &y, &w, &h);
+    x += g.cam_x;
+    y += g.cam_y;
+    if (game_dirty_touches(x / TILE, y / TILE,
+                           (x + w - 1) / TILE + 1,
+                           (y + h - 1) / TILE + 1))
+        s_pool_redraw[buf] = 1;
+
+    if (s_pool_last[buf] == g.inv_rev) return;
+    s_pool_last[buf] = g.inv_rev;
 
     game_item_pool_rect(&x, &y, &w, &h);
-    game_mark_dirty(dirty, x, y, w, h);
+    game_mark_hud_dirty(dirty, x, y, w, h);
     s_pool_redraw[buf] = 1;
 }
 
@@ -265,18 +407,19 @@ void game_item_draw_pool(u32 fb, int buf, int full)
     if (!full && !s_pool_redraw[buf]) return;
     s_pool_redraw[buf] = 0;
 
+    fb = game_view_fb(fb);
     game_hud_label_at(fb, POOL_LABEL_X, POOL_LABEL_Y, "ITEM");
 
     /*  ★ 按【拾取先后】从上往下排，第 1 个拿到的在最上面；
      *    图标列右端和标签右端对齐。  */
-    for (i = 0; i < g.item_order_n; ++i) {
+    for (i = 0; i < g.inv_n && i < POOL_MAX; ++i) {
         int x = POOL_X;
         int y = POOL_Y0 + i * (POOL_ICON + POOL_GAP);
         const asset_desc_t *a;
 
-        if (!game_visible(x, y, POOL_ICON, POOL_ICON)) continue;
+        if (!game_visible_screen(x, y, POOL_ICON, POOL_ICON)) continue;
 
-        a = &g_assets[game_item_icon(g.item_order[i])];
+        a = &g_assets[game_item_icon(g.inv[i].type)];
         CI_gpu2d_combineTintRect(a->base_word, a->stride_word,
             GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN,
             0x00000000u, 130u, 3u,
@@ -295,7 +438,7 @@ void game_item_draw(u32 fb, u32 now, int buf)
     if (!g.item.active) return;
 
     /* 整块（含图标上浮余量）都在屏内才画 —— 硬件没有源裁剪。 */
-    alive = game_visible(g.item.x, g.item.y + ITEM_ICON_DY - ITEM_FLOAT_AMP - 2,
+    alive = game_visible_world(g.item.x, g.item.y + ITEM_ICON_DY - ITEM_FLOAT_AMP - 2,
                          ITEM_W, ITEM_H - ITEM_ICON_DY + ITEM_FLOAT_AMP + 2);
     if (!alive) return;
 

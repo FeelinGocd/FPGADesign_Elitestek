@@ -1,0 +1,7 @@
+id,key,enabled,desc,icon_asset,icon_file,bullet,triple,hp,lives,move_v8,fire_every,bullet_speed,range,damage,note,features,level,pool,life_plus
+0,ITEM_CHILI,1,YOU FEEL SO HOT,ASSET_accessory_chili,accessory_chili.png,CHILI,0,0,0,0,0,0,0,0,完成,"[""小概率发射火焰弹幕"", ""火焰弹幕能够阻挡3次子弹"", ""火焰弹幕能够存活2s"", ""火焰弹幕伤害=玩家伤害+道具面板伤害"", ""火焰弹幕以更低的tick造成伤害""]",2,0,0
+1,ITEM_URANUS,1,IT FEELS LIKE IRON,ASSET_accessory_Uranus,accessory_Uranus.png,URANUS,0,0,0,2,-1,2,0,2,完成,"[""冰冻弹幕"", ""被命中3次的敌人会被冰冻，命中Boss降低Boss移速"", ""被命中的所有敌人接下来发射的弹幕弹速下降"", ""Boss的弹幕弹速下降每5s触发一次"", ""被命中的所有敌人在弹幕弹速下降时覆盖一层蓝色滤镜""]",2,0,0
+2,ITEM_EYES,1,SLOWER BUT MORER,ASSET_accessory_Inner_eyes,accessory_Inner_eyes.png,-,2,0,0,0,-5,0,0,-1,完成,"[""增加2条弹道"", ""降低发射速度"", ""降低伤害""]",2,0,0
+3,ITEM_1UP,1,EXTRA LIFE,ASSET_accessory_1UP_ExtraLiFE,accessory_1UP!ExtraLiFE.png,-,0,1,1,1,0,0,0,0,完成,"[""死亡时在当前房间直接复活""]",2,0,0
+4,ITEM_MAGICCARD,1,TURN BACK,ASSET_accessory_MagicCard_,accessory_MagicCard!.png,-,0,0,0,0,-3,-3,-1,1,完成,"[""追踪弹幕"", ""淡紫色弹幕"", ""死亡后回到上一个房间剩余一颗心并举起本道具消耗，仅一次""]",3,1,1
+5,ITEM_TRIPRISM,0,SPLIT,ASSET_accessory_TriPrism,accessory_TriPrism.png,-,4,1,1,0,0,0,0,0,,"[""在玩家一定距离召唤一个三角棱镜"", ""所有玩家弹幕命中三角棱镜后沿弹幕移动方向分裂为4份彩色弹幕"", ""分裂的彩色弹幕分别加上红/黄/绿/蓝滤镜""]",3,0,0

@@ -7,14 +7,15 @@
 //    · game_blit_tile(): 按地图把一格画出来（地板/墙/门/角块/空）
 //    · game_draw_floor(): 开机整屏铺一遍（先铺黑，再铺格子，最后铺门）
 //    · game_mark_dirty() / game_restore_dirty()：脏区恢复
-//    · game_visible() : 硬件没有源裁剪 ⇒ 整块精灵必须在屏内才画
+//    · game_visible_world() : 硬件没有源裁剪 ⇒ 整块必须落在世界缓冲内，且与相机窗口相交
+//    · game_visible_screen(): HUD 用（屏幕坐标）
 //  上一级是谁  : game/game_main.c（每帧）、game/game_state.c（开机铺地）
 //  接口契约    :
 //    · 地图字符：. = 空(黑)  B = 基岩地板  W = 木墙  D = 门  C/X/Y/Z = 角块(翻转)
 //    · 门贴图 40×64（门洞 32×64，左右各宽 4 px）：竖直占 1 格宽、2 格高；
 //      旋转 90°/270° 时横过来（输出 64×40）。位置按贴图实际尺寸算，见 blit_door
 //    · 门在 1×2 格里【只写一个 'D'】，另一格是 "."（编辑器 put() 的约定）；
-//      两格都要当墙补：开着的门由第二趟 blit_door 补，锁死的门由 blit_cell 补
+//      两格都要当墙补：有邻居的门由第二趟 blit_door 补，没邻居的由 blit_cell 补
 //      —— 少补一格，墙上就会留一个 32×32 的黑洞
 //    · 门必须【最后画】，否则它盖住的那一格会被黑底刷掉
 //  为什么这么做:
@@ -27,7 +28,7 @@
 /*  地图：40 列 × 23 行（最后一格高 16 px），来自 tools/sandbox/output/room_map.txt  */
 #define ROOM_MAP_DECL
 
-static const char room_map_shared[MAP_ROWS][MAP_COLS + 1] = {
+static const char room_map_shared[MAP_MAX_ROWS][MAP_MAX_COLS + 1] = {
     "........................................",
     "........................................",
     ".......XWWWWWWWWWWWWDWWWWWWWWWWWWC......",
@@ -53,7 +54,7 @@ static const char room_map_shared[MAP_ROWS][MAP_COLS + 1] = {
     "........................................",
 };
 
-static const unsigned char room_rot_shared[MAP_ROWS][MAP_COLS] = {
+static const unsigned char room_rot_shared[MAP_MAX_ROWS][MAP_MAX_COLS] = {
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
@@ -79,10 +80,101 @@ static const unsigned char room_rot_shared[MAP_ROWS][MAP_COLS] = {
     { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
 };
 
-/*  所有房间共用同一张地图（房间布局只在 game_room.c 的网格里，不在地图里）。
- *  以后要每间房单独画，再把这里改成按 room 查两张指针表即可。  */
-static const char          (*s_map)[MAP_COLS + 1] = room_map_shared;
-static const unsigned char (*s_rot)[MAP_COLS]     = room_rot_shared;
+/*  Boss 大房间：45×35 格 = 1440×1120 px；房间主体 33×25 格 = 1056×800（横长）。
+ *  比可见窗口 1280×720 大 ⇒ 显示窗口可以在里面平移（相机）。
+ *  外墙 2 格厚；内部地板 46×24 格；四扇门在四边中央。  */
+static const char boss_map_shared[MAP_MAX_ROWS][MAP_MAX_COLS + 1] = {
+    ".............................................",
+    ".............................................",
+    ".............................................",
+    ".............................................",
+    ".............................................",
+    "......XWWWWWWWWWWWWWWWDWWWWWWWWWWWWWWWC......",
+    "......WXWWWWWWWWWWWWWW.WWWWWWWWWWWWWWCW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......D.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBD.......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWW......",
+    "......WZWWWWWWWWWWWWWWDWWWWWWWWWWWWWWYW......",
+    "......ZWWWWWWWWWWWWWWW.WWWWWWWWWWWWWWWY......",
+    ".............................................",
+    ".............................................",
+    ".............................................",
+    ".............................................",
+    "............................................."
+};
+
+/*  旋转只给墙和门用（角块靠翻转字符 X/C/Y/Z）；上 0 / 右 1 / 下 2 / 左 3。  */
+static const unsigned char boss_rot_shared[MAP_MAX_ROWS][MAP_MAX_COLS] = {
+    [ 0] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 1] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 2] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 3] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 4] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 5] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 6] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 7] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 8] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [ 9] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [10] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [11] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [12] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [13] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [14] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [15] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [16] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [17] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [18] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [19] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [20] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [21] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [22] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [23] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [24] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [25] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [26] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [27] = { [0] = 3, [1] = 3, [2] = 3, [3] = 3, [4] = 3, [5] = 3, [6] = 3, [7] = 3, [37] = 1, [38] = 1, [39] = 1, [40] = 1, [41] = 1, [42] = 1, [43] = 1, [44] = 1 },
+    [28] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 3, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [38] = 1, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [29] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [30] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [38] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [31] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [38] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [32] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [38] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [33] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [38] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+    [34] = { [0] = 2, [1] = 2, [2] = 2, [3] = 2, [4] = 2, [5] = 2, [6] = 2, [7] = 2, [8] = 2, [9] = 2, [10] = 2, [11] = 2, [12] = 2, [13] = 2, [14] = 2, [15] = 2, [16] = 2, [17] = 2, [18] = 2, [19] = 2, [20] = 2, [21] = 2, [22] = 2, [23] = 2, [24] = 2, [25] = 2, [26] = 2, [27] = 2, [28] = 2, [29] = 2, [30] = 2, [31] = 2, [32] = 2, [33] = 2, [34] = 2, [35] = 2, [36] = 2, [37] = 2, [38] = 2, [39] = 2, [40] = 2, [41] = 2, [42] = 2, [43] = 2, [44] = 2 },
+};
+
+
+
+
+
+
+
+/*  当前房间的地图（普通房 / Boss 大房间由 game_world_select 选）。  */
+static const char          (*s_map)[MAP_MAX_COLS + 1] = room_map_shared;
+static const unsigned char (*s_rot)[MAP_MAX_COLS]     = room_rot_shared;
+static int                  s_map_w = MAP_COLS;
+static int                  s_map_h = MAP_ROWS;
+static int                  s_is_boss;
+
+/*  竞技场边界（game.h 的 ARENA_* 宏取这几个变量）  */
+int g_arena_x0 = 288, g_arena_y0 = 128, g_arena_x1 = 1024, g_arena_y1 = 544;
 
 /*  4 扇门的位置在地图加载时缓存一次；恢复/标脏不再每次扫 40×23 格。  */
 #define MAX_DOORS 8
@@ -119,12 +211,28 @@ void game_world_select(int room)
     int tx, ty;
 
     (void)room;
-    s_map = room_map_shared;
-    s_rot = room_rot_shared;
+    s_is_boss = (game_room_type() == ROOM_BOSS);
+    if (s_is_boss) {
+        s_map = boss_map_shared;
+        s_rot = boss_rot_shared;
+        s_map_w = BOSS_MAP_COLS;
+        s_map_h = BOSS_MAP_ROWS;
+        /* 内部地板：cols 8..36 / rows 7..27 ⇒ x 256..1184, y 224..896（928×672） */
+        g_arena_x0 = 256;  g_arena_y0 = 224;
+        g_arena_x1 = 1184; g_arena_y1 = 896;
+    } else {
+        s_map = room_map_shared;
+        s_rot = room_rot_shared;
+        s_map_w = MAP_COLS;
+        s_map_h = MAP_ROWS;
+        /* 普通房内部：原 40×23 地图的竞技场 */
+        g_arena_x0 = 288; g_arena_y0 = 128;
+        g_arena_x1 = 1024; g_arena_y1 = 544;
+    }
 
     s_door_n = 0;
-    for (ty = 0; ty < MAP_ROWS; ++ty)
-        for (tx = 0; tx < MAP_COLS; ++tx) {
+    for (ty = 0; ty < s_map_h; ++ty)
+        for (tx = 0; tx < s_map_w; ++tx) {
             if (s_map[ty][tx] != 'D') continue;
             if (s_door_n >= MAX_DOORS) return;
             s_door_tx[s_door_n] = (unsigned char)tx;
@@ -133,8 +241,15 @@ void game_world_select(int room)
         }
 }
 
-const char          (*game_world_map(void))[MAP_COLS + 1] { return s_map; }
-const unsigned char (*game_world_rot(void))[MAP_COLS]     { return s_rot; }
+const char          (*game_world_map(void))[MAP_MAX_COLS + 1] { return s_map; }
+const unsigned char (*game_world_rot(void))[MAP_MAX_COLS]     { return s_rot; }
+int  game_world_cols(void)    { return s_map_w; }
+int  game_world_rows(void)    { return s_map_h; }
+/*  ★ 普通房保持原来的可见世界 1280×720（地图 40×23 的最后 16 px 仍按老逻辑裁掉）；
+ *    Boss 房才是完整 1440×1120 世界。  */
+int  game_world_w(void)       { return s_is_boss ? (s_map_w * TILE) : SCR_W; }
+int  game_world_h(void)       { return s_is_boss ? (s_map_h * TILE) : SCR_H; }
+int  game_world_is_boss(void) { return s_is_boss; }
 
 /*----------------------------------------------------------------------------*/
 /*  这一格是什么素材（'.' = 空，返回 -1）  */
@@ -142,7 +257,7 @@ int game_tile_asset(int tx, int ty)
 {
     char c;
 
-    if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return -1;
+    if (tx < 0 || tx >= s_map_w || ty < 0 || ty >= s_map_h) return -1;
     c = s_map[ty][tx];
 
     switch (c) {
@@ -180,7 +295,7 @@ static u32 tile_rot(int tx, int ty)
 {
     int r;
 
-    if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return 0u;
+    if (tx < 0 || tx >= s_map_w || ty < 0 || ty >= s_map_h) return 0u;
     r = (int)s_rot[ty][tx] & 3;
     r = (r == 1) ? 3 : ((r == 3) ? 1 : r);
     return rot_flag_of(r);
@@ -205,9 +320,12 @@ static u32 corner_transform(int tx, int ty)
 
 static int is_door(int tx, int ty)
 {
-    if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return 0;
+    if (tx < 0 || tx >= s_map_w || ty < 0 || ty >= s_map_h) return 0;
     if (s_map[ty][tx] != 'D') return 0;
-    return game_room_door_open(s_rot[ty][tx] & 3);   /* ★ 锁死的门不算门 */
+    /*  ★ 门【贴图】只看邻居格有没有房间，不看里面有没有怪。
+     *    有怪 / Boss 活着只影响 game_room_door_open()（能不能传送），
+     *    不能把门变成木墙 —— 否则同一间房清怪前后门贴图会跳变。  */
+    return game_room_door_exists(s_rot[ty][tx] & 3);
 }
 
 /*  这一格是不是某扇门的内半格？
@@ -221,9 +339,18 @@ static int door_inner_cell(int tx, int ty, int *dtx, int *dty)
         r = s_rot[ty - 1][tx] & 3;
         if (r == 0 || r == 2) { *dtx = tx; *dty = ty - 1; return 1; }
     }
-    if (tx > 0 && s_map[ty][tx - 1] == 'D') {          /* 门在左一列：左/右门 */
+    /*  ★ 横向门在贴图上占【D 格 + 右边一格】的墙厚，和门朝向无关：
+     *    左门时右格是门洞内半格，右门时右格是门洞外侧的墙皮。
+     *    两扇门的右格都可能是 '.'，都必须补成同走向的墙，否则右门
+     *    "没有邻居、不画门"时，右格会留下一个 32×32 的黑洞（看起来像
+     *    门/窗整体偏了一格）。  */
+    if (tx > 0 && s_map[ty][tx - 1] == 'D') {          /* D 在左一列：左门内半格 / 右门外侧墙 */
         r = s_rot[ty][tx - 1] & 3;
         if (r & 1)            { *dtx = tx - 1; *dty = ty; return 1; }
+    }
+    if (tx + 1 < s_map_w && s_map[ty][tx + 1] == 'D') { /* D 在右一列：右门内半格（本图是 B，留作兜底） */
+        r = s_rot[ty][tx + 1] & 3;
+        if (r == 1)           { *dtx = tx + 1; *dty = ty; return 1; }
     }
     return 0;
 }
@@ -240,16 +367,16 @@ static void blit_cell(u32 fb, int tx, int ty)
     int ai = game_tile_asset(tx, ty);
     int dtx, dty;
 
-    if (tx < 0 || tx >= MAP_COLS || ty < 0 || ty >= MAP_ROWS) return;
-    if ((int)y >= SCR_H) return;
+    if (tx < 0 || tx >= s_map_w || ty < 0 || ty >= s_map_h) return;
+    if ((int)y >= game_world_h()) return;
     draw_h = TILE;
-    if ((int)y + draw_h > SCR_H) draw_h = SCR_H - (int)y;
+    if ((int)y + draw_h > game_world_h()) draw_h = game_world_h() - (int)y;
     c = s_map[ty][tx];
 
     if (ai < 0) {                                    /* 空：纯黑（门的内半格除外） */
         /*  ★ 门占 1×2 格，地图只写一个 'D'，另一格是 '.'：
-         *    开着门时第二趟 blit_door 会补墙 + 画门；【锁死时没人画它】⇒
-         *    这里必须补成同走向的墙，否则锁死的门后面会是一个 32×32 的黑洞。 */
+         *    有邻居时第二趟 blit_door 会补墙 + 画门；【没邻居时没人画它】⇒
+         *    这里必须补成同走向的墙，否则门后面会是一个 32×32 的黑洞。 */
         if (door_inner_cell(tx, ty, &dtx, &dty)) {
             const asset_desc_t *wall = &g_assets[ASSET_minecraft_wood];
 
@@ -261,8 +388,8 @@ static void blit_cell(u32 fb, int tx, int ty)
         return;
     }
     if (c == 'D') {
-        if (game_room_door_open(s_rot[ty][tx] & 3)) return;   /* 开着的门：第二趟 */
-        ai = ASSET_minecraft_wood;                             /* 锁死的门：当墙画 */
+        if (game_room_door_exists(s_rot[ty][tx] & 3)) return;  /* 有邻居：第二趟画门 */
+        ai = ASSET_minecraft_wood;                             /* 没邻居：当墙画 */
         c = 'W';
     }
 
@@ -344,16 +471,17 @@ void game_draw_floor(u32 fb)
 {
     int tx, ty;
 
-    CI_gpu2d_fillRect(fb, 0u, 0u, SCR_W, SCR_H, 0x00000000u);
+    CI_gpu2d_fillRect(fb, 0u, 0u, (u32)game_world_w(), (u32)game_world_h(), 0x00000000u);
 
-    for (ty = 0; ty < MAP_ROWS; ++ty)
-        for (tx = 0; tx < MAP_COLS; ++tx)
+    for (ty = 0; ty < s_map_h; ++ty)
+        for (tx = 0; tx < s_map_w; ++tx)
             blit_cell(fb, tx, ty);
 
-    for (ty = 0; ty < MAP_ROWS; ++ty)                /* 门最后画 */
-        for (tx = 0; tx < MAP_COLS; ++tx)
+    for (ty = 0; ty < s_map_h; ++ty)                 /* 门最后画 */
+        for (tx = 0; tx < s_map_w; ++tx)
             if (is_door(tx, ty)) blit_door(fb, tx, ty);
 
+    /* HUD 固定屏幕位置：game_hud_static 内部自己加相机偏移 */
     game_hud_static(fb);
 }
 
@@ -365,12 +493,12 @@ u32 game_floor_cmd_count(void)
      *  ★ 取【下界】，绝不多算：
      *    · 地图 40×23 格；
      *    · 4 个 'D' 格：有邻居时 blit_cell 不画（0 条），没邻居时画木墙（1 条）；
-     *    · 4 个方向的门：有邻居才画 3 条（2 墙 + α 门 / 锁门深灰 FILL），没邻居 0 条；
+     *    · 4 个方向的门：有邻居才画 3 条（2 墙 + α 门），没邻居 0 条；
      *    · 两者相加 = 920 + 2×邻居数，最少 920（0 邻居），最多 928（4 邻居）；
      *    · 静态 HUD = 67 条（标签 38 + 数字 21 + COINS 8）。
      *  所以下界 = 1 + 920 + 67 = 988。实际只会 ≥ 988；少等不会黑屏，
      *  多算一条（像之前 1004）就会一直等不到而黑屏。  */
-    return 1u + (u32)(MAP_COLS * MAP_ROWS) + HUD_LABEL_CMD_COUNT;
+    return 1u + (u32)(s_map_w * s_map_h) + HUD_LABEL_CMD_COUNT;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -391,6 +519,13 @@ void game_mark_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, i
                 dirty[ty][tx] = 1u;
                 dirty_add(tx, ty);
             }
+}
+
+/*----------------------------------------------------------------------------*/
+/*  HUD 的脏区：HUD 的 (x,y) 是屏幕坐标，实际画在 fb + cam 处 ⇒ 世界坐标要加相机。 */
+void game_mark_hud_dirty(unsigned char dirty[GRID_H][GRID_W], int x, int y, int w, int h)
+{
+    game_mark_dirty(dirty, x + g.cam_x, y + g.cam_y, w, h);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -426,8 +561,9 @@ void game_restore_dirty(u32 fb, unsigned char dirty[GRID_H][GRID_W])
     int tx, ty, k;
 
     if (!s_dirty_ready || s_dirty_overflow) {
-        for (ty = 0; ty < GRID_H; ++ty)
-            for (tx = 0; tx < GRID_W; ++tx)
+        /* 普通房只扫原来的 40×23；Boss 房才扫 45×35（行为与改大世界之前一致） */
+        for (ty = 0; ty < game_world_rows(); ++ty)
+            for (tx = 0; tx < game_world_cols(); ++tx)
                 if (dirty[ty][tx]) blit_cell(fb, tx, ty);
     } else {
         for (k = 0; k < s_dirty_n; ++k) {
@@ -507,7 +643,22 @@ void game_restore_rect(u32 fb, int x, int y, int w, int h)
 }
 
 /*----------------------------------------------------------------------------*/
-int game_visible(int x, int y, int w, int h)
+/*  世界坐标的可见性（场景 / 实体 / 子弹 / 怪）
+ *    两条都要过：
+ *      ① 整块落在【世界缓冲】内 —— 硬件没有源裁剪，越界写会毁相邻内存；
+ *      ② 与【相机窗口】相交 —— 不相交就不下发命令（大房间里这条是省带宽的主力）。
+ *    普通房 cam=0、世界=1280×720，等价于改大房间之前的行为。  */
+int game_visible_world(int x, int y, int w, int h)
+{
+    if (x < 0 || y < 0) return 0;
+    if (x + w > game_world_w() || y + h > game_world_h()) return 0;
+    if (x + w <= g.cam_x || x >= g.cam_x + SCR_W) return 0;
+    if (y + h <= g.cam_y || y >= g.cam_y + SCR_H) return 0;
+    return 1;
+}
+
+/*  屏幕坐标的可见性（HUD）。HUD 画在 game_view_fb(fb) 上、坐标仍是屏幕坐标。  */
+int game_visible_screen(int x, int y, int w, int h)
 {
     return x >= 0 && y >= 0 && x + w <= SCR_W && y + h <= SCR_H;
 }

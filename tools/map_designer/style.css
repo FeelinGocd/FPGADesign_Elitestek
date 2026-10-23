@@ -312,6 +312,28 @@ textarea {
 .filebtn:hover { border-color: var(--blue); background: #29415d; }
 .filebtn input { display: none; }
 
+.layer-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.layer-row button {
+  padding: 7px 4px;
+}
+.layer-row button.on {
+  background: #18548b;
+  border-color: #347dbb;
+  box-shadow: 0 0 0 1px #59a9ff55 inset;
+}
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tile.object .code { color: var(--green); }
+#roomType { margin-bottom: 2px; }
+
 @media (max-width: 1180px) {
   .app { grid-template-columns: 236px minmax(420px, 1fr) 280px; }
 }

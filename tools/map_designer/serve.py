@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DEBUG 房间编辑器的本地服务器 + 地图校验 / C 生成 CLI。
+"""MAP DESIGNER 房间设计器的本地服务器 + 地图校验 / 数据文件生成 CLI。
 
 用法::
 
-    uv run tools/sandbox/serve.py                 # 起服务，浏览器打开提示的地址
-    uv run tools/sandbox/serve.py --open          # 起服务并自动开浏览器
-    uv run tools/sandbox/serve.py --check         # 只校验：地图 + 生成的 C 是否最新
-    uv run tools/sandbox/serve.py --emit-c        # 从 room_map.txt 重新生成 C
+    uv run tools/map_designer/serve.py                 # 起服务，浏览器打开提示的地址
+    uv run tools/map_designer/serve.py --open          # 起服务并自动开浏览器
+    uv run tools/map_designer/serve.py --check         # 只校验：地图 + JSON / C 是否最新
+    uv run tools/map_designer/serve.py --emit-json     # 从 room_map.txt 重新生成约定 JSON
+    uv run tools/map_designer/serve.py --emit-c        # 从 room_map.txt 重新生成 C（可选）
 
 服务的目录：
 
-* GET  /api/list                 output/ 里的 .txt / .c
+* GET  /api/list                 output/ 里的 .txt / .json / .c
 * GET  /api/load?name=          读一个文件（文本）
-* POST /api/save?name=          写地图 txt（先校验，原子写）
-* POST /api/validate            校验一段地图文本或 C 源码
-* POST /api/import              把 txt 或 C 解析成 map/rot JSON
-* POST /api/emit_c?name=        生成 C 数据文件到 output/，并把文本返回
+* POST /api/save?name=          写地图 txt + 约定 json（先校验，原子写）
+* POST /api/validate            校验一段地图文本 / JSON / C 源码
+* POST /api/import              把 txt / JSON / C 解析成 map/rot/objects
+* POST /api/emit_c?name=        生成 C 数据文件到 output/（可选导出，不改工程）
 * POST /api/delete?name=        删除 output/ 里的文件
 
-静态文件只放行 /tools/sandbox/ 和 /res/，不会把 .git、.venv、docs 暴露出去。
+静态文件只放行 /tools/map_designer/ 和 /res/，不会把 .git、.venv、docs 暴露出去。
 """
 
 from __future__ import annotations
@@ -46,8 +47,15 @@ ROOT = HERE.parent.parent
 OUT = HERE / "output"
 MAX_BODY = 256 * 1024
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-STATIC_PREFIXES = ("/tools/sandbox/", "/res/")
+STATIC_PREFIXES = ("/tools/map_designer/", "/res/")
 WRITE_LOCK = threading.Lock()
+
+
+class DesignerServer(ThreadingHTTPServer):
+    """Windows 上默认的 SO_REUSEADDR 会让两个进程同时绑同一端口，这里关掉。"""
+
+    allow_reuse_address = False
+    daemon_threads = True
 
 
 class ApiError(Exception):
@@ -109,7 +117,7 @@ def parse_payload(text: str, name: str = "room_map") -> Tuple[mapfmt.RoomMap, st
 # ---------------------------------------------------------------------------
 
 class Handler(SimpleHTTPRequestHandler):
-    server_version = "SandboxRoomEditor/2.0"
+    server_version = "MapDesigner/3.0"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -136,7 +144,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "files": str(OUT)})
             elif request.path == "/":
                 self.send_response(302)
-                self.send_header("Location", "/tools/sandbox/index.html")
+                self.send_header("Location", "/tools/map_designer/index.html")
                 self.end_headers()
             elif request.path in ("/favicon.ico",
                                    "/.well-known/appspecific/com.chrome.devtools.json"):
@@ -178,14 +186,14 @@ class Handler(SimpleHTTPRequestHandler):
         OUT.mkdir(parents=True, exist_ok=True)
         files: List[Dict[str, Any]] = []
         for entry in sorted(OUT.iterdir(), key=lambda item: item.name.lower()):
-            if not entry.is_file() or entry.suffix.lower() not in (".txt", ".c"):
+            if not entry.is_file() or entry.suffix.lower() not in (".txt", ".json", ".c"):
                 continue
             stat = entry.stat()
             files.append({"name": entry.name, "size": stat.st_size, "mtime": int(stat.st_mtime)})
         self.send_json(200, {"ok": True, "files": files})
 
     def api_load(self, query: Dict[str, List[str]]) -> None:
-        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt", ".c"))
+        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt", ".json", ".c"))
         path = OUT / name
         if not path.is_file():
             raise ApiError(404, "文件不存在：output/%s" % name)
@@ -197,7 +205,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def api_save(self, query: Dict[str, List[str]]) -> None:
-        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt",))
+        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt", ".json"))
         text = self.read_body()
         room, _kind = parse_payload(text, name)
         issues = mapfmt.validate(room)
@@ -205,13 +213,23 @@ class Handler(SimpleHTTPRequestHandler):
         if errors:
             raise ApiError(400, "校验没通过，没有写文件", issues)
         canonical = mapfmt.serialize_text(room)
-        write_atomic(OUT / name, canonical)
+        payload = mapfmt.serialize_json(room)
+        if name.lower().endswith(".json"):
+            text_name = name[:-5] + ".txt"
+            json_name = name
+        else:
+            text_name = name
+            json_name = name[:-4] + ".json" if name.lower().endswith(".txt") else name + ".json"
+        write_atomic(OUT / text_name, canonical)
+        write_atomic(OUT / json_name, payload)
         self.send_json(
             200,
             {
                 "ok": True,
-                "file": name,
+                "file": text_name,
+                "json_file": json_name,
                 "text": canonical,
+                "json": payload,
                 "issues": issues_json(issues),
                 "stats": mapfmt.stats(room),
             },
@@ -242,6 +260,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "format": kind,
                 "rows": ["".join(row) for row in room.rows],
                 "rot": room.rot,
+                "objects": [obj.as_dict() for obj in room.objects],
+                "room_type": room.room_type,
                 "issues": issues_json(issues),
                 "stats": mapfmt.stats(room),
             },
@@ -249,14 +269,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def api_emit_c(self, query: Dict[str, List[str]]) -> None:
         name = safe_name(query.get("name", [""])[0], "game_world_map.c", (".c",))
-        map_name = safe_name(query.get("map", [""])[0], "room_map.txt", (".txt",))
+        map_name = safe_name(query.get("map", [""])[0], "room_map.txt", (".txt", ".json"))
         text = self.read_body()
         room, _kind = parse_payload(text, map_name)
         issues = mapfmt.validate(room)
         errors = mapfmt.errors_of(issues)
         if errors:
             raise ApiError(400, "校验没通过，没有生成 C", issues)
-        c_text = mapfmt.emit_c(room, source="tools/sandbox/output/%s" % map_name)
+        c_text = mapfmt.emit_c(room, source="tools/map_designer/output/%s" % map_name)
         write_atomic(OUT / name, c_text)
         self.send_json(
             200,
@@ -270,7 +290,7 @@ class Handler(SimpleHTTPRequestHandler):
         )
 
     def api_delete(self, query: Dict[str, List[str]]) -> None:
-        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt", ".c"))
+        name = safe_name(query.get("name", [""])[0], "room_map.txt", (".txt", ".json", ".c"))
         path = OUT / name
         existed = path.is_file()
         if existed:
@@ -327,7 +347,7 @@ def load_room(path: Path) -> mapfmt.RoomMap:
     if not path.is_file():
         raise SystemExit("地图文件不存在：%s" % path)
     try:
-        return mapfmt.parse_text(read_text(path), path.stem)
+        return mapfmt.parse_any(read_text(path), path.stem)[0]
     except mapfmt.MapError as exc:
         raise SystemExit("地图格式错误：%s" % exc) from None
 
@@ -335,23 +355,34 @@ def load_room(path: Path) -> mapfmt.RoomMap:
 def cmd_check(args: argparse.Namespace) -> int:
     map_path = Path(args.map).resolve() if args.map else OUT / "room_map.txt"
     c_path = Path(args.c).resolve() if args.c else OUT / "game_world_map.c"
+    json_path = Path(args.json).resolve() if args.json else OUT / "room_map.json"
     room = load_room(map_path)
     issues = mapfmt.validate(room)
     errors = mapfmt.errors_of(issues)
     print("地图 : %s" % rel(map_path))
+    print("JSON : %s" % rel(json_path))
     print("C    : %s" % rel(c_path))
     if issues:
         print_issues(issues)
     if errors:
         print("校验失败：%d 个错误" % len(errors))
         return 1
+
+    expected_json = mapfmt.serialize_json(room)
+    if json_path.is_file():
+        if read_text(json_path) != expected_json:
+            print("JSON 过期了，和地图对不上；跑一次 --emit-json 重新生成。")
+            return 1
+    else:
+        print("提示：JSON 不存在，先跑 --emit-json 做存档")
+
     expected = mapfmt.emit_c(room, source=rel(map_path))
     if not c_path.is_file():
         print("C 文件不存在，先跑 --emit-c")
         return 1
     actual = read_text(c_path)
     if actual == expected:
-        print("OK：地图合法，C 已是最新（sha256:%s）" % mapfmt.digest_of(room)[:16])
+        print("OK：地图合法，JSON / C 已是最新（sha256:%s）" % mapfmt.digest_of(room)[:16])
         return 0
     diff = list(
         difflib.unified_diff(
@@ -389,18 +420,47 @@ def cmd_emit_c(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_emit_json(args: argparse.Namespace) -> int:
+    map_path = Path(args.map).resolve() if args.map else OUT / "room_map.txt"
+    json_path = Path(args.json).resolve() if args.json else OUT / "room_map.json"
+    room = load_room(map_path)
+    issues = mapfmt.validate(room)
+    if issues:
+        print_issues(issues)
+    errors = mapfmt.errors_of(issues)
+    if errors:
+        print("校验失败：%d 个错误，没有生成 JSON" % len(errors))
+        return 1
+    write_atomic(json_path, mapfmt.serialize_json(room))
+    print("生成 %s" % rel(json_path))
+    print("sha256:%s" % mapfmt.digest_of(room))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    try:
-        server = ThreadingHTTPServer((args.host, args.port), Handler)
-    except OSError as exc:
-        print("端口 %d 起不来：%s（换一个 --port 试试）" % (args.port, exc))
+    port = args.port
+    server = None
+    last_error: Optional[OSError] = None
+    attempts = 10 if args.port == 8766 else 1
+    for offset in range(attempts):
+        candidate = args.port + offset
+        try:
+            server = DesignerServer((args.host, candidate), Handler)
+            port = candidate
+            if candidate != args.port:
+                print("端口 %d 被占用，改用 %d" % (args.port, candidate))
+            break
+        except OSError as exc:
+            last_error = exc
+    if server is None:
+        print("端口 %d 起不来：%s（换一个 --port 试试）" % (args.port, last_error))
         return 2
-    url = "http://%s:%d/tools/sandbox/index.html" % (
+    url = "http://%s:%d/tools/map_designer/index.html" % (
         "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host,
-        args.port,
+        port,
     )
-    print("sandbox: %s" % url)
+    print("map_designer: %s" % url)
     print("输出目录: %s" % OUT)
     print("Ctrl+C 退出")
     if args.open:
@@ -416,15 +476,17 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="DEBUG 房间编辑器：本地服务 / 地图校验 / 生成 C",
+        description="地图设计器：本地服务 / 地图校验 / 生成 JSON 与可选 C",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
+    parser.add_argument("--port", type=int, default=8766, help="监听端口（默认 8766；8765 常被 item_designer 占用）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认只给本机）")
     parser.add_argument("--open", action="store_true", help="起服务后自动打开浏览器")
-    parser.add_argument("--check", action="store_true", help="只校验地图 + C 是否最新")
-    parser.add_argument("--emit-c", action="store_true", help="从地图重新生成 C 数据文件")
-    parser.add_argument("--map", default="", help="地图 txt 路径（默认 output/room_map.txt）")
+    parser.add_argument("--check", action="store_true", help="只校验地图 + JSON / C 是否最新")
+    parser.add_argument("--emit-json", action="store_true", help="从地图重新生成约定 JSON")
+    parser.add_argument("--emit-c", action="store_true", help="从地图重新生成 C 数据文件（可选导出）")
+    parser.add_argument("--map", default="", help="地图 / JSON 路径（默认 output/room_map.txt）")
+    parser.add_argument("--json", default="", help="JSON 输出路径（默认 output/room_map.json）")
     parser.add_argument("--c", default="", help="C 输出路径（默认 output/game_world_map.c）")
     return parser
 
@@ -435,6 +497,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_check(args)
     if args.emit_c:
         return cmd_emit_c(args)
+    if args.emit_json:
+        return cmd_emit_json(args)
     return cmd_serve(args)
 
 

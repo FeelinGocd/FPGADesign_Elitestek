@@ -2,7 +2,7 @@
 //  game_perf.c —— 压测脚手架（量"元素数 vs 帧率"用，正常游戏时整段被优化掉）
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · game_perf_init()      按模式预置子弹（mode 1 用第一档，2/3 用满 256 发）
+//    · game_perf_init()      按模式预置子弹（mode 1 用第一档，2/3 用满 192 发）
 //    · game_perf_frozen()    mode 1：冻结玩法，只跑绘制路径
 //    · game_perf_pinned()    mode 2/3：子弹撞墙/命中都挪回网格，保持恒定在飞数
 //    · game_perf_keep_bg()   mode 3 返回 0：故意不恢复背景（分离背景恢复的代价）
@@ -18,7 +18,7 @@
 #include "user_gpu2d.h"
 #include "bsp.h"
 
-static const int counts[PERF_LEVELS] = { 16, 32, 64, 96, 128, 192, 256 };
+static const int counts[PERF_LEVELS] = { 16, 32, 64, 96, 128, 160, 192 };
 
 static u32 t0, cmd0, frames;
 static int level;

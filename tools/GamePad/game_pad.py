@@ -13,14 +13,13 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
 按键:
     W / ↑ 上      S / ↓ 下      A / ← 左      D / → 右（可以斜着按）
     R            按一下重开一局（不用按住）
-    T            按一下切换【无敌】调试模式（不用按住）
+    P            在玩家脚下生成一个道具（当前池子只刷 MagicCard）
     /            进入"命令行"：敲完回车发给板子（回车不会当移动键）
-                 例：/debug0 回车 = 无敌；/debug1 回车 = 恢复正常
     ESC 退出（松手即停，所以也可以随时按 Ctrl+C）
 
 协议（板端 game/game_input.c）:
     两字节帧:  0xA5  +  mask
-    mask 低 4 位:  bit0 左 / bit1 右 / bit2 下 / bit3 上
+    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit6 P
     只在掩码变化时发一次；板端 500 ms 收不到就自动回落到板载按键。
 """
 import argparse
@@ -68,7 +67,7 @@ VK = {
     0x41: 0x1,   # A
     0x44: 0x2,   # D
     0x52: 0x10,  # R：按一下重开一局
-    0x54: 0x20,  # T：按一下切换"无敌"（调试）
+    0x50: 0x40,  # P：在玩家脚下生成一个道具
 }
 VK_ESC = 0x1B
 
@@ -123,7 +122,7 @@ def main():
                  % (port, e))
 
     print("已连接 %s @ %d" % (port, args.baud))
-    print("按键: W/A/S/D 或方向键移动，/ 输入命令（如 /debug0），ESC 退出。板子日志%s显示。" %
+    print("按键: W/A/S/D 或方向键移动，R 重开，P 生成道具，/ 输入命令，ESC 退出。板子日志%s显示。" %
           ("不" if args.quiet else "会"))
     sys.stdout.flush()
 
@@ -191,7 +190,7 @@ def main():
                 last_send = now
                 # 状态行（覆盖同一行，别刷屏）
                 names = []
-                if mask & 0x20: names.append("DEBUG")
+                if mask & 0x40: names.append("SPAWN")
                 if mask & 0x10: names.append("RESTART")
                 if mask & 0x8: names.append("UP")
                 if mask & 0x4: names.append("DOWN")

@@ -11,16 +11,25 @@
 //  上一级是 bufferAPBHandler
 //      它把 APB 寄存器翻译成三根有效信号: enable / mode / addr{段0,段1}
 //      本模块按 mode 决定"一行取几段":
-//          mode=0 全屏: 1 段, 段0 = 整帧,          360 拍, 行距 5760
-//          mode=1 分屏: 2 段, 段0 = 左半(加速器), 段1 = 右半(CPU), 各 180 拍, 行距 2880
+//          mode=0 全屏: 1 段, 段0 = 整帧,          241 拍, 行距 5760
+//          mode=1 分屏: 2 段, 段0 = 左半(加速器), 段1 = 右半(CPU), 各 120 拍, 行距 2880
 //      行距 = 段拍数 x 16, 不用另外给
 //
+//  ★ 全屏多读的那 1 拍是给 lineAligner 的
+//      相机平移让显示基址变成 FB + cam_y*5760 + cam_x*3，行首不一定 16B 对齐。
+//      全屏这一路固定从"向下 16B 对齐的地址"读 241 拍（3856B）：
+//          240 拍(3840B) + 最多 15B 前导偏移 → 241 拍一定够，再多也没有
+//      同时把行首偏移 line_skip = addr[3:0] 送给 lineAligner，它丢掉前 skip 个
+//      字节后还原成 240 拍/行。行距 5760 = 360*16 ⇒ 同一帧内 skip 是常数。
+//      ★ 分屏那一路不做：两段各自从不同基址起，跨段拼接的字节语义不同；
+//        它仍然按 16B 对齐地址取 120 拍/段，line_skip 恒 0。
+//
 //  一行为什么必须拆笔
-//      LINE_BEATS = 360 拍 > AXI 单笔上限 256 拍，且一笔不得跨 4KB 边界。
+//      LINE_BEATS = 241 拍 < AXI 单笔上限 256 拍，但【一笔不得跨 4KB 边界】。
 //      行首在 4KB 页内的偏移逐行漂移（5760 mod 4096 = 1664，32 行一个循环）：
-//          页内偏移    0 → 256 + 104         共 2 笔
-//          页内偏移 1664 → 152 + 208         共 2 笔
-//          页内偏移 3328 →  48 + 256 + 56    共 3 笔   ★ 不是固定 2 笔
+//          页内偏移    0 → 241               共 1 笔
+//          页内偏移 1664 → 152 + 89          共 2 笔
+//          页内偏移 3328 →  48 + 193         共 2 笔
 //      拆笔写成 burst_of() 函数: n = min(256, 到 4KB 线的拍数, 本段剩余拍数)
 //      ★ 本笔拍数在命令期间必须【稳定】(AXI 要求), 所以用 burst_len_r 锁存
 //
@@ -41,8 +50,12 @@
 //      2) 只读不写：cmd_write 恒 0（行预取只从 DDR 读）
 //      3) 单 outstanding：上一笔收完(rd_last)之后才发下一笔
 //      4) rd_ready = buffer_wr_block_ready：FIFO 满了就反压 master
-//      5) cmd_err：本行剩余拍数【直接往 buffer 写 0】补满到 LINE_BEATS, 再跳下一行
-//         ★ 块必须精确 LINE_BEATS 拍: 短一拍, 读侧像素就永久错位
+//      5) cmd_err：本行剩余拍数【直接往 buffer 写 0】补满到本行拍数(全屏 241 / 分屏 240)
+//         ★ 块必须精确: 短一拍, 读侧像素就永久错位
+//         ★ 错误正好落在行的最后一拍时没有可补的, 直接走收尾(否则 fill 计数下溢)
+//      6) line_skip：全屏时 = 段0 行首在 16B 拍内的字节偏移(0..15)，给 lineAligner；
+//         分屏恒 0。它在【行首那一拍】就被 lineAligner 采走，块内保持不变
+//         （行距 5760 是 16 的倍数，逐行 skip 相同；哪天不是，本模块逐行算也对）
 //
 //  全模块没有乘法器/除法器: 行距和字节数都是左移 4 位, 到 4KB 线是右移 4 位
 //==============================================================================
@@ -66,6 +79,9 @@ module bufferControler #(
     input  wire                         lineBuffer_mode,            // 0 = 全屏(1 段) 1 = 分屏(2 段)
     input  wire [2*AXI_ADDR_WIDTH-1:0]  lineBuffer_addr,            // {段0基址, 段1基址}
     input  wire                         lineBuffer_frame_start,     // [写域单拍]
+
+    // 行首在 16B 拍内的字节偏移（给 lineAligner；分屏恒 0）
+    output wire [3:0]                   line_skip,
 
     //------------------------------------------------------------
     // 写口（接 async_PingPongBuffer）
@@ -99,8 +115,8 @@ module bufferControler #(
 // localparam
 //==============================================================================
 localparam  BEAT_BYTES      = AXI_DATA_WIDTH/8;                     // 16
-localparam  SEG_BEATS_ALL   = LINE_BEATS;                           // 全屏: 360 拍
-localparam  SEG_BEATS_HALF  = LINE_BEATS/2;                         // 分屏: 180 拍
+localparam  SEG_BEATS_ALL   = LINE_BEATS;                           // 全屏: 241 拍
+localparam  SEG_BEATS_HALF  = LINE_BEATS/2;                         // 分屏: 120 拍
 localparam  SEG_STRIDE_ALL  = ROW_STRIDE_BYTES;                     // 物理行距
 localparam  SEG_STRIDE_HALF = ROW_STRIDE_BYTES/2;                   // 分屏段使用各自半帧行距
 localparam  BEATS_W         = 10;                                   // 拍数位宽(≤512)
@@ -137,7 +153,7 @@ reg  [2:0]                  next_state;
 
 // ---- 数据通路寄存器 ----
 reg  [LINE_WIDTH-1:0]       line_display_r;   // 即将被显示的那一行
-reg  [BEATS_W-1:0]          beat_cnt_r;       // 本行已写进 buffer 的拍数(0..359)
+reg  [BEATS_W-1:0]          beat_cnt_r;       // 本行已写进 buffer 的拍数(0..240)
 reg  [1:0]                  seg_r;            // 当前第几段
 reg  [BEATS_W-1:0]          beats_left_r;     // 本段还剩几拍(含正在收的这一拍)
 reg  [BEATS_W-1:0]          burst_len_r;      // 本笔拍数(命令期间必须稳定)
@@ -152,11 +168,17 @@ reg                         frame_start_d_r;  // [写域] 打过一拍的帧边�
 // ---- 段配置 / 递推量 ----
 wire [1:0]                  seg_num;          // 本模式下 一行几段
 wire [BEATS_W-1:0]          seg_beats;        // 每段几拍
+wire [BEATS_W-1:0]          row_beats;        // 一整行几拍(全屏 241 / 分屏 240)
 wire [AXI_ADDR_WIDTH-1:0]   seg_stride;       // 行距(字节)
 wire [1:0]                  last_seg;         // 最后一段的编号
 wire [BEATS_W-1:0]          beats_next;       // 收完这一拍后本段还剩几拍
 wire [AXI_ADDR_WIDTH-1:0]   cmd_addr_next;    // 本笔收完后 下一笔的起始地址
 wire [BEATS_W-1:0]          burst_len_next;   // 下一笔的拍数
+
+// ---- 行首字节对齐(全屏给 lineAligner 用) ----
+wire                        row_byte_align;   // 1 = 全屏: 允许行首非 16B 对齐
+wire [3:0]                  row_skip;         // 段0 行首在 16B 拍内的字节偏移
+wire [AXI_ADDR_WIDTH-1:0]   seg0_row_start;   // 段0 行首(向下 16B 对齐后的读取起点)
 
 // ---- 判断组合条件 ----
 wire                        frame_boundary;   // 本拍是"打过一拍的帧边界"
@@ -174,12 +196,27 @@ wire                        last_beat;        // 真正写进 buffer 的最后�
 //==============================================================================
 assign  seg_num         = lineBuffer_mode ? 2'd2 : 2'd1;
 assign  seg_beats       = lineBuffer_mode ? SEG_BEATS_HALF[BEATS_W-1:0] : SEG_BEATS_ALL[BEATS_W-1:0];
+assign  row_beats       = lineBuffer_mode ? (SEG_BEATS_HALF[BEATS_W-1:0] << 1)
+                                          : SEG_BEATS_ALL[BEATS_W-1:0];
 assign  seg_stride      = lineBuffer_mode ? SEG_STRIDE_HALF            : SEG_STRIDE_ALL;
 assign  last_seg        = seg_num - 2'd1;
 
 assign  beats_next      = beats_left_r - 1'b1;
 assign  cmd_addr_next   = cmd_addr_r + (burst_len_r << 4);            // 地址 += 本笔字节数
 assign  burst_len_next  = burst_of(cmd_addr_next, beats_next);        // 下一笔的拍数
+
+// ★ 全屏: 从"向下 16B 对齐"的地址起读 241 拍, 前 skip 个字节交给 lineAligner 丢掉。
+//   分屏: 两段各有自己的基址, 仍然要求 16B 对齐, skip = 0。
+assign  row_byte_align = ~lineBuffer_mode;
+assign  row_skip       = row_byte_align ? seg0_addr_r[3:0] : 4'd0;
+assign  seg0_row_start = row_byte_align ? {seg0_addr_r[AXI_ADDR_WIDTH-1:4], 4'h0}
+                                        : seg0_addr_r;
+assign  line_skip      = row_skip;
+
+// 帧边界那一拍的基址(寄存器还没更新, 直接拿 lineBuffer_addr 算)
+wire [AXI_ADDR_WIDTH-1:0]   seg0_base    = lineBuffer_addr[2*AXI_ADDR_WIDTH-1:AXI_ADDR_WIDTH];
+wire [AXI_ADDR_WIDTH-1:0]   seg0_base_al = row_byte_align ? {seg0_base[AXI_ADDR_WIDTH-1:4], 4'h0}
+                                                          : seg0_base;
 
 //==============================================================================
 // 判断组合条件（状态机与组合输出都用这些名字, 不再写长表达式）
@@ -198,7 +235,11 @@ assign  burst_done      = beat_accept && rd_last;
 assign  seg_done        = burst_done && (beats_left_r == ONE_BEAT);  // 本笔正好收完本段
 assign  line_done       = seg_done && (seg_r == last_seg);           // 本笔正好收完整行
 assign  fill_last       = fill_beat && (fill_left_r == ONE_BEAT);    // 补零补到最后一拍
-assign  last_beat       = (burst_done && ~cmd_err && line_done) || fill_last;
+// ★ 行的最后一拍: 正常取完，或者"错误正好落在最后一拍"(那时没什么可补的)
+//   不能写成 (burst_done && ~cmd_err && line_done):
+//   行首对齐后 241 拍经常正好一笔，错误就报在这笔的 rd_last 上 ——
+//   那样块尾永远不交，PingPong 两边块计数永久错开
+assign  last_beat       = (burst_done && line_done) || fill_last;
 
 //==============================================================================
 // 组合输出
@@ -237,9 +278,9 @@ always @(*) begin
         S_IDLE : if (idle_start)   next_state = S_CMD;
         S_CMD  : if (cmd_ready)    next_state = S_DATA;
         S_DATA : if (burst_done) begin
-                     if (cmd_err)          next_state = S_FILL;     // 出错: 本行补零
-                     else if (!line_done)  next_state = S_CMD;      // 还有下一笔/下一段
-                     else                  next_state = S_LAST;     // 整行取完
+                     if (line_done)        next_state = S_LAST;     // 整行取完(含"错误在最后一拍")
+                     else if (cmd_err)     next_state = S_FILL;     // 出错: 本行补零
+                     else                  next_state = S_CMD;      // 还有下一笔/下一段
                  end
         S_FILL : if (fill_last)    next_state = S_LAST;             // 补到本行最后一拍
         S_LAST :                   next_state = S_IDLE;
@@ -279,11 +320,11 @@ always @(posedge clk or negedge rst_n) begin
         // ---- 帧边界: 行号清 0 + 段地址回基址 + 给取数许可(只在空闲时采纳) ----
         if (frame_boundary) begin
             line_display_r  <= {LINE_WIDTH{1'b0}};
-            seg0_addr_r     <= lineBuffer_addr[2*AXI_ADDR_WIDTH-1:AXI_ADDR_WIDTH];
+            seg0_addr_r     <= seg0_base;
             seg1_addr_r     <= lineBuffer_addr[AXI_ADDR_WIDTH-1:0];
-            cmd_addr_r      <= lineBuffer_addr[2*AXI_ADDR_WIDTH-1:AXI_ADDR_WIDTH];
+            cmd_addr_r      <= seg0_base_al;
             beats_left_r    <= seg_beats;
-            burst_len_r     <= burst_of(lineBuffer_addr[2*AXI_ADDR_WIDTH-1:AXI_ADDR_WIDTH], seg_beats);
+            burst_len_r     <= burst_of(seg0_base_al, seg_beats);
             seg_r           <= 2'd0;
             beat_cnt_r      <= {BEATS_W{1'b0}};
             wait_frame_r    <= 1'b0;
@@ -296,8 +337,8 @@ always @(posedge clk or negedge rst_n) begin
                          seg_r         <= 2'd0;
                          beats_left_r  <= seg_beats;
                          beat_cnt_r    <= {BEATS_W{1'b0}};
-                         cmd_addr_r    <= seg0_addr_r;
-                         burst_len_r   <= burst_of(seg0_addr_r, seg_beats);
+                         cmd_addr_r    <= seg0_row_start;
+                         burst_len_r   <= burst_of(seg0_row_start, seg_beats);
                      end
 
             S_CMD  : ;
@@ -308,9 +349,10 @@ always @(posedge clk or negedge rst_n) begin
                          beats_left_r <= beats_next;
 
                          if (burst_done) begin
-                             if (cmd_err) begin
-                                 // 本行还差几拍(这一拍已经写进去了)
-                                 fill_left_r <= LINE_BEATS[BEATS_W-1:0] - (beat_cnt_r + 1'b1);
+                             if (cmd_err && !line_done) begin
+                                 // 本行还差几拍(这一拍已经写进去了) —— 只在还没到行尾时补
+                                 // ★ 按【整行】拍数补: 全屏 241 / 分屏 240(两段之和)
+                                 fill_left_r <= row_beats - (beat_cnt_r + 1'b1);
                              end
                              else if (!line_done) begin
                                  if (seg_done) begin

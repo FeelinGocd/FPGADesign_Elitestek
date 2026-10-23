@@ -109,12 +109,19 @@ int game_vital_hit(u32 now)
     int i;
 
     if (g.phase == PHASE_GAMEOVER) return 0;     /* 结束画面里不再扣血 */
-    if (game_debug_invuln)      return 0;       /* 串口 debug0 / T 键：不掉血 */
     if (game_vital_invuln(now)) return 0;
     if (s_dead_until != 0u)     return 0;
     if (s_hp <= 0)              return 0;
 
     --s_hp;
+
+    /*  ★ TURN BACK：死亡判定处先查道具池里的 LIFE_PLUS。
+     *    找到就取消这次死亡、不扣命；下一帧由 game_room_commit 回上一房间。 */
+    if (s_hp == 0 && game_item_try_death_save(now)) {
+        s_hp = 1;
+        s_invuln_until = now + RETURN_INVULN_MS;
+        return 3;
+    }
 
     if (s_hp > 0) {
         s_invuln_until = now + HURT_INVULN_MS;
@@ -194,6 +201,7 @@ void game_vital_draw(u32 fb, u32 now, int full)
     const asset_desc_t *minus = &g_assets[ASSET_SpecialEffect_subtract];
     int extra = s_lives - 1;
     int i, x;
+    u32 fb_hud = game_view_fb(fb);      /* HUD 固定屏幕位置 */
 
     (void)now;
 
@@ -211,22 +219,22 @@ void game_vital_draw(u32 fb, u32 now, int full)
 
         for (i = 0; i < HP_MAX; ++i) {
             x = HEART_X + i * (HEART_W + HEART_GAP);
-            if (!game_visible(x, HEART_Y, HEART_W, HEART_W)) continue;
+            if (!game_visible_screen(x, HEART_Y, HEART_W, HEART_W)) continue;
 
             if (i < s_hp)
-                CI_gpu2d_spriteFlipCK(heart->base_word, heart->stride_word, fb,
+                CI_gpu2d_spriteFlipCK(heart->base_word, heart->stride_word, fb_hud,
                                       (u32)x, (u32)HEART_Y, HEART_W, HEART_W, 0u);
             else
                 CI_gpu2d_combineTintRect(heart->base_word, heart->stride_word,
                     GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN,
                     0x00000000u, (u32)k, 3u,
-                    fb, (u32)x, (u32)HEART_Y, HEART_W, HEART_W);
+                    fb_hud, (u32)x, (u32)HEART_Y, HEART_W, HEART_W);
         }
 
         if (extra > 0) {
             x = HEART_X + HP_MAX * (HEART_W + HEART_GAP) + 8;
-            game_hud_char_at(fb, x, HEART_Y, ASSET_English_X);
-            game_hud_number_at(fb, x + 16, HEART_Y, extra, 1);
+            game_hud_char_at(fb_hud, x, HEART_Y, ASSET_English_X);
+            game_hud_number_at(fb_hud, x + 16, HEART_Y, extra, 1);
         }
     }
 
@@ -235,11 +243,11 @@ void game_vital_draw(u32 fb, u32 now, int full)
     for (i = 0; i < FX_HEARTS; ++i) {
         if (!s_fx[i].active || g.phase == PHASE_GAMEOVER) continue;
 
-        if (game_visible(s_fx[i].x, s_fx[i].y, HEART_W, HEART_W))
+        if (game_visible_world(s_fx[i].x, s_fx[i].y, HEART_W, HEART_W))
             CI_gpu2d_spriteFlipCK(heart->base_word, heart->stride_word, fb,
                                   (u32)s_fx[i].x, (u32)s_fx[i].y, HEART_W, HEART_W, 0u);
 
-        if (game_visible(s_fx[i].x + HEART_W, s_fx[i].y + 6, HEART_W, HEART_W))
+        if (game_visible_world(s_fx[i].x + HEART_W, s_fx[i].y + 6, HEART_W, HEART_W))
             CI_gpu2d_spriteAlphaRect(minus->base_word, minus->stride_word, fb,
                                      (u32)(s_fx[i].x + HEART_W), (u32)(s_fx[i].y + 6),
                                      HEART_W, HEART_W, 0u);

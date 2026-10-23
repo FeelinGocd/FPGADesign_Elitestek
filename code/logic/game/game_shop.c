@@ -104,7 +104,7 @@ static void shop_price(u32 fb, int x, int y, int value, int digits)
 
         for (j = 0; j < i; ++j) div *= 10;
         a = &g_assets[s_num16x8[(value / div) % 10]];
-        if (game_visible(x, y, (int)a->width, (int)a->height)) {
+        if (game_visible_world(x, y, (int)a->width, (int)a->height)) {
             CI_gpu2d_spriteFlipCK(a->base_word, a->stride_word, fb,
                                   (u32)x, (u32)y, a->width, a->height, 0u);
         }
@@ -206,7 +206,7 @@ static void shop_draw_one(u32 fb, u32 now, int buf, int arg)
 
         if (good->kind == SHOP_KIND_HEART) {
             a = &g_assets[ASSET_SpecialEffect_heart];
-            if (!game_visible(good->x, good->y, SHOP_HEART_W, SHOP_HEART_H)) continue;
+            if (!game_visible_world(good->x, good->y, SHOP_HEART_W, SHOP_HEART_H)) continue;
             CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
                                      (u32)good->x, (u32)good->y,
                                      SHOP_HEART_W, SHOP_HEART_H, 0u);
@@ -214,7 +214,7 @@ static void shop_draw_one(u32 fb, u32 now, int buf, int arg)
                        good->y + SHOP_HEART_H + SHOP_PRICE_GAP, 5, 1);
         } else {
             a = &g_assets[game_item_icon(good->type)];
-            if (!game_visible(good->x, good->y, SHOP_ITEM_W, SHOP_ITEM_H)) continue;
+            if (!game_visible_world(good->x, good->y, SHOP_ITEM_W, SHOP_ITEM_H)) continue;
             CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
                                      (u32)good->x, (u32)good->y,
                                      SHOP_ITEM_W, SHOP_ITEM_H, 0u);

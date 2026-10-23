@@ -166,7 +166,7 @@ void game_coins_submit(void)
         const coin_t *c = &g.coin_items[i];
 
         if (!c->active || c->room != room) continue;
-        if (!game_visible(c->x, c->y, COIN_W, COIN_H)) continue;
+        if (!game_visible_world(c->x, c->y, COIN_W, COIN_H)) continue;
         rl_push(ACTOR_Z(c->y + COIN_H), coin_draw_one, i);
     }
 }

@@ -127,7 +127,7 @@ void game_web_submit(void)
         const web_t *w = &g.webs[i];
 
         if (!w->active || w->room != room) continue;
-        if (!game_visible(w->x, w->y, WEB_SIZE, WEB_SIZE)) continue;
+        if (!game_visible_world(w->x, w->y, WEB_SIZE, WEB_SIZE)) continue;
         rl_push(Z_SCENE + 2, web_draw_one, i);
     }
 }

@@ -8,7 +8,7 @@
 //    · game_bullets_submit()   : 把每颗弹登记进渲染队列（z = 底边 y，和角色/Boss 同一把尺子）
 //  上一级是谁  : game/game_main.c（每帧）、game_player.c / game_boss.c（生成）
 //  接口契约    :
-//    · 固定 256 槽的池子，不开动态内存；其中 32 槽永远留给玩家（PLAYER_RESERVE）
+//    · 固定 192 槽的池子，不开动态内存；其中 32 槽永远留给玩家（PLAYER_RESERVE）
 //    · ★ 判定只用【子弹中心点】× 【脚到眼睛的身体矩形】，不用整张贴图包围盒
 //    · 素材只有"朝右"一套，四个朝向靠 镜像 / ROT90 / ROT90+MY 拼出来
 //  为什么这么做:
@@ -19,13 +19,15 @@
 #include "game.h"
 #include "CI_gpu2d.h"
 
-/*  池子管理：不扫 256 槽。
+/*  池子管理：不扫 192 槽。
  *    · s_alive / s_enemy_alive 是权威计数，生成/释放时维护；
  *    · s_free 是空闲槽栈，生成 O(1)，释放时压回去。  */
 static int s_alive;
 static int s_enemy_alive;
 static int s_free_n;
 static unsigned char s_free[N_BULLETS];
+
+static int magic_owned(void);
 
 static int bullet_alloc(void)
 {
@@ -75,6 +77,142 @@ static u32 bullet_flip(const bullet_t *b, int asset)
 }
 
 /*----------------------------------------------------------------------------*/
+/*  MagicCard：所有玩家弹幕淡紫 + 追踪最近的小怪/Boss；追踪距离由射程存活时间决定。  */
+static int magic_owned(void)
+{
+    return (g.item_mask & (1u << ITEM_MAGICCARD)) != 0u;
+}
+
+static int int_sqrt(int v)
+{
+    int r = 0, bit = 1 << 30;              /* 4^15，覆盖 int 范围 */
+
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return r;
+}
+
+static int bullet_find_target(const bullet_t *b, int *tx, int *ty, int *kind, int *idx)
+{
+    int i, best = 0x7FFFFFFF;
+    int bx = b->x + BW / 2;
+    int by = b->y + BH / 2;
+    int found = 0;
+
+    for (i = 0; i < N_MOBS; ++i) {
+        const mob_t *m = &g.mobs[i];
+        int dx, dy, d2;
+
+        if (!m->active) continue;
+        dx = (m->x + 16) - bx;
+        dy = (m->y + 16) - by;
+        d2 = dx * dx + dy * dy;
+        if (d2 < best) {
+            best = d2;
+            *tx = m->x + 16;
+            *ty = m->y + 16;
+            *kind = 1;
+            *idx = i;
+            found = 1;
+        }
+    }
+
+    if (g.phase == PHASE_FIGHT && g.boss_hp > 0) {
+        int dx = (g.boss_x + BOSS_W / 2) - bx;
+        int dy = (g.boss_y + BOSS_H / 2) - by;
+        int d2 = dx * dx + dy * dy;
+
+        if (d2 < best) {
+            *tx = g.boss_x + BOSS_W / 2;
+            *ty = g.boss_y + BOSS_H / 2;
+            *kind = 2;
+            *idx = 0;
+            found = 1;
+        }
+    }
+    return found;
+}
+
+/*  生成时锁定一次目标，飞行中不再换目标；目标死了就直接飞直线。  */
+static void bullet_lock_target(bullet_t *b)
+{
+    int tx, ty, kind = 0, idx = 0;
+
+    if (b->enemy || !magic_owned()) return;
+    if (bullet_find_target(b, &tx, &ty, &kind, &idx)) {
+        b->home_kind = (signed char)kind;
+        b->home_idx = (signed char)idx;
+    }
+}
+
+static void bullet_magic_homing(bullet_t *b)
+{
+    int tx, ty, dx, dy, d2, dist, sp8, ax, ay;
+    int want_vx, want_vy, old_vx, old_vy, nd;
+
+    if (b->home_kind == 1) {
+        const mob_t *m;
+
+        if (b->home_idx < 0 || b->home_idx >= N_MOBS) return;
+        m = &g.mobs[b->home_idx];
+        if (!m->active) return;
+        tx = m->x + 16;
+        ty = m->y + 16;
+    } else if (b->home_kind == 2) {
+        if (g.phase != PHASE_FIGHT || g.boss_hp <= 0) return;
+        tx = g.boss_x + BOSS_W / 2;
+        ty = g.boss_y + BOSS_H / 2;
+    } else {
+        return;
+    }
+
+    dx = tx - (b->x + BW / 2);
+    dy = ty - (b->y + BH / 2);
+    d2 = dx * dx + dy * dy;
+    if (d2 <= 36) return;                   /* 已经很近：不拐，免得过冲后掉头 */
+
+    /* 目标在身后就不追：避免弹幕“往反方向拐”。 */
+    if (b->vx8 * dx + b->vy8 * dy <= 0) return;
+
+    dist = int_sqrt(d2);
+    if (dist < 1) dist = 1;
+
+    ax = b->vx8 < 0 ? -b->vx8 : b->vx8;
+    ay = b->vy8 < 0 ? -b->vy8 : b->vy8;
+    sp8 = ax > ay ? ax : ay;
+    if (sp8 == 0) sp8 = 8 * 4;
+
+    /* 目标方向；每帧只把速度向它插值 1/4，弹道是弧线，不是瞬间拐弯。 */
+    want_vx = (dx * sp8) / dist;
+    want_vy = (dy * sp8) / dist;
+    old_vx = b->vx8;
+    old_vy = b->vy8;
+    b->vx8 += (want_vx - b->vx8) / 4;
+    b->vy8 += (want_vy - b->vy8) / 4;
+    if (want_vx != old_vx && b->vx8 == old_vx) b->vx8 += (want_vx > old_vx) ? 1 : -1;
+    if (want_vy != old_vy && b->vy8 == old_vy) b->vy8 += (want_vy > old_vy) ? 1 : -1;
+
+    /* 插值后把速度长度拉回原速度，避免越转越慢。 */
+    nd = int_sqrt(b->vx8 * b->vx8 + b->vy8 * b->vy8);
+    if (nd > 0) {
+        b->vx8 = (b->vx8 * sp8) / nd;
+        b->vy8 = (b->vy8 * sp8) / nd;
+    }
+
+    b->vx = b->vx8 / 8;
+    b->vy = b->vy8 / 8;
+    b->use8 = 1;
+}
+
+/*----------------------------------------------------------------------------*/
 /*  一个点是否落在矩形里（子弹判定统一走这里）  */
 static int pt_in(int px, int py, int x, int y, int w, int h)
 {
@@ -108,14 +246,27 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
     b->base_x = x;
     b->type = type;
     b->dist = 0;
-    /*  寿命：自机弹按【距离】（射程），敌方弹按【时间】（帧数）。
-     *  两种都给上了，谁先到谁先消失。  */
-    b->range = enemy ? 0 : PLAYER_BULLET_RANGE;
-    b->life  = enemy ? BOSS_BULLET_LIFE : 0;
+    /*  寿命：
+     *    · 普通自机弹：距离 = range × 32 px；
+     *    · 追踪自机弹（MagicCard）：时间 = range × 0.8 s = range × 48 帧；
+     *    · 敌方弹仍按固定帧数。  */
+    if (enemy) {
+        b->range = 0;
+        b->life  = BOSS_BULLET_LIFE;
+    } else if (magic_owned()) {
+        b->range = 0;
+        b->life  = (unsigned short)(g.stats.range * RANGE_FRAMES_PER_UNIT);
+    } else {
+        b->range = (unsigned short)(g.stats.range * RANGE_PX_PER_UNIT);
+        b->life  = 0;
+    }
     b->enemy = enemy;
+    b->home_kind = 0;
+    b->home_idx = 0;
     b->use8 = 0;
     b->vx8 = 0; b->vy8 = 0; b->rx = 0; b->ry = 0;
     b->active = 1;
+    bullet_lock_target(b);
     ++s_alive;
     if (enemy) ++s_enemy_alive;
     return i;
@@ -157,8 +308,18 @@ static void bullet_recycle(bullet_t *b, int i)
     b->age = 0;
     b->base_x = b->x;
     b->dist = 0;
-    b->range = b->enemy ? 0 : PLAYER_BULLET_RANGE;
-    b->life = b->enemy ? BOSS_BULLET_LIFE : 0;
+    if (b->enemy) {
+        b->range = 0;
+        b->life = BOSS_BULLET_LIFE;
+    } else if (magic_owned()) {
+        b->range = 0;
+        b->life = (unsigned short)(g.stats.range * RANGE_FRAMES_PER_UNIT);
+    } else {
+        b->range = (unsigned short)(g.stats.range * RANGE_PX_PER_UNIT);
+        b->life = 0;
+    }
+    b->home_kind = 0;
+    b->home_idx = 0;
     b->use8 = 0;
     b->vx8 = 0;
     b->vy8 = 0;
@@ -254,6 +415,8 @@ void game_bullets_step(u32 now)
         /* 追踪弹有寿命：玩家一直躲的话它会在天上待到池子满 */
         if (b->mode == MOTION_HOME && b->age > 600) { bullet_release(i); continue; }
 
+        if (!b->enemy && magic_owned()) bullet_magic_homing(b);
+
         bullet_move(b);
 
         /*  ★ 寿命（射程 / 存活帧）：
@@ -300,7 +463,8 @@ void game_bullets_step(u32 now)
             }
         }
 
-        if (b->x < 0 || b->x + BW > SCR_W || b->y < 0 || b->y + BH > SCR_H) {
+        if (b->x < 0 || b->x + BW > game_world_w() ||
+            b->y < 0 || b->y + BH > game_world_h()) {
             if (game_perf_pinned()) bullet_recycle(b, i);
             else bullet_release(i);
         }
@@ -342,6 +506,16 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
             170u,          /* 浓度 170/255：保留 base 的明暗层次，不会糊成一片纯红 */
             1u,            /* 插值染色 */
             bullet_flip(b, ai));
+    } else if (magic_owned()) {
+        /*  MagicCard：所有玩家弹幕统一淡紫色。  */
+        CI_gpu2d_spriteAlphaTintRect(
+            g_assets[ai].base_word,
+            g_assets[ai].stride_word,
+            fb, (u32)b->x, (u32)b->y, BW, BH,
+            0x00A050D0u,   /* 更深的紫 */
+            160u,
+            1u,
+            bullet_flip(b, ai));
     } else {
         CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
             fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
@@ -360,7 +534,7 @@ void game_bullets_submit(void)
         const bullet_t *b = &g.bullets[i];
 
         if (!b->active) continue;
-        if (!game_visible(b->x, b->y, BW, BH)) continue;   /* 屏外不占队列 */
+        if (!game_visible_world(b->x, b->y, BW, BH)) continue;   /* 屏外不占队列 */
 
         rl_push(ACTOR_Z(b->y + BH), bullet_draw_one, i);
     }
@@ -413,8 +587,10 @@ void game_bullets_perf_fill(int count)
         b->base_x = b->x;
         b->type = BULLET_URANUS;
         b->enemy = (i & 1) ? 1 : 0;
+        b->home_kind = 0;
+        b->home_idx = 0;
         b->dist = 0;
-        b->range = b->enemy ? 0 : PLAYER_BULLET_RANGE;
+        b->range = b->enemy ? 0 : (unsigned short)(g.stats.range * RANGE_PX_PER_UNIT);
         b->life = b->enemy ? BOSS_BULLET_LIFE : 0;
         b->use8 = 0;
         b->vx8 = 0;

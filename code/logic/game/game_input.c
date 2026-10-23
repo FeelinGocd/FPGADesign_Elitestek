@@ -24,15 +24,14 @@
 /*  ---- 串口【文本命令】----
  *  和"虚拟手柄"的二进制帧共存：帧头 0xA5 不是可打印字符，所以
  *  可打印 ASCII 一律当命令收集，遇到回车执行。
- *      T      → 切换无敌（无限血量，不掉血；打开时补满心）
- *      debug0 → 无敌（不掉血）
- *      debug1 → 恢复正常（会被打）
+ *      P      → 在玩家脚下生成一个道具（等同按 P）
  */
 #define CMD_MAX 16
 static char s_cmd[CMD_MAX];
 static int  s_cmd_n;
 
-int game_debug_invuln = 0;
+/*  P 键生成道具请求  */
+static int s_spawn_req;
 
 static int cmd_is(const char *a, const char *b)
 {
@@ -45,20 +44,11 @@ static void cmd_exec(void)
     s_cmd[s_cmd_n] = 0;
     s_cmd_n = 0;
 
-    if (cmd_is(s_cmd, "debug0")) {
-        game_debug_invuln = 1;
-        game_vital_refill();                /* 打开时顺手补满心，直观看到"无限血" */
-        bsp_printf("DEBUG: invincible ON (debug0)\r\n");
-    } else if (cmd_is(s_cmd, "debug1")) {
-        game_debug_invuln = 0;
-        bsp_printf("DEBUG: invincible OFF (debug1)\r\n");
-    } else if (cmd_is(s_cmd, "T") || cmd_is(s_cmd, "t")) {
-        game_debug_invuln = !game_debug_invuln;
-        if (game_debug_invuln) game_vital_refill();
-        bsp_printf("DEBUG: invincible %s (T)\r\n",
-                   game_debug_invuln ? "ON" : "OFF");
+    if (cmd_is(s_cmd, "P") || cmd_is(s_cmd, "p")) {
+        s_spawn_req = 1;
+        bsp_printf("DEBUG: spawn queued\r\n");
     } else if (s_cmd[0] != 0) {
-        bsp_printf("DEBUG: unknown cmd '%s' (T / debug0 / debug1)\r\n", s_cmd);
+        bsp_printf("DEBUG: unknown cmd '%s' (P)\r\n", s_cmd);
     }
 }
 
@@ -66,16 +56,15 @@ static int s_want_mask;         /* 已经看到帧头，等 mask */
 static u32 s_keys;              /* 最近一次收到的掩码 */
 static u32 s_until;             /* 这个掩码的有效期（毫秒时间戳） */
 static int s_restart_req;       /* R 键锁存：一次按下的"按下+松开"可能在同一帧里被吃掉 */
-static int s_debug_req;         /* T 键锁存（切换无敌） */
-static u32 s_prev_mask;         /* 上一帧的掩码：用来做 T 的上升沿 */
+static u32 s_prev_mask;         /* 上一帧的掩码：用来做 P 的上升沿 */
 
 /*----------------------------------------------------------------------------*/
-/*  取一次"按了 T"：取完就清 —— 主循环里切一次无敌  */
-int game_take_debug_toggle(void)
+/*  取一次"按了 P"：取完就清 —— 主循环里在脚下生成一个道具  */
+int game_take_spawn_item(void)
 {
-    int r = s_debug_req;
+    int r = s_spawn_req;
 
-    s_debug_req = 0;
+    s_spawn_req = 0;
     return r;
 }
 
@@ -93,14 +82,14 @@ u32 game_keys_read(void)
          *    否则说明是文本命令 —— 不能因为上一条帧没配齐就把文本吃掉。  */
         if (s_want_mask && c < 0x20) {
             s_want_mask = 0;
-            s_keys = (u32)c & 0x3Fu;        /* bit0..3 方向 / bit4 R / bit5 T */
+            s_keys = (u32)c & 0x7Fu;        /* bit0..3 方向 / bit4 R / bit6 P */
             /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
                照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
             if (s_keys & KEY_RESTART) s_restart_req = 1;
 
-            /*  ★ T 用【上升沿】：一直按住不会连切，松开再按才切下一次  */
-            if ((s_keys & KEY_DEBUG) && !(s_prev_mask & KEY_DEBUG))
-                s_debug_req = 1;
+            /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
+            if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
+                s_spawn_req = 1;
             s_prev_mask = s_keys;
 
             s_until = game_ms() + PAD_TIMEOUT;

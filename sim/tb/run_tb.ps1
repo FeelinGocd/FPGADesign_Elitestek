@@ -32,7 +32,7 @@ $F = @(
   "$P\GPU_2D\process\colorKey.v", "$P\GPU_2D\process\alphaBlending.v",
   "$P\GPU_2D\process\imageCombine.v",
   "$P\GPU_2D\cmd\CmdExec.v", "$P\GPU_2D\cmd\CmdChannel.v", "$P\GPU_2D\cmd\CmdBuffer.v", "$P\GPU_2D\cmd\CIUnpack.v",
-  "$P\APB0\GPU_2D\APB0_GPU_2D.v",  "$P\GPU_2D\lineBuffer\lineBuffer.v", "$P\GPU_2D\lineBuffer\bufferControler.v", "$P\GPU_2D\lineBuffer\bufferUnpacker.v",
+  "$P\APB0\GPU_2D\APB0_GPU_2D.v",  "$P\GPU_2D\lineBuffer\lineBuffer.v", "$P\GPU_2D\lineBuffer\bufferControler.v", "$P\GPU_2D\lineBuffer\lineAligner.v", "$P\GPU_2D\lineBuffer\bufferUnpacker.v",
   "$P\GPU_2D\lineBuffer\HDMI\HDMI_Top.v", "$P\GPU_2D\lineBuffer\HDMI\asyn_rst_syn.v",
   "$P\GPU_2D\lineBuffer\HDMI\TMDS\dvi_encoder_Top.v", "$P\GPU_2D\lineBuffer\HDMI\TMDS\tmds_encoder.v",
   "$P\GPU_2D\lineBuffer\HDMI\Pixel_Timing\pixel_timing.v",

@@ -10,7 +10,9 @@
 //      1) 两个子块的 ID 各自答对: 0x2000 = "GP2D" / 0x2040 = "LB01"
 //      2) 子块内的洞 (0x2020 / 0x2070) 报 PSLVERROR, 且 PREADY 恒 1
 //      3) 高位非零的地址 (0x2080 / 0x2240 / 0x20C0) 报错 ——【不许】别名回子块开头
-//      4) 显示子块 RW: 基址可写可读回; 低位不对齐的写被丢掉(读回还是旧值)
+//      4) 显示子块 RW: 基址可写可读回;
+//         分屏两半低位不对齐的写被丢掉(读回还是旧值);
+//         ★ 全屏 C/D 例外: 不对齐也收下(相机平移的 skip 就藏在低 4 位)
 //      5) 观测子块只读: 写进去被忽略, 读回的是外部送进来的值
 //      6) DONE_ACC: acc_frame_done 单拍置位; DONE_CPU: 软件 W1S; done_clr 清位
 //      7) 切模式(SPLIT 0<->1)那一拍把两个 DONE 丢掉
@@ -178,12 +180,14 @@ initial begin
     apb_write(12'h048, 32'h0A00_0000);
     apb_write(12'h04C, 32'h0B00_0000);
     apb_write(12'h050, 32'h0C00_0000);
-    apb_write(12'h054, 32'h0D00_0000);
-    apb_write(12'h058, 32'h0E00_0000);
+    apb_write(12'h054, 32'h0D00_0A05);  // 全屏 C: 非 16B 对齐必须收下(相机平移)
+    apb_write(12'h058, 32'h0E00_00CF);  // 全屏 D: 同上, skip=15
     apb_read (12'h048);                 check("0x2048 读回    ", rd, 32'h0A00_0000);
+    apb_read (12'h054);                 check("0x2054 不对齐收", rd, 32'h0D00_0A05);
+    apb_read (12'h058);                 check("0x2058 不对齐收", rd, 32'h0E00_00CF);
     check("framea 基址打包 ", framea_base_addr, {32'h1234_5000, 32'h0A00_0000});
     check("frameb 基址打包 ", frameb_base_addr, {32'h0B00_0000, 32'h0C00_0000});
-    check("全屏 基址打包   ", frame_full_base_addr, {32'h0D00_0000, 32'h0E00_0000});
+    check("全屏 基址打包   ", frame_full_base_addr, {32'h0D00_0A05, 32'h0E00_00CF});
 
     // ---- 5) STATUS: ENABLE / SPLIT ----
     apb_write(12'h05C, 32'h3);

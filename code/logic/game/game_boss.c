@@ -45,8 +45,16 @@ static int eff_rain_drop(void)
 static void boss_motion_step(u32 now)
 {
     const boss_motion_t *m = &g_boss_def.motion;
-    int cx = (SCR_W - g_boss_def.w) / 2;
-    int cy = (SCR_H - g_boss_def.h) / 2;
+    int cx, cy;
+
+    if (game_world_is_boss()) {
+        cx = (ARENA_X0 + ARENA_X1) / 2 - g_boss_def.w / 2;
+        cy = (ARENA_Y0 + ARENA_Y1) / 2 - g_boss_def.h / 2;
+    } else {
+        /* 普通房保持原来的"屏幕正中"行为 */
+        cx = (SCR_W - g_boss_def.w) / 2;
+        cy = (SCR_H - g_boss_def.h) / 2;
+    }
     int off;
 
     if (m->kind == BOSS_STILL) { g.boss_x = cx; g.boss_y = cy; return; }
@@ -78,13 +86,18 @@ static void rain_wave(void)
         rain_seed ^= rain_seed >> 17;
         rain_seed ^= rain_seed << 5;
 
-        if (vx == 0) {                  /* 上下两边的：横向随机，贴边出生 */
-            x = (int)(rain_seed % (SCR_W - BW));
-            y = (vy > 0) ? 0 : (SCR_H - BH);
+        if (vx == 0) {                  /* 上下两边的：横向随机，贴【当前视口】边出生 */
+            x = g.cam_x + (int)(rain_seed % (SCR_W - BW));
+            y = g.cam_y + ((vy > 0) ? 0 : (SCR_H - BH));
         } else {                        /* 左右两边的：纵向随机 */
-            y = (int)(rain_seed % (SCR_H - BH));
-            x = (vx > 0) ? 0 : (SCR_W - BW);
+            y = g.cam_y + (int)(rain_seed % (SCR_H - BH));
+            x = g.cam_x + ((vx > 0) ? 0 : (SCR_W - BW));
         }
+        /*  ★ 房间比视口窄/矮时（正方形大房间）别在黑边里刷弹：夹回场地内。 */
+        if (x < ARENA_X0) x = ARENA_X0;
+        if (x > ARENA_X1 - BW) x = ARENA_X1 - BW;
+        if (y < ARENA_Y0) y = ARENA_Y0;
+        if (y > ARENA_Y1 - BH) y = ARENA_Y1 - BH;
         game_bullet_spawn(x, y, vx, vy, MOTION_ACCEL, BULLET_URANUS, 1);
     }
 }
@@ -290,7 +303,7 @@ void game_boss_hit(u32 now)
         g.exit_x      = (ARENA_X0 + ARENA_X1) / 2 - 16;
         g.exit_y      = ARENA_Y0 + 64;                  /* 上面那扇门的门下 64 px */
         g.exit_dirty  = 0;
-        g.door_dirty  = 2;                              /* 无怪物了：把锁死的门重画成开着的 */
+        g.door_dirty  = 2;                              /* 无怪物了：门从"不可传送"变为可传送；重画一次 */
         bsp_printf("EXIT: room %d at (%d,%d)\r\n", g.exit_room, g.exit_x, g.exit_y);
 
         /*  Boss 击破：掉一个随机饰品（不再发金币）。
@@ -301,6 +314,16 @@ void game_boss_hit(u32 now)
                                (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
         g.boss_drop_pending = 1;
         bsp_printf("BOSS DROP: accessory #%d\r\n", g.item.type);
+
+        /*  ★ 击破后立刻退出 PHASE_FIGHT：
+         *    · 顶部 Boss 血条（含 "BOSS" 标签）只在 FIGHT 时提交，否则
+         *      它会一直挂着一个空血条，看起来像"Boss 还在"；
+         *    · game_boss_draw() 本来就会跳过 hp<=0，但旧 old_boss 要清掉；
+         *    · 门/exit 的逻辑只看 boss_hp 和 exit，不看 phase，所以安全。  */
+        g.boss_locked = 0;
+        g.boss_blink_cnt = 0;
+        g.boss_blink_on = 0;
+        g.phase = PHASE_EXPLORE;
     }
 }
 

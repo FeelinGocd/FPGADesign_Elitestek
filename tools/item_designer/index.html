@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>道具设计器</title>
+<style>
+  :root {
+    --bg: #0a0d13;
+    --panel: #111722;
+    --panel2: #0e141d;
+    --line: #263244;
+    --text: #e8edf5;
+    --dim: #8b99ad;
+    --accent: #78d2ff;
+    --ok: #62d394;
+    --warn: #ffb35c;
+    --bad: #ff6b7a;
+    --cand: #d98a2b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 14px 20px; background: rgba(10,13,19,.94);
+    border-bottom: 1px solid var(--line); backdrop-filter: blur(8px);
+  }
+  h1 { font-size: 17px; letter-spacing: .12em; margin: 0; color: var(--accent); }
+  .sub { color: var(--dim); font-size: 12px; }
+  .spacer { flex: 1; }
+  button {
+    background: #1a2432; color: var(--text); border: 1px solid #314156;
+    border-radius: 7px; padding: 8px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #17445a; border-color: #2b7e9f; color: #dff6ff; }
+  button.submit { background: #5a3215; border-color: #a76524; color: #ffe8cf; }
+  button.danger { color: var(--bad); border-color: #5a2b32; background: #24151a; }
+  button.small { padding: 3px 7px; font-size: 12px; border-radius: 5px; }
+  .status { padding: 8px 20px; border-bottom: 1px solid var(--line); font-size: 13px; display: none; }
+  .status.show { display: block; }
+  .status.ok { background: #0e2419; color: #bff3d4; }
+  .status.warn { background: #2a2010; color: #ffdfb0; }
+  .status.bad { background: #2a1217; color: #ffc4ca; }
+  .status.busy { background: #101d2a; color: #bfe9ff; }
+  .status ul { margin: 6px 0 0 18px; padding: 0; }
+  .status li { margin: 2px 0; }
+  main { display: grid; grid-template-columns: minmax(0,1fr) 370px; gap: 18px; padding: 18px 20px 40px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } .right { position: static !important; } }
+  .brief { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 16px; }
+  .brief-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .brief-head label { color: var(--accent); font-size: 12px; letter-spacing: .04em; }
+  .brief label { display: block; color: var(--accent); font-size: 12px; margin-bottom: 6px; letter-spacing: .04em; }
+  textarea, input, select {
+    background: #0b111a; color: var(--text); border: 1px solid #2a384b;
+    border-radius: 6px; padding: 6px 8px; font: inherit; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 56px; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(390px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; position: relative; }
+  .card.candidate { border-color: #6b4418; }
+  .card.disabled { opacity: .78; }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .id-badge { font: 11px ui-monospace, Consolas, monospace; color: var(--dim); background: #0b111a; border: 1px solid #243246; border-radius: 4px; padding: 2px 6px; }
+  .key-input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .card-body { display: grid; grid-template-columns: 104px minmax(0,1fr); gap: 12px; }
+  .sprite { width: 96px; height: 128px; position: relative; }
+  .sprite .base, .sprite .icon { position: absolute; width: 64px; height: 64px; image-rendering: pixelated; }
+  .sprite .base { left: 16px; top: 64px; }
+  .sprite .icon { left: 16px; top: 0; animation: floaty 1.2s ease-in-out infinite; }
+  .sprite .slot { position: absolute; left: 12px; top: 112px; font-size: 10px; color: var(--dim); }
+  @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+  .fields { display: grid; gap: 7px; }
+  .row2 { display: grid; grid-template-columns: 70px minmax(0,1fr); align-items: center; gap: 8px; }
+  .row2 label { color: var(--dim); font-size: 12px; }
+  .mini-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 6px; }
+  .mini-grid .m { display: grid; gap: 2px; }
+  .mini-grid label { color: var(--dim); font-size: 10px; }
+  .mini-grid input { padding: 4px 5px; font-size: 12px; }
+  .effect { font-size: 11px; color: #a7e6ff; background: #0a1a22; border: 1px solid #1d3b49; border-radius: 5px; padding: 4px 6px; min-height: 25px; }
+  .warn { font-size: 11px; color: var(--warn); min-height: 16px; }
+  .features { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; display: grid; gap: 6px; }
+  .features-head { color: var(--accent); font-size: 11px; letter-spacing: .05em; }
+  .feature-list { display: grid; gap: 5px; }
+  .feature-row { display: flex; align-items: center; gap: 5px; }
+  .feature-row input { border-radius: 999px; padding: 4px 9px; font-size: 12px; }
+  .feature-x { width: 24px; height: 24px; padding: 0; border-radius: 50%; color: var(--bad); border-color: #5a2b32; background: #24151a; flex: 0 0 auto; font-size: 14px; line-height: 1; }
+  .feature-add { justify-self: start; border-style: dashed; color: var(--accent); }
+  .feature-empty { color: var(--dim); font-size: 11px; }
+  .card-foot { display: flex; gap: 6px; align-items: center; margin-top: 9px; }
+  .card-foot .spacer { flex: 1; }
+  .swatch { display: inline-flex; align-items: center; gap: 5px; color: var(--dim); font-size: 11px; }
+  .right { position: sticky; top: 82px; align-self: start; display: grid; gap: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .panel h2 { font-size: 12px; letter-spacing: .08em; color: var(--accent); margin: 0 0 8px; }
+  .preview-box { background: #05070b; border: 1px solid #1e2a3a; border-radius: 6px; min-height: 120px; display: grid; place-items: center; overflow: hidden; }
+  .preview-box img { width: 100%; height: auto; display: block; }
+  .hint { color: var(--dim); font-size: 11px; line-height: 1.6; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dim); word-break: break-all; white-space: pre-wrap; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 20; display: grid; place-items: center; padding: 20px; }
+  .modal.hidden { display: none; }
+  .modal-card { width: min(920px, 94vw); max-height: 88vh; overflow: auto; background: var(--panel); border: 1px solid #35506b; border-radius: 12px; padding: 16px; }
+  .modal-card h2 { margin: 0 0 6px; color: var(--accent); font-size: 16px; }
+  .modal-card pre { white-space: pre-wrap; background: #080c12; border: 1px solid #223044; border-radius: 8px; padding: 12px; font: 12px/1.5 ui-monospace, Consolas, monospace; color: #cfe9ff; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+  .toast { position: fixed; right: 18px; bottom: 18px; background: #12302a; border: 1px solid #2c6b58; color: #c8ffe0; padding: 10px 14px; border-radius: 8px; z-index: 30; display: none; }
+  .toast.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>道具设计器</h1>
+    <div class="sub">编辑道具 → 保存 CSV → 自动生成 spec 预览 PNG / 规范表 → 提交实现</div>
+  </div>
+  <div class="spacer"></div>
+  <button id="btnDiscardDraft" class="danger" title="丢弃未保存草稿，重新从 CSV 读取">丢弃草稿</button>
+  <button id="btnReload" title="从 CSV 重新读取（会丢弃未保存草稿）">重新载入</button>
+  <button id="btnAdd">+ 新增道具</button>
+  <button id="btnSave" class="primary">保存 CSV + 生成 PNG</button>
+  <button id="btnSubmit" class="submit">提交实现</button>
+</header>
+
+<div id="status" class="status" role="status"></div>
+
+<main>
+  <section class="left">
+    <div class="brief">
+      <div class="brief-head">
+        <label for="brief">本次设计说明（保存进 design_brief.md，并写进 pending_request.md）</label>
+        <button id="btnTemplate" class="small" type="button" title="插入特殊功能描述模板">插入特殊功能模板</button>
+      </div>
+      <textarea id="brief" placeholder="例如：新增 TriPrism，增加弹幕但弹速更慢；把 1UP 的描述改成……特殊功能点“插入特殊功能模板”。"></textarea>
+    </div>
+    <div id="items" class="grid"></div>
+  </section>
+
+  <aside class="right">
+    <div class="panel">
+      <h2>规范预览 · docs/spec/道具预览.png</h2>
+      <div class="preview-box">
+        <img id="preview" src="/preview.png" alt="道具预览" onerror="this.style.display='none'">
+      </div>
+      <div class="hint" style="margin-top:8px">保存后自动重生成；右侧是源图拼版，板上是 8bpp 调色板效果。</div>
+    </div>
+    <div class="panel">
+      <h2>文件</h2>
+      <div class="mono" id="paths">载入中…</div>
+      <div class="hint" style="margin-top:8px">CSV 是源；规范表由本页面保存时自动更新。提交后回到对话让 AI 读取 pending_request.md。</div>
+    </div>
+    <div class="panel">
+      <h2>快捷键 / 规则</h2>
+      <div class="hint">
+        Ctrl+S 保存 · 启用道具的“字幕”只能 A-Z 和空格 · 图标 32×32 · 新增图标要先跑 pic2pram.py · “增加弹幕”当前仍由 ITEM_EYES 决定（其他道具设 triple=1 不生效）。
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>实现请求已生成</h2>
+    <div class="hint" id="modalSub"></div>
+    <pre id="modalText"></pre>
+    <div class="modal-actions">
+      <button id="btnCopy">复制请求</button>
+      <button id="btnCloseModal">关闭</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  var state = { rows: [], brief: '', icons: [], iconAssets: {}, assetNames: [], baseIcon: 'accessory_base.png', fields: [], dirty: false };
+  var DRAFT_KEY = 'itemDesignerDraftV1';
+  var draftTimer = 0;
+  var DESIGN_TEMPLATE = [
+    '## 道具：<名字>（key: ITEM_XXX）',
+    '- 类型：被动 / 触发 / 主动 / 召唤 / 经济',
+    '- 图标：accessory_xxx.png（32×32；没有就先用现有图占位）',
+    '- 触发：什么时候发生（拾取 / 每帧 / 每 N 帧 / 命中 / 开火 / 受伤 / 进房 / 低血）',
+    '- 效果：发生什么（伤害 / 回血 / 生成弹 / 护盾 / 减速 / 吸币 / 传送）',
+    '- 数值：数值 + 单位（px / 帧 / ms / % / 层数）',
+    '- 叠加：重复拾取 / 多件同类 / 与 EYES 增加弹幕怎么叠',
+    '- 视觉：图标 / 颜色 / 闪烁 / HUD 提示（HUD 只认 A-Z 和空格）',
+    '- 边界：Boss / 无敌 / 死亡 / 换房 / 满血 / 性能上限',
+    '- 验收：怎么观察、预期结果',
+    ''
+  ].join('\n');
+  var $ = function (id) { return document.getElementById(id); };
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  function iconUrl(name) { return '/icons/' + encodeURIComponent(name); }
+  function safeAsset(name) {
+    var stem = String(name || '').replace(/\.[^.]+$/, '');
+    return 'ASSET_' + stem.replace(/[^A-Za-z0-9_]/g, '_');
+  }
+  function parseFeatures(v) {
+    if (Array.isArray(v)) return v.map(function (x) { return String(x); });
+    if (v === null || v === undefined || v === '') return [];
+    try {
+      var a = JSON.parse(String(v));
+      if (Array.isArray(a)) return a.map(function (x) { return String(x); });
+    } catch (e) { }
+    return [String(v)];
+  }
+  function saveDraft() {
+    try {
+      var b = $('brief');
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ items: state.rows, brief: b ? b.value : '', at: Date.now() }));
+    } catch (e) { }
+  }
+  function scheduleDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, 200);
+  }
+  function readDraft() {
+    try {
+      var s = localStorage.getItem(DRAFT_KEY);
+      if (!s) return null;
+      var d = JSON.parse(s);
+      if (!d || !Array.isArray(d.items)) return null;
+      return d;
+    } catch (e) { return null; }
+  }
+  function clearDraft() { clearTimeout(draftTimer); try { localStorage.removeItem(DRAFT_KEY); } catch (e) { } }
+  function draftRow(r) {
+    var o = {};
+    Object.keys(r).forEach(function (k) { o[k] = r[k]; });
+    o.features = parseFeatures(r.features);
+    o.level = String(r.level == null ? '0' : r.level);
+    o.pool = String(r.pool == null ? '1' : r.pool);
+    o.life_plus = String(r.life_plus == null ? '0' : r.life_plus);
+    o.range = String(r.range == null ? '0' : r.range);
+    return o;
+  }
+  function markDirty() { state.dirty = true; scheduleDraft(); }
+  function input(value, cls) {
+    var i = document.createElement('input');
+    i.type = 'text'; i.value = value == null ? '' : String(value);
+    if (cls) i.className = cls;
+    return i;
+  }
+  function numberInput(value) {
+    var i = document.createElement('input');
+    i.type = 'number'; i.step = '1'; i.value = value == null ? '0' : String(value);
+    return i;
+  }
+  function effectText(r) {
+    var p = [];
+    var bulletName = { CHILI: '辣椒', URANUS: '天王星' };
+    if (r.bullet && r.bullet !== '-') p.push('弹种 ' + (bulletName[r.bullet] || r.bullet));
+    if (Number(r.triple)) p.push('增加弹幕');
+    if (Number(r.hp)) p.push('回血 +' + r.hp);
+    if (Number(r.lives)) p.push('加命 +' + r.lives);
+    var labs = [['move_v8','移速'],['fire_every','射速'],['bullet_speed','弹速'],['damage','伤害']];
+    labs.forEach(function (x) { if (Number(r[x[0]])) p.push(x[1] + ' ' + (Number(r[x[0]]) > 0 ? '+' : '') + r[x[0]]); });
+    return p.length ? p.join(' / ') : '无属性变化';
+  }
+  function setStatus(msg, tone, list) {
+    var s = $('status');
+    s.className = 'status show ' + (tone || '');
+    s.textContent = msg || '';
+    if (list && list.length) {
+      var ul = document.createElement('ul');
+      list.forEach(function (x) { ul.appendChild(el('li', '', x)); });
+      s.appendChild(ul);
+    }
+  }
+  function clearStatus() { $('status').className = 'status'; $('status').textContent = ''; }
+  function toast(msg) {
+    var t = $('toast'); t.textContent = msg; t.className = 'toast show';
+    window.setTimeout(function () { t.className = 'toast'; }, 2600);
+  }
+
+  function buildSprite(r) {
+    var box = el('div', 'sprite');
+    var base = document.createElement('img');
+    base.className = 'base'; base.src = iconUrl(state.baseIcon); base.alt = '底座';
+    var icon = document.createElement('img');
+    icon.className = 'icon';
+    icon.src = r.icon_file ? iconUrl(r.icon_file) : '';
+    icon.alt = r.icon_file || '图标';
+    icon.onerror = function () { icon.style.visibility = 'hidden'; };
+    box.appendChild(base); box.appendChild(icon);
+    return box;
+  }
+
+  function buildCard(r, idx) {
+    var card = el('div', 'card' + (r.enabled === '1' ? '' : ' candidate'));
+    card.dataset.idx = String(idx);
+
+    var head = el('div', 'card-head');
+    head.appendChild(el('span', 'id-badge', '编号 ' + (r.id === '' ? '—' : r.id)));
+    var en = document.createElement('input');
+    en.type = 'checkbox'; en.checked = r.enabled === '1'; en.title = '启用（参与 ITEM_COUNT / C 表）';
+    head.appendChild(en);
+    var key = input(r.key, 'key-input');
+    key.title = 'C 名称，如 ITEM_CHILI';
+    head.appendChild(key);
+    var sp = el('span', 'spacer'); sp.style.flex = '1'; head.appendChild(sp);
+    var qNames = ['普通', '稀有', '史诗', '传说'];
+    var qColors = ['#8b99ad', '#5aa9ff', '#c07bff', '#ffb35c'];
+    var qv = Number(r.level);
+    if (isNaN(qv) || qv < 0 || qv > 3) qv = 0;
+    var qBadge = el('span', 'id-badge', qNames[qv]);
+    qBadge.style.color = qColors[qv];
+    head.appendChild(qBadge);
+    var pBadge = el('span', 'id-badge', r.pool === '1' ? '入池' : '不入池');
+    head.appendChild(pBadge);
+    var lifeBadge = null;
+    if (r.life_plus === '1') {
+      lifeBadge = el('span', 'id-badge', '生命保险');
+      lifeBadge.style.color = '#ff9b6a';
+      head.appendChild(lifeBadge);
+    }
+    if (r.enabled !== '1') head.appendChild(el('span', 'id-badge', '候选'));
+
+    var body = el('div', 'card-body');
+    body.appendChild(buildSprite(r));
+
+    var fields = el('div', 'fields');
+    var descRow = el('div', 'row2');
+    descRow.appendChild(el('label', '', '字幕'));
+    var desc = input(r.desc);
+    descRow.appendChild(desc);
+    fields.appendChild(descRow);
+
+    var iconRow = el('div', 'row2');
+    iconRow.appendChild(el('label', '', '图标'));
+    var sel = document.createElement('select');
+    var icons = state.icons.slice();
+    if (r.icon_file && icons.indexOf(r.icon_file) < 0) icons.push(r.icon_file);
+    icons.forEach(function (name) {
+      var o = document.createElement('option'); o.value = name; o.textContent = name; sel.appendChild(o);
+    });
+    sel.value = r.icon_file || (icons[0] || '');
+    iconRow.appendChild(sel);
+    fields.appendChild(iconRow);
+
+    var assetRow = el('div', 'row2');
+    assetRow.appendChild(el('label', '', '素材编号'));
+    var asset = input(r.icon_asset);
+    assetRow.appendChild(asset);
+    fields.appendChild(assetRow);
+
+    var bulletRow = el('div', 'row2');
+    bulletRow.appendChild(el('label', '', '弹种'));
+    var bullet = document.createElement('select');
+    [['-', '无'], ['CHILI', '辣椒'], ['URANUS', '天王星']].forEach(function (pair) {
+      var o = document.createElement('option'); o.value = pair[0]; o.textContent = pair[1]; bullet.appendChild(o);
+    });
+    bullet.value = r.bullet || '-';
+    bulletRow.appendChild(bullet);
+    fields.appendChild(bulletRow);
+
+    var levelRow = el('div', 'row2');
+    levelRow.appendChild(el('label', '', '品质'));
+    var levelSel = document.createElement('select');
+    qNames.forEach(function (name, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = name; levelSel.appendChild(o); });
+    levelSel.value = String(qv);
+    levelRow.appendChild(levelSel);
+    fields.appendChild(levelRow);
+
+    var poolRow = el('div', 'row2');
+    poolRow.appendChild(el('label', '', '道具池'));
+    var poolWrap = el('label', 'swatch');
+    poolWrap.style.color = 'var(--text)';
+    var poolChk = document.createElement('input');
+    poolChk.type = 'checkbox'; poolChk.checked = r.pool === '1';
+    poolWrap.appendChild(poolChk);
+    poolWrap.appendChild(document.createTextNode('加入道具池（会随机掉落/进商店）'));
+    poolRow.appendChild(poolWrap);
+    fields.appendChild(poolRow);
+
+    var lifeRow = el('div', 'row2');
+    lifeRow.appendChild(el('label', '', '生命保险'));
+    var lifeWrap = el('label', 'swatch');
+    lifeWrap.style.color = 'var(--text)';
+    var lifeChk = document.createElement('input');
+    lifeChk.type = 'checkbox'; lifeChk.checked = r.life_plus === '1';
+    lifeWrap.appendChild(lifeChk);
+    lifeWrap.appendChild(document.createTextNode('死亡时触发（LIFE_PLUS）'));
+    lifeRow.appendChild(lifeWrap);
+    fields.appendChild(lifeRow);
+
+    var mini = el('div', 'mini-grid');
+    var defs = [['hp','回血'],['lives','加命'],['triple','增加弹幕'],['move_v8','移速'],['fire_every','射速'],['bullet_speed','弹速'],['range','射程'],['damage','伤害']];
+    var nums = {};
+    defs.forEach(function (d) {
+      var m = el('div', 'm'); m.appendChild(el('label', '', d[1]));
+      var ni = numberInput(r[d[0]]);
+      m.appendChild(ni); mini.appendChild(m); nums[d[0]] = ni;
+    });
+    fields.appendChild(mini);
+
+    var eff = el('div', 'effect', effectText(r));
+    fields.appendChild(eff);
+    var warn = el('div', 'warn', '');
+    fields.appendChild(warn);
+    var noteRow = el('div', 'row2');
+    noteRow.appendChild(el('label', '', '备注'));
+    var note = input(r.note);
+    noteRow.appendChild(note);
+    fields.appendChild(noteRow);
+
+    var featureBox = el('div', 'features');
+    featureBox.appendChild(el('div', 'features-head', '功能标签'));
+    var fList = el('div', 'feature-list');
+    featureBox.appendChild(fList);
+    var addFeat = el('button', 'small feature-add', '+ 添加功能');
+    addFeat.type = 'button';
+    featureBox.appendChild(addFeat);
+    fields.appendChild(featureBox);
+    if (!Array.isArray(r.features)) r.features = parseFeatures(r.features);
+
+    function renderFeatures() {
+      fList.textContent = '';
+      if (!r.features.length) {
+        fList.appendChild(el('div', 'feature-empty', '还没有特殊功能；点下面 + 添加'));
+      }
+      r.features.forEach(function (text, fi) {
+        var fr = el('div', 'feature-row');
+        var fiInput = input(text);
+        fiInput.placeholder = '例如：命中吸血 15% / 800ms CD';
+        fiInput.addEventListener('input', function () { r.features[fi] = fiInput.value; markDirty(); });
+        var x = el('button', 'feature-x', '×');
+        x.type = 'button'; x.title = '删除这个功能';
+        x.addEventListener('click', function () {
+          r.features.splice(fi, 1);
+          markDirty(); renderFeatures();
+        });
+        fr.appendChild(fiInput); fr.appendChild(x);
+        fList.appendChild(fr);
+      });
+    }
+    renderFeatures();
+    addFeat.addEventListener('click', function () {
+      if (!Array.isArray(r.features)) r.features = [];
+      r.features.push('');
+      markDirty(); renderFeatures();
+      var ins = fList.querySelectorAll('input');
+      if (ins.length) ins[ins.length - 1].focus();
+    });
+
+    body.appendChild(fields);
+    card.appendChild(head);
+    card.appendChild(body);
+
+    var foot = el('div', 'card-foot');
+    var up = el('button', 'small', '↑'); up.title = '上移';
+    var down = el('button', 'small', '↓'); down.title = '下移';
+    var dup = el('button', 'small', '复制');
+    var del = el('button', 'small danger', '删除');
+    foot.appendChild(up); foot.appendChild(down); foot.appendChild(dup); foot.appendChild(del);
+    var sp2 = el('span', 'spacer'); sp2.style.flex = '1'; foot.appendChild(sp2);
+    foot.appendChild(el('span', 'swatch', '32×32 · 底座 + 图标'));
+    card.appendChild(foot);
+
+    function refreshWarn() {
+      var msgs = [];
+      if (r.enabled === '1' && !/^[A-Z ]+$/.test(r.desc || '')) msgs.push('desc 只能 A-Z / 空格');
+      if (r.enabled === '1' && !r.icon_file) msgs.push('已启用但没选图标');
+      if (r.icon_asset && state.assetNames.length && state.assetNames.indexOf(r.icon_asset) < 0) msgs.push('素材编号不在 assets_desc.h');
+      warn.textContent = msgs.join('；');
+    }
+    refreshWarn();
+
+    en.addEventListener('change', function () {
+      r.enabled = en.checked ? '1' : '0';
+      markDirty(); render();
+    });
+    key.addEventListener('input', function () { r.key = key.value; markDirty(); refreshWarn(); });
+    desc.addEventListener('input', function () { r.desc = desc.value; markDirty(); refreshWarn(); });
+    sel.addEventListener('change', function () {
+      r.icon_file = sel.value;
+      r.icon_asset = state.iconAssets[sel.value] || safeAsset(sel.value);
+      asset.value = r.icon_asset;
+      var im = card.querySelector('.sprite .icon');
+      im.style.visibility = 'visible';
+      im.src = iconUrl(sel.value);
+      markDirty(); refreshWarn();
+    });
+    asset.addEventListener('input', function () { r.icon_asset = asset.value; markDirty(); refreshWarn(); });
+    bullet.addEventListener('change', function () { r.bullet = bullet.value; eff.textContent = effectText(r); markDirty(); });
+    levelSel.addEventListener('change', function () {
+      r.level = levelSel.value;
+      var lv2 = Number(r.level) || 0;
+      qBadge.textContent = qNames[lv2];
+      qBadge.style.color = qColors[lv2];
+      markDirty();
+    });
+    poolChk.addEventListener('change', function () {
+      r.pool = poolChk.checked ? '1' : '0';
+      pBadge.textContent = r.pool === '1' ? '入池' : '不入池';
+      markDirty();
+    });
+    lifeChk.addEventListener('change', function () {
+      r.life_plus = lifeChk.checked ? '1' : '0';
+      if (r.life_plus === '1' && !lifeBadge) {
+        lifeBadge = el('span', 'id-badge', '生命保险');
+        lifeBadge.style.color = '#ff9b6a';
+        pBadge.parentNode.insertBefore(lifeBadge, pBadge.nextSibling);
+      } else if (r.life_plus !== '1' && lifeBadge) {
+        lifeBadge.parentNode.removeChild(lifeBadge);
+        lifeBadge = null;
+      }
+      markDirty();
+    });
+    defs.forEach(function (d) {
+      nums[d[0]].addEventListener('input', function () {
+        r[d[0]] = nums[d[0]].value; eff.textContent = effectText(r); markDirty();
+      });
+    });
+    note.addEventListener('input', function () { r.note = note.value; markDirty(); });
+    up.addEventListener('click', function () { moveRow(idx, -1); });
+    down.addEventListener('click', function () { moveRow(idx, 1); });
+    dup.addEventListener('click', function () { duplicateRow(idx); });
+    del.addEventListener('click', function () {
+      if (!window.confirm('删除 ' + (r.key || '这一行') + '？')) return;
+      state.rows.splice(idx, 1); markDirty(); render();
+    });
+    return card;
+  }
+
+  function moveRow(idx, delta) {
+    var j = idx + delta;
+    if (j < 0 || j >= state.rows.length) return;
+    var t = state.rows[idx]; state.rows[idx] = state.rows[j]; state.rows[j] = t;
+    markDirty(); render();
+  }
+  function duplicateRow(idx) {
+    var r = state.rows[idx];
+    var copy = {};
+    Object.keys(r).forEach(function (k) { copy[k] = r[k]; });
+    copy.id = ''; copy.key = (r.key || 'ITEM_NEW') + '_COPY';
+    copy.enabled = '0'; copy.note = (r.note || '') + ' (copy)';
+    copy.features = (r.features || []).slice();
+    copy.level = r.level || '0'; copy.pool = r.pool || '0'; copy.life_plus = r.life_plus || '0';
+    state.rows.splice(idx + 1, 0, copy);
+    markDirty(); render();
+  }
+  function addRow() {
+    var icon = state.icons[0] || '';
+    var row = { id: '', key: 'ITEM_NEW' + (state.rows.length + 1), enabled: '0', desc: 'NEW ITEM',
+      icon_asset: safeAsset(icon), icon_file: icon, bullet: '-', triple: '0', hp: '0', lives: '0',
+      move_v8: '0', fire_every: '0', bullet_speed: '0', range: '0', damage: '0', note: '候选', features: [], level: '0', pool: '0', life_plus: '0' };
+    state.rows.push(row); markDirty(); render();
+  }
+
+  function render() {
+    var box = $('items');
+    box.textContent = '';
+    state.rows.forEach(function (r, i) { box.appendChild(buildCard(r, i)); });
+  }
+
+  async function load(allowDraft) {
+    clearStatus();
+    var res = await fetch('/api/items', { cache: 'no-store' });
+    var data = await res.json();
+    if (!data.ok) { setStatus('载入失败：' + (data.error || 'unknown'), 'bad'); return; }
+    state.rows = (data.rows || []).map(function (r) {
+      var o = {};
+      Object.keys(r).forEach(function (k) { o[k] = r[k]; });
+      o.features = parseFeatures(r.features);
+      o.level = (r.level === undefined || r.level === null || String(r.level).trim() === '') ? '0' : String(r.level);
+      o.pool = (r.pool === undefined || r.pool === null || String(r.pool).trim() === '') ? '1' : String(r.pool);
+      o.life_plus = (r.life_plus === undefined || r.life_plus === null || String(r.life_plus).trim() === '') ? '0' : String(r.life_plus);
+      o.range = (r.range === undefined || r.range === null || String(r.range).trim() === '') ? '0' : String(r.range);
+      return o;
+    });
+    state.brief = data.brief || '';
+    state.icons = data.icons || [];
+    state.iconAssets = data.icon_assets || {};
+    state.assetNames = data.asset_names || [];
+    state.baseIcon = data.base_icon || 'accessory_base.png';
+    state.fields = data.fields || [];
+    var oldServer = state.fields.indexOf('level') < 0 || state.fields.indexOf('pool') < 0 || state.fields.indexOf('life_plus') < 0 || state.fields.indexOf('range') < 0;
+    var restored = false;
+    if (allowDraft !== false) {
+      var draft = readDraft();
+      if (draft) {
+        if (JSON.stringify(draft.items) !== JSON.stringify(state.rows) || String(draft.brief || '') !== state.brief) {
+          state.rows = draft.items.map(draftRow);
+          state.brief = String(draft.brief || '');
+          restored = true;
+        } else {
+          clearDraft();
+        }
+      }
+    } else {
+      clearDraft();
+    }
+    $('brief').value = state.brief;
+    $('paths').textContent = '数据表: ' + data.csv + '\n目录: ' + data.root + '\n预览图: docs/spec/道具预览.png';
+    state.dirty = restored;
+    render();
+    var img = $('preview');
+    img.style.display = 'block';
+    img.src = '/preview.png?t=' + Date.now();
+    var msgs = [];
+    if (restored) msgs.push('已恢复未保存草稿（尚未写入 CSV）');
+    if (oldServer) msgs.push('服务器还是旧版本（缺少 level/pool/life_plus/range），请重启 server.py；否则保存会丢字段。');
+    if (data.pending) msgs.push('已有一份 pending_request.md；可继续编辑后重新提交。');
+    if (msgs.length) setStatus(msgs.join(' '), 'warn');
+  }
+
+  function validateClient() {
+    var errs = [];
+    var seen = {};
+    state.rows.forEach(function (r, i) {
+      var where = r.key || ('第 ' + (i + 1) + ' 行');
+      var fieldCn = { triple: '增加弹幕', hp: '回血', lives: '加命', move_v8: '移速', fire_every: '射速', bullet_speed: '弹速', range: '射程', damage: '伤害', level: '品质', pool: '道具池', life_plus: '生命保险' };
+      if (!/^[A-Z][A-Z0-9_]*$/.test(r.key || '')) errs.push(where + '：C 名称只能用 A-Z、0-9、_');
+      if (seen[r.key]) errs.push(where + '：C 名称重复');
+      seen[r.key] = true;
+      if (r.enabled === '1') {
+        if (!/^[A-Z ]+$/.test(r.desc || '')) errs.push(where + '：字幕只能 A-Z / 空格');
+        if (!r.icon_file) errs.push(where + '：没选图标');
+      }
+      var checkFields = ['triple','hp','lives','move_v8','fire_every','bullet_speed','range','damage'];
+      if (r.enabled === '1' && r.pool === '1') checkFields.push('level', 'pool', 'life_plus');
+      checkFields.forEach(function (f) {
+        if (String(r[f] || '').trim() === '' || isNaN(Number(r[f]))) errs.push(where + '：' + (fieldCn[f] || f) + ' 不是整数');
+      });
+    });
+    return errs;
+  }
+
+  async function save(submit) {
+    if (state.fields.indexOf('level') < 0 || state.fields.indexOf('pool') < 0 || state.fields.indexOf('life_plus') < 0 || state.fields.indexOf('range') < 0) {
+      setStatus('服务器还是旧版本（没有 level/pool）。请先停掉旧的 server.py 再重新启动，否则保存会丢品质/道具池。', 'bad');
+      return;
+    }
+    var errs = validateClient();
+    if (errs.length) { setStatus('请先修正：', 'bad', errs); return; }
+    setStatus(submit ? '提交中…' : '保存中…', 'busy');
+    var res = await fetch(submit ? '/api/submit' : '/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: state.rows, brief: $('brief').value })
+    });
+    var data = await res.json();
+    if (!data.ok) {
+      setStatus('保存失败：', 'bad', (data.errors || []).concat(data.warnings || []));
+      return;
+    }
+    clearDraft();
+    state.dirty = false;
+    await load(false);
+    if (submit) {
+      showModal(data.request || '', data.diff || '');
+      notifyUser();
+      setStatus('已保存并提交。回到对话发送：请读取 tools/item_designer/pending_request.md 并实现道具。', 'ok', data.warnings || []);
+    } else {
+      setStatus('已保存：items.csv / 规范表 / 道具预览.png 已更新。', 'ok', data.warnings || []);
+    }
+  }
+
+  function showModal(request, diff) {
+    $('modalText').textContent = request || '(empty)';
+    $('modalSub').textContent = diff ? ('本次变化：' + diff) : '';
+    $('modal').className = 'modal';
+  }
+  function closeModal() { $('modal').className = 'modal hidden'; }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制'); }).catch(function () { fallbackCopy(text); });
+    } else fallbackCopy(text);
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); try { document.execCommand('copy'); toast('已复制'); } catch (e) { }
+    document.body.removeChild(ta);
+  }
+  function notifyUser() {
+    if (!('Notification' in window)) return;
+    var go = function () { try { new Notification('道具设计已提交', { body: '回到对话让 AI 读取 pending_request.md' }); } catch (e) { } };
+    if (Notification.permission === 'granted') go();
+    else if (Notification.permission !== 'denied') Notification.requestPermission().then(function (p) { if (p === 'granted') go(); });
+  }
+
+  $('btnDiscardDraft').addEventListener('click', function () {
+    if (!readDraft() && !state.dirty) { toast('没有未保存草稿'); return; }
+    if (!window.confirm('丢弃未保存草稿，重新从 CSV 读取？')) return;
+    clearDraft();
+    state.dirty = false;
+    load(false);
+    toast('草稿已丢弃');
+  });
+  $('btnReload').addEventListener('click', function () {
+    if (state.dirty && !window.confirm('重新载入会丢弃未保存草稿，继续？')) return;
+    clearDraft();
+    state.dirty = false;
+    load(false);
+  });
+  $('btnAdd').addEventListener('click', addRow);
+  $('btnSave').addEventListener('click', function () { save(false); });
+  $('btnSubmit').addEventListener('click', function () { save(true); });
+  $('btnCloseModal').addEventListener('click', closeModal);
+  $('modal').addEventListener('click', function (e) { if (e.target === $('modal')) closeModal(); });
+  $('btnCopy').addEventListener('click', function () { copyText($('modalText').textContent); });
+  $('brief').addEventListener('input', markDirty);
+  $('btnTemplate').addEventListener('click', function () {
+    var b = $('brief');
+    if (b.value.trim() && !window.confirm('说明里已有内容，追加模板？')) return;
+    b.value = (b.value.trim() ? b.value.trim() + '\n\n' : '') + DESIGN_TEMPLATE;
+    markDirty(); b.focus();
+  });
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(false); }
+    if (e.key === 'Escape') closeModal();
+  });
+  window.addEventListener('beforeunload', function (e) {
+    if (state.dirty) {
+      saveDraft();
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden' && state.dirty) saveDraft();
+  });
+
+  load().catch(function (e) { setStatus('载入失败：' + e, 'bad'); });
+})();
+</script>
+</body>
+</html>

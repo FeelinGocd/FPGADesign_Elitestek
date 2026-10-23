@@ -1,9 +1,10 @@
 "use strict";
 
 /* ==========================================================================
-   DEBUG 房间编辑器
+   MAP DESIGNER · 房间设计器
    --------------------------------------------------------------------------
    · 地图 40×23，32 px/格，画布 1280×720（最后一行 16 px）
+   · 地形层：. B W D C/X/Y/Z；对象层：slime/bug/web/stone/box/crate/exit
    · 编辑结果保存成 output/room_map.txt；生成 C 写 output/game_world_map.c
    · 校验 / C 生成 / 解析都在 mapfmt.py（服务端），前端只负责画和发请求
    ========================================================================== */
@@ -15,19 +16,40 @@
   var H = 720;
   var ARENA = { x0: 288, y0: 128, x1: 1024, y1: 544 };
   var ASSET_BASE = "../../res/pic/base/background/";
+  var INTERACT_BASE = "../../res/pic/base/background_interact/";
+  var MOB_BASE = "../../res/pic/character/mobs/";
   var CORNER_CODES = ["C", "X", "Y", "Z"];
   var CORNER_NAMES = ["C · 原样", "X · 水平翻", "Y · 垂直翻", "Z · 双向翻"];
   var DIRS = ["N", "E", "S", "W"];
   var CODES = [".", "B", "W", "D", "C", "X", "Y", "Z"];
   var DOOR_SLOTS = [[20, 2, 0], [32, 10, 1], [20, 17, 2], [7, 10, 3]];
+  var MAP_HEADER = "# MAP_DESIGNER v3";
 
   var TILES = [
     { id: "empty", code: ".", name: "空白", color: "#090e14" },
-    { id: "floor", code: "B", name: "基岩地板", image: "minecraft_bedrock.png" },
-    { id: "wall", code: "W", name: "木墙", image: "minecraft_wood.png" },
-    { id: "door", code: "D", name: "门（2 格）", image: "background_door_normal.png" },
-    { id: "corner", code: "C", name: "角块", image: "background_corner_wood.png" }
+    { id: "floor", code: "B", name: "基岩地板", image: "minecraft_bedrock.png", base: ASSET_BASE },
+    { id: "wall", code: "W", name: "木墙", image: "minecraft_wood.png", base: ASSET_BASE },
+    { id: "door", code: "D", name: "门（2 格）", image: "background_door_normal.png", base: INTERACT_BASE },
+    { id: "corner", code: "C", name: "角块", image: "background_corner_wood.png", base: ASSET_BASE }
   ];
+
+  /* id 必须和 mapfmt.py / game.h 的 MAP_OBJ_* 一致。 */
+  var OBJECT_DEFS = [
+    { id: "slime", code: 0, name: "史莱姆", image: MOB_BASE + "mobs_slime_00.png", layer: "actor" },
+    { id: "bug", code: 1, name: "甲虫", image: MOB_BASE + "mobs_bug_00_standUp.png", layer: "actor" },
+    { id: "web", code: 2, name: "蜘蛛网", image: INTERACT_BASE + "background_interact_web.png", layer: "scene" },
+    { id: "stone", code: 3, name: "石头", image: INTERACT_BASE + "background_interact_stone.png", layer: "actor" },
+    { id: "box", code: 4, name: "木箱", image: INTERACT_BASE + "background_interact_box.png", layer: "actor" },
+    { id: "crate", code: 5, name: "板条箱", image: INTERACT_BASE + "background_interact_crate.png", layer: "actor" },
+    { id: "exit", code: 6, name: "出口", image: INTERACT_BASE + "background_interact_eixt.png", layer: "scene" }
+  ];
+
+  var OBJECT_BY_ID = {};
+  var OBJECT_ORDER = {};
+  OBJECT_DEFS.forEach(function (def, index) {
+    OBJECT_BY_ID[def.id] = def;
+    OBJECT_ORDER[def.id] = index;
+  });
 
   function $(id) { return document.getElementById(id); }
 
@@ -36,6 +58,7 @@
   var preview = $("preview");
   var pctx = preview.getContext("2d");
   var paletteEl = $("palette");
+  var objectPaletteEl = $("objectPalette");
   var cornerRow = $("cornerRow");
   var angleRow = $("angleRow");
   var countsEl = $("counts");
@@ -54,14 +77,21 @@
   var zoomSlider = $("zoomSlider");
   var zoomReadout = $("zoomReadout");
   var canvasWrap = $("canvasWrap");
+  var roomTypeEl = $("roomType");
+  var layerTileEl = $("layerTile");
+  var layerObjectEl = $("layerObject");
   var images = {};
 
   var S = {
     map: grid("."),
     rot: grid(0),
+    objects: [],
+    roomType: "empty",
+    layer: "tile",
     brush: "W",
     corner: 0,
     angle: 0,
+    objBrush: "slime",
     zoom: 1,
     fwView: false,
     history: [],
@@ -71,6 +101,7 @@
     savedText: "",
     dirty: false,
     file: "room_map.txt",
+    jsonFile: "room_map.json",
     cfile: "game_world_map.c",
     lastC: "",
     issueCells: {},
@@ -79,6 +110,7 @@
     hover: null,
     drawing: false,
     erase: false,
+    loading: false,
     lastCell: null,
     served: /^https?:$/.test(location.protocol)
   };
@@ -101,6 +133,12 @@
     return out;
   }
 
+  function cloneObjects(list) {
+    return (list || []).map(function (obj) {
+      return { kind: obj.kind, x: obj.x | 0, y: obj.y | 0, arg: obj.arg | 0 };
+    });
+  }
+
   function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
 
   function doorPair(x, y, angle) { return (angle & 1) ? [x + 1, y] : [x, y + 1]; }
@@ -111,82 +149,253 @@
     return TILES[0];
   }
 
+  function objectDef(kind) { return OBJECT_BY_ID[kind] || null; }
+
   function currentCode() { return S.brush === "C" ? CORNER_CODES[S.corner] : S.brush; }
 
-  function cloneState() { return { map: cloneGrid(S.map), rot: cloneGrid(S.rot) }; }
+  function cloneState() {
+    return {
+      map: cloneGrid(S.map),
+      rot: cloneGrid(S.rot),
+      objects: cloneObjects(S.objects),
+      roomType: S.roomType
+    };
+  }
 
-  function applyState(rows, rot) {
+  function applyState(rows, rot, objects, roomType) {
     S.map = rows.map(function (row) { return row.split(""); });
     S.rot = rot.map(function (row) { return row.slice(0, COLS); });
+    S.objects = cloneObjects(objects);
+    S.roomType = roomType && ["start", "empty", "item", "shop"].indexOf(roomType) >= 0 ? roomType : "empty";
+    if (roomTypeEl) roomTypeEl.value = S.roomType;
     S.hover = null;
     S.flash = null;
   }
 
+  function sortObjects(list) {
+    return (list || []).slice().sort(function (a, b) {
+      return (a.y - b.y) || (a.x - b.x) || (OBJECT_ORDER[a.kind] - OBJECT_ORDER[b.kind]);
+    });
+  }
+
   function serialize() {
-    var body = [];
-    var rot = [];
+    var lines = [MAP_HEADER, "# TEMPLATE " + S.roomType];
     for (var y = 0; y < ROWS; y++) {
-      body.push(S.map[y].join(""));
-      rot.push(S.rot[y].map(function (v) { return String(v & 3); }).join(""));
+      lines.push(S.map[y].join(""));
     }
-    return "# DEBUG_ROOM_MAP v2\n" + body.join("\n") + "\n# ROTATION\n" + rot.join("\n") + "\n";
+
+    var objects = sortObjects(S.objects);
+    if (objects.length) {
+      lines.push("# OBJECTS");
+      for (var i = 0; i < objects.length; i++) {
+        var obj = objects[i];
+        if (obj.arg) lines.push(obj.kind + " " + obj.x + "," + obj.y + "," + obj.arg);
+        else lines.push(obj.kind + " " + obj.x + "," + obj.y);
+      }
+    }
+
+    lines.push("# ROTATION");
+    for (var ry = 0; ry < ROWS; ry++) {
+      var row = [];
+      for (var rx = 0; rx < COLS; rx++) row.push(String(S.rot[ry][rx] & 3));
+      lines.push(row.join(""));
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function serializeJson() {
+    var objects = sortObjects(S.objects);
+    return JSON.stringify({
+      format: "map_designer",
+      version: 3,
+      room_type: S.roomType,
+      size: { cols: COLS, rows: ROWS, tile: TILE },
+      tiles: S.map.map(function (row) { return row.join(""); }),
+      rotation: S.rot.map(function (row) { return row.slice(); }),
+      objects: objects.map(function (obj) {
+        return { kind: obj.kind, x: obj.x, y: obj.y, arg: obj.arg };
+      })
+    }, null, 2) + "\n";
+  }
+
+  function normalizeKind(raw) {
+    var kind = String(raw).trim().toLowerCase().replace(/-/g, "_");
+    var aliases = {
+      mob_slime: "slime", "mob.slime": "slime", enemy_slime: "slime",
+      mob_bug: "bug", "mob.bug": "bug", enemy_bug: "bug",
+      spider_web: "web", rock: "stone", crate_box: "box", eixt: "exit"
+    };
+    return aliases[kind] || kind;
+  }
+
+  function parseObjectLine(line) {
+    var parts = line.trim().split(/[\s,]+/).filter(function (part) { return !!part; });
+    if (parts.length < 3) throw new Error("对象要写成 kind x,y [arg]：" + line);
+    if (parts.length > 4) throw new Error("对象只有 4 列（kind x y arg）：" + line);
+    var kind = normalizeKind(parts[0]);
+    if (!OBJECT_BY_ID[kind]) throw new Error("未知对象类型：" + parts[0]);
+    var x = Number(parts[1]);
+    var y = Number(parts[2]);
+    var arg = parts.length > 3 ? Number(parts[3]) : 0;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(arg)) throw new Error("对象坐标 / 参数不是整数：" + line);
+    if (!inBounds(x, y)) throw new Error("对象坐标越界：" + line);
+    if (arg < 0 || arg > 255) throw new Error("对象参数必须在 0..255：" + line);
+    return { kind: kind, x: x, y: y, arg: arg };
+  }
+
+  function parseJsonLocal(raw) {
+    var text = String(raw).replace(/^\uFEFF/, "");
+    var data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      throw new Error("JSON 解析失败：" + e.message);
+    }
+    if (!data || !Array.isArray(data.tiles)) throw new Error("JSON 缺少 tiles 数组");
+    if (data.size && data.size.cols && Number(data.size.cols) !== COLS) throw new Error("JSON cols 不是 " + COLS);
+    if (data.size && data.size.rows && Number(data.size.rows) !== ROWS) throw new Error("JSON rows 不是 " + ROWS);
+    if (data.tiles.length !== ROWS) throw new Error("JSON 需要 " + ROWS + " 行 tiles");
+    var rows = [];
+    for (var y = 0; y < ROWS; y++) {
+      var line = data.tiles[y];
+      if (typeof line !== "string" || line.length !== COLS) throw new Error("JSON 第 " + (y + 1) + " 行不是 " + COLS + " 字符串");
+      for (var x = 0; x < COLS; x++) {
+        if (".BWDCXYZ".indexOf(line.charAt(x)) < 0) throw new Error("JSON 第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
+      }
+      rows.push(line);
+    }
+    var rot = grid(0);
+    if (data.rotation) {
+      if (!Array.isArray(data.rotation) || data.rotation.length !== ROWS) throw new Error("JSON rotation 需要 " + ROWS + " 行");
+      for (var ry = 0; ry < ROWS; ry++) {
+        if (!Array.isArray(data.rotation[ry]) || data.rotation[ry].length !== COLS) throw new Error("JSON rotation 第 " + (ry + 1) + " 行长度不对");
+        for (var rx = 0; rx < COLS; rx++) {
+          var value = Number(data.rotation[ry][rx]);
+          if (!(value >= 0 && value <= 3)) throw new Error("JSON rotation 越界");
+          rot[ry][rx] = value;
+        }
+      }
+    }
+    var objects = [];
+    (data.objects || []).forEach(function (item) {
+      if (!item || typeof item !== "object") throw new Error("JSON objects 里的项不是对象");
+      var kind = normalizeKind(item.kind);
+      if (!OBJECT_BY_ID[kind]) throw new Error("未知对象类型：" + item.kind);
+      var x = Number(item.x), y = Number(item.y), arg = Number(item.arg || 0);
+      if (!inBounds(x, y)) throw new Error("JSON 对象坐标越界：" + item.kind + " " + item.x + "," + item.y);
+      if (!(arg >= 0 && arg <= 255)) throw new Error("JSON 对象参数越界");
+      objects.push({ kind: kind, x: x, y: y, arg: arg });
+    });
+    var roomType = String(data.room_type || "empty").toLowerCase();
+    if (["start", "empty", "item", "shop", "boss"].indexOf(roomType) < 0) throw new Error("JSON 房间类型不认识：" + roomType);
+    return { rows: rows, rot: rot, objects: objects, roomType: roomType };
   }
 
   function parseLocal(raw) {
     var text = String(raw).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (text.trim().charAt(0) === "{") return parseJsonLocal(text);
     var lines = text.split("\n");
-    var marker = -1;
+    var sections = [];
+    var tag = "map";
+    var args = "";
+    var body = [];
+
     for (var i = 0; i < lines.length; i++) {
-      if (lines[i].trim().toUpperCase() === "# ROTATION") { marker = i; break; }
+      var line = lines[i].replace(/\s+$/, "");
+      var stripped = line.trim();
+      if (!stripped) continue;
+      if (stripped.charAt(0) === "#") {
+        var match = stripped.match(/^#\s*(ROTATION|OBJECTS|ENTITIES|TEMPLATE|ROOM_TYPE)\b(.*)$/i);
+        if (match) {
+          sections.push({ tag: tag, args: args, body: body });
+          tag = match[1].toLowerCase();
+          args = match[2].trim();
+          body = [];
+        }
+        continue;
+      }
+      body.push(line);
     }
-    var head = marker >= 0 ? lines.slice(0, marker) : lines;
-    var rowsText = [];
-    for (var j = 0; j < head.length; j++) {
-      var line = head[j].replace(/\s+$/, "");
-      if (!line) continue;
-      var t = line.trim();
-      if (t.charAt(0) === "#") continue;
-      rowsText.push(line);
-    }
-    if (rowsText.length !== ROWS) throw new Error("地图需要 " + ROWS + " 行，实际 " + rowsText.length + " 行");
+    sections.push({ tag: tag, args: args, body: body });
+
+    var mapLines = [];
+    var objectLines = [];
+    var rotLines = [];
+    var rotArgs = "";
+    var sawRotation = false;
+    var roomType = "empty";
+
+    sections.forEach(function (section) {
+      if (section.tag === "rotation") {
+        sawRotation = true;
+        rotArgs = section.args.toLowerCase();
+        rotLines = rotLines.concat(section.body);
+        return;
+      }
+      if (section.tag === "objects" || section.tag === "entities") {
+        objectLines = objectLines.concat(section.body);
+        return;
+      }
+      if (section.tag === "template" || section.tag === "room_type") {
+        var value = section.args.toLowerCase();
+        var rest = section.body.slice();
+        if (!value && rest.length) {
+          var first = rest[0].trim().toLowerCase();
+          if (["start", "empty", "item", "shop", "boss"].indexOf(first) >= 0) {
+            value = first;
+            rest.shift();
+          }
+        }
+        if (value) {
+          if (["start", "empty", "item", "shop", "boss"].indexOf(value) < 0) {
+            throw new Error("房间类型不认识：" + value);
+          }
+          roomType = value;
+        }
+        mapLines = mapLines.concat(rest);
+        return;
+      }
+      mapLines = mapLines.concat(section.body);
+    });
+
+    if (mapLines.length !== ROWS) throw new Error("地图需要 " + ROWS + " 行，实际 " + mapLines.length + " 行");
     var rows = [];
     for (var y = 0; y < ROWS; y++) {
-      if (rowsText[y].length !== COLS) throw new Error("第 " + (y + 1) + " 行长度 " + rowsText[y].length + "，需要 " + COLS);
+      if (mapLines[y].length !== COLS) throw new Error("第 " + (y + 1) + " 行长度 " + mapLines[y].length + "，需要 " + COLS);
       for (var x = 0; x < COLS; x++) {
-        if (".BWDCXYZ".indexOf(rowsText[y].charAt(x)) < 0) throw new Error("第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
+        if (".BWDCXYZ".indexOf(mapLines[y].charAt(x)) < 0) throw new Error("第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
       }
-      rows.push(rowsText[y]);
+      rows.push(mapLines[y]);
     }
+
     var rot = grid(0);
-    if (marker >= 0) {
-      var rotLines = [];
-      for (var k = marker + 1; k < lines.length; k++) {
-        var rl = lines[k].trim();
-        if (rl && rl.charAt(0) !== "#") rotLines.push(rl);
-      }
-      if (!rotLines.length) throw new Error("# ROTATION 后面没有内容");
-      var sparse = /[\s,]/.test(rotLines[0]);
+    if (sawRotation) {
+      var cleanRot = rotLines.map(function (line) { return line.trim(); }).filter(function (line) { return !!line && line.charAt(0) !== "#"; });
+      if (!cleanRot.length && rotArgs !== "sparse") throw new Error("# ROTATION 后面没有内容");
+      var sparse = rotArgs === "sparse" || /[\s,]/.test(cleanRot[0] || "");
       if (sparse) {
-        for (var s = 0; s < rotLines.length; s++) {
-          var parts = rotLines[s].split(/[\s,]+/);
+        for (var s = 0; s < cleanRot.length; s++) {
+          var parts = cleanRot[s].split(/[\s,]+/);
           if (parts.length !== 3) throw new Error("稀疏旋转要写成 x,y,r");
-          var sx = +parts[0], sy = +parts[1], sr = +parts[2];
+          var sx = Number(parts[0]), sy = Number(parts[1]), sr = Number(parts[2]);
           if (!(sx >= 0 && sx < COLS && sy >= 0 && sy < ROWS && sr >= 0 && sr <= 3)) throw new Error("稀疏旋转越界");
           rot[sy][sx] = sr;
         }
       } else {
-        if (rotLines.length < ROWS) throw new Error("旋转表需要 " + ROWS + " 行");
+        if (cleanRot.length < ROWS) throw new Error("旋转表需要 " + ROWS + " 行");
         for (var ry = 0; ry < ROWS; ry++) {
-          if (rotLines[ry].length !== COLS) throw new Error("旋转表第 " + (ry + 1) + " 行长度不对");
+          if (cleanRot[ry].length !== COLS) throw new Error("旋转表第 " + (ry + 1) + " 行长度不对");
           for (var rx = 0; rx < COLS; rx++) {
-            var ch = rotLines[ry].charAt(rx);
+            var ch = cleanRot[ry].charAt(rx);
             if ("0123".indexOf(ch) < 0) throw new Error("旋转表第 " + (ry + 1) + " 行有非 0..3 字符");
-            rot[ry][rx] = +ch;
+            rot[ry][rx] = Number(ch);
           }
         }
       }
     }
-    return { rows: rows, rot: rot };
+
+    var objects = objectLines.map(parseObjectLine);
+    return { rows: rows, rot: rot, objects: objects, roomType: roomType };
   }
 
   /* ---------------------------------------------------------------- 状态 */
@@ -205,6 +414,9 @@
   function restoreState(snap) {
     S.map = cloneGrid(snap.map);
     S.rot = cloneGrid(snap.rot);
+    S.objects = cloneObjects(snap.objects);
+    S.roomType = snap.roomType || S.roomType;
+    if (roomTypeEl) roomTypeEl.value = S.roomType;
     changed();
   }
 
@@ -271,8 +483,33 @@
     }
   }
 
+  function objectsAt(x, y) {
+    return S.objects.filter(function (obj) { return obj.x === x && obj.y === y; });
+  }
+
+  function removeObjectsAt(x, y) {
+    S.objects = S.objects.filter(function (obj) { return !(obj.x === x && obj.y === y); });
+  }
+
+  function removeObjectKindAt(x, y, kind) {
+    S.objects = S.objects.filter(function (obj) {
+      return !(obj.x === x && obj.y === y && obj.kind === kind);
+    });
+  }
+
+  function addObject(kind, x, y) {
+    if (!inBounds(x, y) || !OBJECT_BY_ID[kind]) return;
+    removeObjectKindAt(x, y, kind);
+    S.objects.push({ kind: kind, x: x, y: y, arg: 0 });
+    S.objects = sortObjects(S.objects);
+  }
+
   function paintAt(p) {
-    if (S.erase) {
+    if (S.loading) return;
+    if (S.layer === "object") {
+      if (S.erase) removeObjectsAt(p.x, p.y);
+      else addObject(S.objBrush, p.x, p.y);
+    } else if (S.erase) {
       removeDoorAt(p.x, p.y);
       S.map[p.y][p.x] = ".";
       S.rot[p.y][p.x] = 0;
@@ -345,6 +582,25 @@
     target.restore();
   }
 
+  function paintObject(target, obj) {
+    var def = OBJECT_BY_ID[obj.kind];
+    var px = obj.x * TILE, py = obj.y * TILE;
+    var image = images[obj.kind];
+    if (image) {
+      target.imageSmoothingEnabled = false;
+      target.drawImage(image, px, py, TILE, TILE);
+    } else {
+      var color = obj.kind === "slime" ? "#65c46f" : obj.kind === "bug" ? "#c58a4a" : obj.kind === "web" ? "#c8d0dc" : "#a07850";
+      target.fillStyle = color;
+      target.fillRect(px + 3, py + 3, TILE - 6, TILE - 6);
+      target.fillStyle = "#0b1118";
+      target.font = "9px Consolas, monospace";
+      target.textAlign = "center";
+      target.textBaseline = "middle";
+      target.fillText(obj.kind.slice(0, 4), px + TILE / 2, py + TILE / 2);
+    }
+  }
+
   function drawGrid(target) {
     var x, y, lx, ly;
     target.save();
@@ -407,8 +663,8 @@
     }
 
     if (S.hover) {
-      target.strokeStyle = "rgba(255,255,255,.55)";
-      target.lineWidth = 1;
+      target.strokeStyle = S.layer === "object" ? "rgba(244,170,98,.9)" : "rgba(255,255,255,.55)";
+      target.lineWidth = S.layer === "object" ? 2 : 1;
       target.strokeRect(S.hover.x * TILE + 0.5, S.hover.y * TILE + 0.5, TILE - 1, TILE - 1);
     }
 
@@ -439,6 +695,14 @@
         if (S.map[dy][dx] === "D") paintDoor(ctx, dx, dy);
       }
     }
+
+    var objects = S.objects.slice().sort(function (a, b) {
+      var la = OBJECT_BY_ID[a.kind] && OBJECT_BY_ID[a.kind].layer === "scene" ? 0 : 1;
+      var lb = OBJECT_BY_ID[b.kind] && OBJECT_BY_ID[b.kind].layer === "scene" ? 0 : 1;
+      return (la - lb) || (a.y - b.y) || (a.x - b.x);
+    });
+    for (var oi = 0; oi < objects.length; oi++) paintObject(ctx, objects[oi]);
+
     drawGrid(ctx);
     drawOverlay(ctx);
   }
@@ -459,6 +723,21 @@
     pctx.fillStyle = "#0b121b";
     pctx.fillRect(0, 0, 96, 96);
 
+    if (S.layer === "object") {
+      var def = OBJECT_BY_ID[S.objBrush];
+      var objImage = images[S.objBrush];
+      if (objImage) {
+        var ow = objImage.naturalWidth || 32;
+        var oh = objImage.naturalHeight || 32;
+        var scale = 80 / Math.max(ow, oh);
+        pctx.imageSmoothingEnabled = false;
+        pctx.drawImage(objImage, 48 - ow * scale / 2, 48 - oh * scale / 2, ow * scale, oh * scale);
+      }
+      $("previewText").textContent = (def ? def.name : S.objBrush) + "\n对象 id：" + (def ? def.code : "?") +
+        "\n坐标单位：32 px 格\n左键放，右键擦";
+      return;
+    }
+
     var code = currentCode();
     var t = tileOf(code);
     var angle = drawAngle(S.angle);
@@ -472,16 +751,16 @@
       var img = images[t.id];
       var dw = img.naturalWidth || 32;
       var dh = img.naturalHeight || 32;
-      var scale = 80 / Math.max(dw, dh);
-      var ow = dw * scale;
-      var oh = dh * scale;
+      var s = 80 / Math.max(dw, dh);
+      var w = dw * s;
+      var h = dh * s;
       pctx.save();
       pctx.translate(48, 48);
       pctx.rotate(angle * Math.PI / 2);
       if (fx) pctx.scale(-1, 1);
       if (fy) pctx.scale(1, -1);
       pctx.imageSmoothingEnabled = false;
-      pctx.drawImage(img, -ow / 2, -oh / 2, ow, oh);
+      pctx.drawImage(img, -w / 2, -h / 2, w, h);
       pctx.restore();
     }
 
@@ -502,6 +781,15 @@
     for (var k = 0; k < CODES.length; k++) {
       var code = CODES[k];
       html += '<div class="count"><span>' + code + " · " + tileOf(code).name + "</span><b>" + counts[code] + "</b></div>";
+    }
+    var objectCounts = {};
+    for (var oi = 0; oi < OBJECT_DEFS.length; oi++) objectCounts[OBJECT_DEFS[oi].id] = 0;
+    for (var oj = 0; oj < S.objects.length; oj++) {
+      if (objectCounts[S.objects[oj].kind] !== undefined) objectCounts[S.objects[oj].kind] += 1;
+    }
+    for (var di = 0; di < OBJECT_DEFS.length; di++) {
+      var def = OBJECT_DEFS[di];
+      html += '<div class="count"><span>● ' + def.name + "</span><b>" + objectCounts[def.id] + "</b></div>";
     }
     countsEl.innerHTML = html;
     mapTextEl.value = serialize();
@@ -526,6 +814,10 @@
     var text = p.x + "," + p.y + " · " + code;
     if (code === "D") text += " · " + DIRS[S.rot[p.y][p.x] & 3];
     else if (code !== ".") text += " · " + (S.rot[p.y][p.x] & 3) * 90 + "°";
+    var objs = objectsAt(p.x, p.y);
+    if (objs.length) {
+      text += " · " + objs.map(function (obj) { return obj.kind; }).join("+");
+    }
     cursorEl.textContent = text;
   }
 
@@ -569,17 +861,52 @@
   function updateSelection() {
     var tiles = paletteEl.querySelectorAll(".tile");
     for (var i = 0; i < tiles.length; i++) {
-      tiles[i].classList.toggle("selected", tiles[i].getAttribute("data-brush") === S.brush);
+      tiles[i].classList.toggle("selected", S.layer === "tile" && tiles[i].getAttribute("data-brush") === S.brush);
+    }
+    var objects = objectPaletteEl.querySelectorAll(".tile");
+    for (var oi = 0; oi < objects.length; oi++) {
+      objects[oi].classList.toggle("selected", S.layer === "object" && objects[oi].getAttribute("data-object") === S.objBrush);
     }
     var cbtns = cornerRow.querySelectorAll("button");
     for (var c = 0; c < cbtns.length; c++) cbtns[c].classList.toggle("on", S.brush === "C" && c === S.corner);
     var abtns = angleRow.querySelectorAll("button");
     for (var a = 0; a < abtns.length; a++) abtns[a].classList.toggle("on", a === (S.angle & 3));
+    if (layerTileEl) layerTileEl.classList.toggle("on", S.layer === "tile");
+    if (layerObjectEl) layerObjectEl.classList.toggle("on", S.layer === "object");
+  }
+
+  function updateLayerHint() {
+    var hint = $("layerHint");
+    if (!hint) return;
+    hint.textContent = S.layer === "tile"
+      ? "地形层：画地板、墙、门、角块。切到对象层后，左键放对象、右键擦对象。"
+      : "对象层：左键放 " + (OBJECT_BY_ID[S.objBrush] ? OBJECT_BY_ID[S.objBrush].name : S.objBrush) + "，右键擦掉这一格的所有对象。";
+  }
+
+  function selectLayer(layer) {
+    S.layer = layer === "object" ? "object" : "tile";
+    updateSelection();
+    updateLayerHint();
+    updateAngleHint();
+    drawPreview();
+    scheduleDraw();
   }
 
   function selectBrush(code) {
+    S.layer = "tile";
     S.brush = code;
     updateSelection();
+    updateLayerHint();
+    drawPreview();
+    updateAngleHint();
+  }
+
+  function selectObject(kind) {
+    if (!OBJECT_BY_ID[kind]) return;
+    S.layer = "object";
+    S.objBrush = kind;
+    updateSelection();
+    updateLayerHint();
     drawPreview();
     updateAngleHint();
   }
@@ -598,15 +925,27 @@
   }
 
   function cycle() {
+    if (S.layer === "object") {
+      var index = 0;
+      for (var i = 0; i < OBJECT_DEFS.length; i++) if (OBJECT_DEFS[i].id === S.objBrush) index = i;
+      selectObject(OBJECT_DEFS[(index + 1) % OBJECT_DEFS.length].id);
+      return;
+    }
     if (S.brush === "C") setCorner(S.corner + 1);
     else setAngle(S.angle + 1);
   }
 
   function updateAngleHint() {
     var hint = $("angleHint");
-    if (S.brush === "D") hint.textContent = "门：角度就是方向 0=N 1=E 2=S 3=W；D 只占一格，另一格会自动清空。";
-    else if (S.brush === "C") hint.textContent = "角块先翻转再旋转；旋转值会写进 rot 表，和 C 侧的 corner_transform 一致。";
-    else hint.textContent = "墙和地板按这个角度旋转；门的旋转值是方向，不是贴图角度。";
+    if (S.layer === "object") {
+      hint.textContent = "对象层不使用旋转；坐标按整格保存（×32 px）。";
+    } else if (S.brush === "D") {
+      hint.textContent = "门：角度就是方向 0=N 1=E 2=S 3=W；D 只占一格，另一格会自动清空。";
+    } else if (S.brush === "C") {
+      hint.textContent = "角块先翻转再旋转；旋转值会写进 rot 表，和 C 侧的 corner_transform 一致。";
+    } else {
+      hint.textContent = "墙和地板按这个角度旋转；门的旋转值是方向，不是贴图角度。";
+    }
   }
 
   /* ---------------------------------------------------------------- 视图 */
@@ -730,6 +1069,7 @@
 
   async function save() {
     if (!S.served) { setStatus("保存需要 serve.py 打开页面", false); return; }
+    if (S.loading) { setStatus("正在读取 output/room_map.txt，请稍后再保存", "busy"); return; }
     S.file = fileNameEl.value.trim() || "room_map.txt";
     setStatus("保存中…", "busy");
     var response = await apiPost("/api/save?name=" + encodeURIComponent(S.file), serialize());
@@ -740,10 +1080,13 @@
       return;
     }
     S.savedText = json.text;
+    S.file = json.file || S.file;
+    fileNameEl.value = S.file;
+    S.jsonFile = json.json_file || (baseName() + ".json");
     markDirty();
     saveDraftNow(false);
     if (json.issues) renderIssues(json.issues);
-    var message = "已保存 output/" + json.file;
+    var message = "已保存 output/" + S.file + " + " + S.jsonFile;
     if (alsoEmitEl.checked) {
       var ok = await emitC(true);
       if (ok) message += "，并生成 output/" + S.cfile;
@@ -755,6 +1098,7 @@
 
   async function emitC(quiet) {
     if (!S.served) { if (!quiet) setStatus("生成 C 需要 serve.py", false); return false; }
+    if (S.loading) { if (!quiet) setStatus("正在读取 output/room_map.txt，请稍后再生成", "busy"); return false; }
     S.cfile = cFileNameEl.value.trim() || "game_world_map.c";
     var response = await apiPost(
       "/api/emit_c?name=" + encodeURIComponent(S.cfile) + "&map=" + encodeURIComponent(S.file),
@@ -782,9 +1126,16 @@
         setStatus("导入失败：" + (json.error || "未知错误"), false);
         return false;
       }
-      data = { rows: json.rows, rot: json.rot, issues: json.issues || [], format: json.format };
+      data = {
+        rows: json.rows,
+        rot: json.rot,
+        objects: json.objects || [],
+        roomType: json.room_type || "empty",
+        issues: json.issues || [],
+        format: json.format
+      };
     } else {
-      if (/room_map_shared|room_rot_shared/.test(text)) {
+      if (/room_map_shared|room_rot_shared|room_objects/.test(text)) {
         setStatus("导入 C 需要 serve.py；file:// 下只能导入 txt", false);
         return false;
       }
@@ -793,8 +1144,10 @@
         data = {
           rows: parsed.rows,
           rot: parsed.rot,
+          objects: parsed.objects,
+          roomType: parsed.roomType,
           issues: [],
-          format: "text"
+          format: text.trim().charAt(0) === "{" ? "json" : "text"
         };
       } catch (e) {
         setStatus("导入失败：" + e.message, false);
@@ -802,14 +1155,15 @@
       }
     }
     if (record !== false) pushHistory();
-    applyState(data.rows, data.rot);
+    applyState(data.rows, data.rot, data.objects, data.roomType);
     if (fromDisk) { S.savedText = serialize(); }
     renderIssues(data.issues);
     refreshInfo();
     markDirty();
     scheduleDraw();
     saveDraftSoon();
-    setStatus("已导入" + (data.format === "c" ? " C" : "文本") + (label ? "：" + label : ""));
+    var kindLabel = data.format === "c" ? " C" : data.format === "json" ? " JSON" : "文本";
+    setStatus("已导入" + kindLabel + (label ? "：" + label : ""));
     return true;
   }
 
@@ -886,9 +1240,20 @@
     setStatus("已下载 " + S.cfile);
   }
 
+  function baseName() {
+    return (S.file || "room_map.txt").replace(/\.(txt|json)$/i, "");
+  }
+
   function downloadTxt() {
-    downloadBlob(serialize(), S.file, "text/plain;charset=utf-8");
-    setStatus("已下载 " + S.file);
+    var name = baseName() + ".txt";
+    downloadBlob(serialize(), name, "text/plain;charset=utf-8");
+    setStatus("已下载 " + name);
+  }
+
+  function downloadJson() {
+    var name = baseName() + ".json";
+    downloadBlob(serializeJson(), name, "application/json;charset=utf-8");
+    setStatus("已下载 " + name);
   }
 
   function copyText() {
@@ -905,7 +1270,7 @@
   function exportPng() {
     var anchor = document.createElement("a");
     anchor.href = canvas.toDataURL("image/png");
-    anchor.download = S.file.replace(/\.txt$/i, "") + ".png";
+    anchor.download = baseName() + ".png";
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
@@ -917,7 +1282,13 @@
   var draftTimer = null;
   function saveDraftNow(dirty) {
     try {
-      localStorage.setItem("debug_room_map", JSON.stringify({ map: S.map, rot: S.rot, dirty: !!dirty }));
+      localStorage.setItem("map_designer_draft", JSON.stringify({
+        map: S.map,
+        rot: S.rot,
+        objects: S.objects,
+        roomType: S.roomType,
+        dirty: !!dirty
+      }));
     } catch (e) { /* 隐私模式 / 配额满，忽略 */ }
   }
 
@@ -928,11 +1299,13 @@
 
   function loadDraft() {
     try {
-      var raw = localStorage.getItem("debug_room_map");
+      var raw = localStorage.getItem("map_designer_draft") || localStorage.getItem("debug_room_map");
       if (!raw) return null;
       var data = JSON.parse(raw);
       var map = Array.isArray(data) ? data : data.map;
       var rot = Array.isArray(data) ? null : data.rot;
+      var objects = Array.isArray(data) ? [] : (data.objects || []);
+      var roomType = Array.isArray(data) ? "empty" : (data.roomType || "empty");
       if (!Array.isArray(map) || map.length !== ROWS) return null;
       var rows = [];
       for (var y = 0; y < ROWS; y++) {
@@ -946,8 +1319,14 @@
           for (var rx = 0; rx < COLS && rx < rot[ry].length; rx++) rotGrid[ry][rx] = Number(rot[ry][rx]) & 3;
         }
       }
+      var cleanObjects = [];
+      for (var i = 0; i < objects.length; i++) {
+        var obj = objects[i];
+        if (!obj || !OBJECT_BY_ID[obj.kind] || !inBounds(obj.x, obj.y)) continue;
+        cleanObjects.push({ kind: obj.kind, x: obj.x | 0, y: obj.y | 0, arg: obj.arg | 0 });
+      }
       var dirty = Array.isArray(data) ? true : data.dirty !== false;
-      return { rows: rows, rot: rotGrid, dirty: dirty };
+      return { rows: rows, rot: rotGrid, objects: cleanObjects, roomType: roomType, dirty: dirty };
     } catch (e) {
       return null;
     }
@@ -956,12 +1335,15 @@
   /* ---------------------------------------------------------------- 图片 */
 
   function loadImages() {
-    var jobs = TILES.filter(function (t) { return t.image; }).map(function (t) {
+    var defs = TILES.concat(OBJECT_DEFS.map(function (def) {
+      return { id: def.id, image: def.image, base: "" };
+    }));
+    var jobs = defs.filter(function (t) { return t.image; }).map(function (t) {
       return new Promise(function (resolve) {
         var image = new Image();
         image.onload = function () { images[t.id] = image; resolve(); };
         image.onerror = function () { images[t.id] = null; resolve(); };
-        image.src = ASSET_BASE + t.image;
+        image.src = (t.base || "") + t.image;
       });
     });
     return Promise.all(jobs);
@@ -983,7 +1365,7 @@
 
       if (t.image) {
         var image = document.createElement("img");
-        image.src = ASSET_BASE + t.image;
+        image.src = (t.base || ASSET_BASE) + t.image;
         image.alt = t.name;
         element.appendChild(image);
       } else {
@@ -999,6 +1381,33 @@
 
       element.addEventListener("click", function () { selectBrush(t.code); });
       paletteEl.appendChild(element);
+    });
+  }
+
+  function buildObjectPalette() {
+    OBJECT_DEFS.forEach(function (def) {
+      var element = document.createElement("div");
+      element.className = "tile object";
+      element.setAttribute("data-object", def.id);
+      element.title = def.name + " [" + def.id + "]";
+
+      var code = document.createElement("span");
+      code.className = "code";
+      code.textContent = String(def.code);
+      element.appendChild(code);
+
+      var image = document.createElement("img");
+      image.src = def.image;
+      image.alt = def.name;
+      element.appendChild(image);
+
+      var name = document.createElement("span");
+      name.className = "name";
+      name.textContent = def.name;
+      element.appendChild(name);
+
+      element.addEventListener("click", function () { selectObject(def.id); });
+      objectPaletteEl.appendChild(element);
     });
   }
 
@@ -1044,6 +1453,14 @@
     $("btn150").addEventListener("click", function () { setZoom(1.5, true); });
     zoomSlider.addEventListener("input", function () { setZoom(Number(zoomSlider.value) / 100, true); });
 
+    layerTileEl.addEventListener("click", function () { selectLayer("tile"); });
+    layerObjectEl.addEventListener("click", function () { selectLayer("object"); });
+    roomTypeEl.addEventListener("change", function () {
+      var value = roomTypeEl.value;
+      S.roomType = ["start", "empty", "item", "shop"].indexOf(value) >= 0 ? value : "empty";
+      changed();
+    });
+
     $("fwView").addEventListener("change", function () {
       S.fwView = this.checked;
       drawPreview();
@@ -1051,10 +1468,11 @@
     });
 
     $("btnClear").addEventListener("click", function () {
-      if (!window.confirm("清空整张地图？")) return;
+      if (!window.confirm("清空整张地图和对象层？")) return;
       pushHistory();
       S.map = grid(".");
       S.rot = grid(0);
+      S.objects = [];
       changed();
       setStatus("已清空（可以 Ctrl+Z 撤销）");
     });
@@ -1069,6 +1487,7 @@
     $("btnEmitC").addEventListener("click", function () { emitC(false); });
     $("btnDownloadC").addEventListener("click", downloadC);
     $("btnDownloadTxt").addEventListener("click", downloadTxt);
+    $("btnDownloadJson").addEventListener("click", downloadJson);
     $("btnCopy").addEventListener("click", copyText);
     $("btnPng").addEventListener("click", exportPng);
     $("btnImportText").addEventListener("click", function () { importRaw(importTextEl.value, "文本框", false); });
@@ -1115,7 +1534,8 @@
       return;
     }
 
-    if (key === "b") selectBrush("B");
+    if (key === "o") selectLayer(S.layer === "tile" ? "object" : "tile");
+    else if (key === "b") selectBrush("B");
     else if (key === "w") selectBrush("W");
     else if (key === "d") selectBrush("D");
     else if (key === "e") selectBrush(".");
@@ -1123,9 +1543,15 @@
     else if (key === "0") fit();
     else if (key === "+" || key === "=") setZoom(S.zoom + 0.25, true);
     else if (key === "-") setZoom(S.zoom - 0.25, true);
-    else if (key >= "1" && key <= "4") {
-      if (S.brush === "C") setCorner(Number(key) - 1);
-      else setAngle(Number(key) - 1);
+    else if (key >= "1" && key <= "7") {
+      var index = Number(key) - 1;
+      if (S.layer === "object") {
+        if (OBJECT_DEFS[index]) selectObject(OBJECT_DEFS[index].id);
+      } else if (S.brush === "C") {
+        if (index < 4) setCorner(index);
+      } else if (index < 4) {
+        setAngle(index);
+      }
     } else return;
     event.preventDefault();
   }
@@ -1134,10 +1560,12 @@
 
   function boot() {
     buildPalette();
+    buildObjectPalette();
     buildCornerRow();
     buildAngleRow();
     bindUi();
     updateSelection();
+    updateLayerHint();
     updateAngleHint();
     setZoom(1);
     window.requestAnimationFrame(fit);
@@ -1145,7 +1573,7 @@
     var draft = loadDraft();
     var useDraft = !!(draft && (!S.served || draft.dirty));
     if (useDraft) {
-      applyState(draft.rows, draft.rot);
+      applyState(draft.rows, draft.rot, draft.objects, draft.roomType);
       S.history.length = 0;
       S.future.length = 0;
       S.savedText = "";
@@ -1153,8 +1581,9 @@
     }
 
     loadImages().then(function () {
-      var missing = TILES.filter(function (t) { return t.image && !images[t.id]; }).map(function (t) { return t.image; });
-      if (missing.length) setStatus("素材加载失败：" + missing.join("、") + "（检查 res/pic/base/background/）", false);
+      var missing = TILES.filter(function (t) { return t.image && !images[t.id]; }).map(function (t) { return t.image; })
+        .concat(OBJECT_DEFS.filter(function (d) { return !images[d.id]; }).map(function (d) { return d.id; }));
+      if (missing.length) setStatus("素材加载失败：" + missing.join("、") + "（检查 res/pic/）", false);
       refreshInfo();
       scheduleDraw();
     });
@@ -1165,7 +1594,10 @@
 
     if (S.served) {
       refreshList();
-      if (!useDraft) loadName("room_map.txt", true, false);
+      if (!useDraft) {
+        S.loading = true;
+        loadName("room_map.txt", true, false).finally(function () { S.loading = false; });
+      }
       scheduleValidate();
     } else {
       setStatus("file:// 模式：只能编辑和导入导出文本；保存 / 生成 C / 自动校验请用 serve.py 打开。", false);

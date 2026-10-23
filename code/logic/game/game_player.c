@@ -153,8 +153,8 @@ void game_player_step(u32 keys, u32 now)
 static void player_shot(int angle, int speed)
 {
     int a  = angle & (ANGLE_STEPS - 1);
-    int px = g.x + PW / 2 - BW / 2;
-    int py = g.y + PLAYER_MUZ_DY - BH / 2;
+    int px = g.x + PB_OFF_X + PB_W / 2 - BW / 2;
+    int py = g.y + PB_OFF_Y;                 /* 碰撞箱最上面一行 */
     int vx8 = (g_sin_tab[(a + ANGLE_STEPS / 4) & 63] * speed * 8) >> 6;
     int vy8 = (g_sin_tab[a] * speed * 8) >> 6;
 
@@ -183,10 +183,10 @@ void game_player_fire(void)
     (void)tx; (void)ty;
 
     if (g.fire_triple) {
-        /* 三向：正前 + 左右各偏 PLAYER_TRIPLE_SPREAD 格（默认 4 格 = 22.5°），速度 3 */
-        player_shot(a - PLAYER_TRIPLE_SPREAD, g.stats.triple_speed);
-        player_shot(a,                        g.stats.triple_speed);
-        player_shot(a + PLAYER_TRIPLE_SPREAD, g.stats.triple_speed);
+        /* 多弹幕：正前 + 左右各偏 PLAYER_TRIPLE_SPREAD 格；速度统一用玩家弹速 */
+        player_shot(a - PLAYER_TRIPLE_SPREAD, g.stats.bullet_speed);
+        player_shot(a,                        g.stats.bullet_speed);
+        player_shot(a + PLAYER_TRIPLE_SPREAD, g.stats.bullet_speed);
     } else {
         player_shot(a, g.stats.bullet_speed);
     }
@@ -233,7 +233,7 @@ void game_player_draw(u32 fb, u32 now, int buf)
     }
 #endif
 
-    if (game_visible(g.x, g.y, PW, PH)) {
+    if (game_visible_world(g.x, g.y, PW, PH)) {
         if (hurt && ((now / 120u) & 1u)) {
             CI_gpu2d_combineTintRect(g_assets[ai].base_word, g_assets[ai].stride_word,
                 GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN,
@@ -262,7 +262,7 @@ void game_player_draw(u32 fb, u32 now, int buf)
             int ix = g.x + (PW - iw) / 2;
             int iy = g.y + ITEM_HELD_DY;
 
-            if (game_visible(ix, iy, iw, ih))
+            if (game_visible_world(ix, iy, iw, ih))
                 CI_gpu2d_spriteAlphaRect(g_assets[icon].base_word, g_assets[icon].stride_word,
                     fb, (u32)ix, (u32)iy, iw, ih, 0u);
         }
