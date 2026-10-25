@@ -334,6 +334,12 @@ textarea {
 .tile.object .code { color: var(--green); }
 #roomType { margin-bottom: 2px; }
 
+/* 画布尺寸（右栏） */
+.size-row { display: flex; gap: 6px; align-items: center; }
+.size-row input[type="number"] { flex: 1; min-width: 0; text-align: center; padding: 5px 4px; }
+.size-row > span { flex: 0 0 auto; }
+.size-row button { flex: 0 0 auto; padding: 6px 10px; }
+
 @media (max-width: 1180px) {
   .app { grid-template-columns: 236px minmax(420px, 1fr) 280px; }
 }

@@ -30,8 +30,9 @@
 static char s_cmd[CMD_MAX];
 static int  s_cmd_n;
 
-/*  P 键生成道具请求  */
+/*  P 键生成道具请求 / B 放置炸弹请求  */
 static int s_spawn_req;
+static int s_bomb_req;
 
 static int cmd_is(const char *a, const char *b)
 {
@@ -47,8 +48,11 @@ static void cmd_exec(void)
     if (cmd_is(s_cmd, "P") || cmd_is(s_cmd, "p")) {
         s_spawn_req = 1;
         bsp_printf("DEBUG: spawn queued\r\n");
+    } else if (cmd_is(s_cmd, "B") || cmd_is(s_cmd, "b")) {
+        s_bomb_req = 1;
+        bsp_printf("DEBUG: bomb queued\r\n");
     } else if (s_cmd[0] != 0) {
-        bsp_printf("DEBUG: unknown cmd '%s' (P)\r\n", s_cmd);
+        bsp_printf("DEBUG: unknown cmd '%s' (P/B)\r\n", s_cmd);
     }
 }
 
@@ -56,7 +60,7 @@ static int s_want_mask;         /* 已经看到帧头，等 mask */
 static u32 s_keys;              /* 最近一次收到的掩码 */
 static u32 s_until;             /* 这个掩码的有效期（毫秒时间戳） */
 static int s_restart_req;       /* R 键锁存：一次按下的"按下+松开"可能在同一帧里被吃掉 */
-static u32 s_prev_mask;         /* 上一帧的掩码：用来做 P 的上升沿 */
+static u32 s_prev_mask;         /* 上一帧的掩码：用来做 P/B 的上升沿 */
 
 /*----------------------------------------------------------------------------*/
 /*  取一次"按了 P"：取完就清 —— 主循环里在脚下生成一个道具  */
@@ -65,6 +69,14 @@ int game_take_spawn_item(void)
     int r = s_spawn_req;
 
     s_spawn_req = 0;
+    return r;
+}
+
+int game_take_bomb(void)
+{
+    int r = s_bomb_req;
+
+    s_bomb_req = 0;
     return r;
 }
 
@@ -77,12 +89,11 @@ u32 game_keys_read(void)
     while (uart_readOccupancy(BSP_UART_TERMINAL) > 0) {
         c = (int)(uart_read(BSP_UART_TERMINAL) & 0xFF);
 
-        /*  ★ 手柄帧的 mask 一定 < 0x20；可打印字符一定 ≥ 0x20。
-         *    所以"帧头后面的那个字节"只有在 < 0x20 时才算 mask，
-         *    否则说明是文本命令 —— 不能因为上一条帧没配齐就把文本吃掉。  */
-        if (s_want_mask && c < 0x20) {
+        /*  ★ 0xA5 后面紧跟的一定是 mask；bit5(B)/bit6(P) 会到 0x20/0x40，
+         *    不能再按"可打印字符"区分。  */
+        if (s_want_mask) {
             s_want_mask = 0;
-            s_keys = (u32)c & 0x7Fu;        /* bit0..3 方向 / bit4 R / bit6 P */
+            s_keys = (u32)c & 0x7Fu;        /* bit0..3 方向 / bit4 R / bit5 B / bit6 P */
             /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
                照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
             if (s_keys & KEY_RESTART) s_restart_req = 1;
@@ -90,6 +101,8 @@ u32 game_keys_read(void)
             /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
             if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
                 s_spawn_req = 1;
+            if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
+                s_bomb_req = 1;
             s_prev_mask = s_keys;
 
             s_until = game_ms() + PAD_TIMEOUT;

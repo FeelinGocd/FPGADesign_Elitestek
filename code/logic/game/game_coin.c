@@ -32,6 +32,23 @@ static int coin_hits_stone(int x, int y)
     return game_stone_overlap(x, y, COIN_W, COIN_H);
 }
 
+/*  这条金币算不算"当前房间里的活金币"：画 / 捡 / 标脏 / 碰撞都只认它。
+ *  ★ 以前每个用到它的地方各写一遍 (active && room == 当前房)，漏一个就会
+ *    把别的房间的金币画出来或者捡得走。  */
+static int coin_live(const coin_t *c)
+{
+    return c->active && c->room == (signed char)game_room_id();
+}
+
+/*  这个落点脚下是不是能站人的地板（B/K 或门洞）—— 和玩家撞墙判定同一套。
+ *  ★ L 形房的竞技场是 2×2 外接框，里面有缺口和内墙；金币以前按"竞技场中心 ±70 px"
+ *    撒，中心正好落在缺口里，清完 L 房的金币大半掉在墙里/黑区里，玩家走不进去，
+ *    永远捡不到（2026-10-24 抓到）。  */
+static int coin_on_floor(int x, int y)
+{
+    return game_room_cell_walkable((x + COIN_W / 2) / TILE, (y + COIN_H / 2) / TILE);
+}
+
 /*  整局复位（新一局 / 新一轮）：active、房间号、old 全清，随后地板会整屏重铺。  */
 void game_coins_reset(void)
 {
@@ -79,7 +96,8 @@ void game_coins_spawn(int count)
 
         if (c->active) continue;
 
-        /*  先随机散开；落在石头里就重掷。中心 3×3 是石头禁区，兜底放中心。  */
+        /*  先随机散开；落在石头里、或者脚下不是能站人的地板（L 形房的缺口 /
+         *  内墙）就重掷。重掷不出来才退到玩家脚底。  */
         for (tries = 0; tries < COIN_PLACE_TRIES; ++tries) {
             x = cx + (int)(coin_rand() % (2 * COIN_SPREAD + 1)) - COIN_SPREAD;
             y = cy + (int)(coin_rand() % (2 * COIN_SPREAD + 1)) - COIN_SPREAD;
@@ -87,11 +105,13 @@ void game_coins_spawn(int count)
             if (x > ARENA_X1 - COIN_W) x = ARENA_X1 - COIN_W;
             if (y < ARENA_Y0) y = ARENA_Y0;
             if (y > ARENA_Y1 - COIN_H) y = ARENA_Y1 - COIN_H;
-            if (!coin_hits_stone(x, y)) break;
+            if (!coin_hits_stone(x, y) && coin_on_floor(x, y)) break;
         }
         if (tries >= COIN_PLACE_TRIES) {
-            x = cx;
-            y = cy;
+            /*  ★ 兜底不能再放竞技场中心（L 形房的中心在缺口里）。放到玩家脚底：
+             *    玩家一定站在能走的地板上，而且顺手就捡走了。  */
+            x = g.x + PW / 2 - COIN_W / 2;
+            y = g.y + PH - COIN_H / 2;
         }
 
         c->active = 1;
@@ -108,12 +128,11 @@ void game_coins_spawn(int count)
 int game_coin_overlap(int x, int y, int w, int h)
 {
     int i;
-    signed char room = (signed char)game_room_id();
 
     for (i = 0; i < N_COINS; ++i) {
         const coin_t *c = &g.coin_items[i];
 
-        if (!c->active || c->room != room) continue;
+        if (!coin_live(c)) continue;
         if (x < c->x + COIN_W && x + w > c->x &&
             y < c->y + COIN_H && y + h > c->y) return 1;
     }
@@ -125,15 +144,13 @@ void game_coins_step(u32 now)
     int i;
     int px = g.x + PB_OFF_X + PB_W / 2;
     int py = g.y + PB_OFF_Y + PB_H / 2;
-    signed char room = (signed char)game_room_id();
 
     (void)now;
 
     for (i = 0; i < N_COINS; ++i) {
         coin_t *c = &g.coin_items[i];
 
-        if (!c->active) continue;
-        if (c->room != room) continue;              /* 别的房间的金币不在这捡 */
+        if (!coin_live(c)) continue;                /* 别的房间的金币不在这捡 */
         if (px >= c->x && px < c->x + COIN_W &&
             py >= c->y && py < c->y + COIN_H) {
             c->active = 0;
@@ -151,7 +168,7 @@ static void coin_draw_one(u32 fb, u32 now, int buf, int i)
 
     (void)now;
     (void)buf;
-    if (!c->active || c->room != (signed char)game_room_id()) return;
+    if (!coin_live(c)) return;
 
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
                              (u32)c->x, (u32)c->y, COIN_W, COIN_H, 0u);
@@ -160,12 +177,11 @@ static void coin_draw_one(u32 fb, u32 now, int buf, int i)
 void game_coins_submit(void)
 {
     int i;
-    signed char room = (signed char)game_room_id();
 
     for (i = 0; i < N_COINS; ++i) {
         const coin_t *c = &g.coin_items[i];
 
-        if (!c->active || c->room != room) continue;
+        if (!coin_live(c)) continue;
         if (!game_visible_world(c->x, c->y, COIN_W, COIN_H)) continue;
         rl_push(ACTOR_Z(c->y + COIN_H), coin_draw_one, i);
     }

@@ -85,10 +85,17 @@ static void cam_align(void)
         g.cam_x -= g.cam_x % g_cam_quant;
 }
 
+/*  世界比窗口大才需要相机（普通房 1280×720 = 窗口 ⇒ 永远 0,0；
+ *  Boss 房 1440×1120 ⇒ 跟随）。不再看"是不是 Boss 房"。  */
+static int cam_follows(void)
+{
+    return game_world_w() > SCR_W || game_world_h() > SCR_H;
+}
+
 /*  换房/复位：直接对准，不做过渡（避免新房间第一帧从旧位置滑进来）  */
 void game_camera_snap(void)
 {
-    if (game_world_is_boss()) {
+    if (cam_follows()) {
         int maxx = game_world_w() - SCR_W;
         int maxy = game_world_h() - SCR_H;
 
@@ -122,7 +129,7 @@ void game_camera_step(void)
     int tx, ty, dx, dy;
     int half, left, right, top, bottom;
 
-    if (!game_world_is_boss()) {
+    if (!cam_follows()) {
         g.cam_x = 0;
         g.cam_y = 0;
         return;
@@ -206,6 +213,11 @@ void game_reset_state(void)
 
     /* 玩家在初始房正中间（房间系统负责摆位置） */
     game_room_reset();
+    game_bombs_reset();
+    g.bomb_count = START_BOMBS;             /* 初始房保底给几颗（隐藏门靠它） */
+    game_bomb_spawn_pickup((ARENA_X0 + ARENA_X1) / 2 + 24 - BOMB_PICK_W / 2,
+                           (ARENA_Y0 + ARENA_Y1) / 2 - BOMB_PICK_H / 2,
+                           game_room_start());
     g.dir = DOWN;
     g.moving = 0; g.was_moving = 0; g.last_dir = DOWN;
     g.anim = 0u; g.fire_tick = 0u; g.anim_step = 0u;
@@ -311,14 +323,101 @@ void game_enter_gameover(u32 now)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  换房之后：按房间类型布置内容。
+/*  固定布局落地：石头/箱子/网/怪按 game_layout.c 里设计好的格子摆。
+ *  want_mobs = 0 时只摆静物（这间房已经刷过怪了）。
+ *  ★ 同格重复摆由 spawn_at 自己挡掉（幂等），所以重进房间/死亡回退都安全。  */
+static void spawn_layout_objects(const room_layout_t *L, int want_mobs,
+                                 int *n_mob, int *n_web, int *n_stone)
+{
+    int i;
+
+    for (i = 0; i < (int)L->n_objs; ++i) {
+        const obj_place_t *o = &L->objs[i];
+        int x = (int)o->x * TILE;
+        int y = (int)o->y * TILE;
+
+        /*  蓝图里这个对象已经打碎了 ⇒ 不再生成  */
+        if (game_room_cell_gone((int)game_room_id(), (int)o->x, (int)o->y)) continue;
+
+
+        switch (o->kind) {
+        case OBJ_SLIME:
+            if (want_mobs && game_mobs_spawn_at(x, y, OBJ_SLIME)) ++*n_mob;
+            break;
+        case OBJ_BUG:
+            if (want_mobs && game_mobs_spawn_at(x, y, OBJ_BUG)) ++*n_mob;
+            break;
+        case OBJ_WEB:
+            /*  网没有实例：位置就在蓝图里，渲染/减速都直接查表，这里不用生成  */
+            ++*n_web;
+            break;
+        case OBJ_STONE:
+        case OBJ_BOX:
+        case OBJ_CRATE:
+            /*  ★ 石头/箱子没有实体：位置就在布局里，画和碰撞都直接查布局。
+             *    这里只统计个数，给上面那行日志用。  */
+            ++*n_stone;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/*----------------------------------------------------------------------------*/
+/*  落点兜底：设计器允许把石头/箱子摆到任意格子（map1 就把板条箱摆在房间正中）。
+ *  落点一旦压在障碍上，玩家会卡在里面出不来（石头是硬的，那个方向一直被挡）。
+ *  这里以落点为中心一圈一圈往外找，取最近一个能放下身体的格子，最多 4 圈（128 px）。
+ *  ★ 必须在【摆完对象之后】调用，否则石头还没生成，查了也是白查。  */
+static int pick_free_spot(int x, int y)
+{
+    return !game_stone_overlap(x + PB_OFF_X, y + PB_OFF_Y, PB_W, PB_H);
+}
+
+static void player_place_safe(void)
+{
+    int x0 = g.x, y0 = g.y;
+    int r, dx, dy;
+
+    if (pick_free_spot(x0, y0)) return;
+
+    for (r = 1; r <= 4; ++r) {
+        for (dy = -r; dy <= r; ++dy) {
+            for (dx = -r; dx <= r; ++dx) {
+                int x, y;
+
+                /*  只看第 r 这一圈：更里面的圈上一轮已经查过  */
+                if (dx > -r && dx < r && dy > -r && dy < r) continue;
+
+                x = x0 + dx * TILE;
+                y = y0 + dy * TILE;
+                if (x < ARENA_X0 - PB_OFF_X || x > ARENA_X1 - PB_OFF_X - PB_W) continue;
+                if (y < ARENA_Y0 - PB_OFF_Y || y > ARENA_Y1 - PB_OFF_Y - PB_H) continue;
+                if (!pick_free_spot(x, y)) continue;
+
+                g.x = x;
+                g.y = y;
+                bsp_printf("ROOM: spawn blocked, moved to (%d,%d)\r\n", x, y);
+                return;
+            }
+        }
+    }
+}
+
+/*----------------------------------------------------------------------------*/
+/*  换房之后：按【房间类型 + 固定布局】布置内容。
  *  由 game_room_commit() 在"新房间已经显示出来"之后调用 ——
- *  Boss 房的 Boss 就是在这里生成的。  */
+ *  Boss 房的 Boss 就是在这里生成的。
+ *  优先级：布局里写了的对象 > 类型兜底的随机刷（没有固定布局的房间保持老行为）。  */
 void game_flow_enter_room(void)
 {
     int type = game_room_type();
     int id = game_room_id();
     int respawn = game_room_take_respawn(id);
+    const room_kind_t   *k = game_kind(type);
+    const room_layout_t *L = game_layout(game_room_layout());
+    int n_mob = 0, n_web = 0, n_stone = 0;
+    int want_mobs;
 
     /*  换房：小怪按房间重建；金币 / 网 / 石头都带 room 持久化，不在这里清  */
     game_mobs_reset();
@@ -332,91 +431,70 @@ void game_flow_enter_room(void)
         g.boss_blink_on = 0;
     }
     game_shot_stop(&g.shot);
+    g.phase = (k->flags & RK_FIGHT) ? PHASE_FIGHT : PHASE_EXPLORE;
+
+    /*  小怪只在"这间房还没刷过"时生成：布局里有就按布局摆，没有就按类型兜底  */
+    want_mobs = !(k->flags & RK_NO_MOB) &&
+                (respawn || (!game_room_is_spawned(id) && !game_room_is_cleared(id)));
+
+    if (L) spawn_layout_objects(L, want_mobs, &n_mob, &n_web, &n_stone);
 
     switch (type) {
-    case ROOM_EMPTY:
-        g.phase = PHASE_EXPLORE;
-        if (respawn || (!game_room_is_spawned(id) && !game_room_is_cleared(id))) {
-            game_mobs_spawn(2);             /* 普通房：2 只 slime */
-            game_mobs_spawn_bug(1);         /*        + 1 只 bug */
-            game_room_mark_spawned(id);
-        }
-        game_web_spawn(2 + (int)(game_ms() % 2u));   /* 普通房 2~3 张网 */
-        bsp_printf("ROOM: empty\r\n");
-        break;
-
     case ROOM_ITEM:
-        g.phase = PHASE_EXPLORE;
         /*  单槽道具：进道具房就以这间的道具为准；上一间 Boss 没捡的饰品作废  */
         g.boss_drop_pending = 0;
         if (game_room_is_used(id)) {
-            if (respawn) {
-                game_mobs_spawn(2);
-                game_mobs_spawn_bug(1);
-                game_room_mark_spawned(id);
-            }
-            bsp_printf("ROOM: item (already taken)\r\n");
+            /*  已经拿过：什么都不放  */
         } else if (!game_room_is_spawned(id)) {
             /*  ★ 道具房：这一轮第一次进来才随机挑一个，放在【房间中心】 */
             game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
                                    (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
-            game_mobs_spawn(2);             /* 道具房：2 只 slime */
-            game_mobs_spawn_bug(1);         /*        + 1 只 bug */
             game_room_mark_spawned(id);
-            bsp_printf("ROOM: item (random #%d)\r\n", g.item.type);
         } else {
-            /*  之前生成过、还没拿：原样恢复，不重掷  */
-            if (respawn) {
-                game_mobs_spawn(2);
-                game_mobs_spawn_bug(1);
-                game_room_mark_spawned(id);
-            }
-            g.item.active = 1;
-            bsp_printf("ROOM: item (kept #%d)\r\n", g.item.type);
+            g.item.active = 1;              /*  之前生成过、还没拿：原样恢复，不重掷  */
         }
         break;
 
     case ROOM_BOSS:
         /*  死亡卡回退：Boss 还活着才重置；Boss 已死时保持房间原样。  */
         if (respawn && g.boss_hp > 0) game_room_clear_spawned(id);
-        if (!game_room_is_spawned(game_room_id())) {
+        if (!game_room_is_spawned(id)) {
             game_boss_spawn();              /* 满血到场中，先等 1 s 再出招 */
-            game_room_mark_spawned(game_room_id());
-            bsp_printf("ROOM: boss\r\n");
-        } else {
+            game_room_mark_spawned(id);
+        } else if (g.boss_hp > 0) {
             /*  只生成一次：重进不重置血量/位置，接着打（但先等 1 s）  */
-            if (g.boss_hp > 0) {
-                g.phase = PHASE_FIGHT;
-                g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
-                game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
-                game_shot_begin(&g.shot, 0);
-            } else {
-                g.phase = PHASE_EXPLORE;    /* 已击破：exit 在上面等玩家 */
-            }
-            bsp_printf("ROOM: boss (resume, hp=%d)\r\n", g.boss_hp);
+            g.phase = PHASE_FIGHT;
+            g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
+            game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
+            game_shot_begin(&g.shot, 0);
+        } else {
+            g.phase = PHASE_EXPLORE;        /* 已击破：exit 在上面等玩家 */
         }
         break;
 
     case ROOM_SHOP:
-        g.phase = PHASE_EXPLORE;
-        game_shop_enter();                  /* 首次进商店：随机挑一个在售道具 */
-        bsp_printf("ROOM: shop (heart=5, item=15)\r\n");
+        game_shop_enter();                  /* 首次进商店：随机挑一个在售商品 */
         break;
 
-    default:                            /* ROOM_START */
-        g.phase = PHASE_EXPLORE;
-        game_web_spawn(2 + (int)(game_ms() % 2u));   /* 起点房也是普通房 */
-        bsp_printf("ROOM: start\r\n");
+    default:                                /* ROOM_START / ROOM_EMPTY */
         break;
     }
 
-    /*  商店是特殊房：不刷 mob / web / stone；其它房间增加石头，
-     *  Boss 房再稍微多一点点（普通 5~7，Boss 7~8）。  */
-    if (type != ROOM_SHOP) {
-        int n = (type == ROOM_BOSS) ? (7 + (int)(game_ms() % 2u))
-                                    : (5 + (int)(game_ms() % 3u));
-        game_stones_spawn(n);
+    /*  ★ 布局是权威的：房间里的东西只来自布局，不再随机加料。
+     *    石头/网连实体都没有（画和碰撞都查布局），所以这里只处理小怪。  */
+    if (want_mobs) {
+        if (!L && n_mob == 0) {
+            game_mobs_spawn(2);
+            game_mobs_spawn_bug(1);
+        }
+        game_room_mark_spawned(id);
     }
+
+    bsp_printf("ROOM: %s layout=%d mob=%d web=%d stone=%d\r\n",
+               k->name, game_room_layout(), n_mob, n_web, n_stone);
+
+    /*  对象都摆完了：最后确认玩家没站在石头/箱子里（map1 的中心板条箱就靠这条兜底）  */
+    player_place_safe();
 }
 
 /*----------------------------------------------------------------------------*/

@@ -28,6 +28,8 @@
 #include "type.h"
 #include "render_list.h"    /* 渲染队列：每个元素带自己的 z，统一排序后画 */
 #include "assets_desc.h"    /* ASSET_xxx 枚举 / asset_desc_t（表见下面的 g_assets 宏） */
+#include "game_layout.h"    /* 固定房间布局（排布）/ 房间类型表 */
+#include "game_frame.h"     /* 标准矩形房间框架的生成规则（墙 / 地板 / 门 / 角块） */
 
 //==================== 屏幕 ====================
 #define SCR_W 1280
@@ -40,6 +42,9 @@
  *  脏区按最大世界建表；普通房只用左上 40×23 格。  */
 #define MAP_MAX_COLS 45
 #define MAP_MAX_ROWS 35
+/*  game_layout.h 的异形地形按同一上限开数组；这里对一下，改一处忘另一处会编译报错。 */
+typedef char game_layout_size_check[(LAYOUT_MAX_COLS == MAP_MAX_COLS &&
+                                    LAYOUT_MAX_ROWS == MAP_MAX_ROWS) ? 1 : -1];
 #define BOSS_MAP_COLS 45                    /* Boss 大房间 45×35 = 1440×1120 */
 #define BOSS_MAP_ROWS 35
 #define GRID_W MAP_MAX_COLS                 /* 脏区格子数：45 */
@@ -62,12 +67,38 @@
 #define ITEM_FLOAT_AMP 5                    /* 图标上下浮动幅度（正弦，不再是硬跳） */
 #define ITEM_HELD_DY  (-20)                 /* 被角色举起时：相对角色顶边再往上 20（举在头顶） */
 
+//==================== 炸弹 ====================
+#define BOMB_W 32                         /* 放置后的交互贴图 */
+#define BOMB_H 32
+#define BOMB_HIT_W 16                     /* 实际碰撞体：比贴图小，贴在底部 */
+#define BOMB_HIT_H 16
+#define BOMB_HIT_OFF_X ((BOMB_W - BOMB_HIT_W) / 2)
+#define BOMB_HIT_OFF_Y (BOMB_H - BOMB_HIT_H)
+#define BOMB_PICK_W 24                    /* 掉落物贴图 */
+#define BOMB_PICK_H 24
+#define BOMB_FUSE_MS 3000u
+#define BOMB_BOOM_MS 300u
+#define BOMB_RADIUS 40
+#define BOMB_DMG 2
+
 //==================== 玩法参数 ====================
 #define N_BULLETS 192                       /* 160 敌弹上限 + 32 玩家保底 = 192，不再多留 64 空槽 */
 #define N_MOBS     16                       /* 当前房间的小怪（slime / bug） */
 #define N_COINS    56                       /* 全地图持久金币：最多 11 个奖励房 ×5 */
-#define N_WEBS     32                       /* 全地图持久网：最多 10 个普通房 ×3，留余量 */
-#define N_STONES   96                       /* 全地图持久石头：最多 12 间房 ×8 */
+#define MAX_BROKEN 96                       /* 整局"已破坏 interact"清单容量（每条 = 房间 + x + y，3 B）；
+                                             * 一张 1×1 布局有 32 块石头，96 条够炸空三间房 */
+#define N_BOMBS    12                       /* 跨房间炸弹实体上限 */
+/*  ★ 每层开局（人站在初始房里）直接给的炸弹数。
+ *    隐藏门全靠炸弹炸开，一颗都没有就只能干瞪眼 —— 这里是保底，不是上限：
+ *    路上捡到的会累加，只在"不够"的时候补齐。 0 = 不给。  */
+#define START_BOMBS 3
+#define N_BOMB_AIRS 20                      /* 爆炸火花池：一次 3~5 个，够两三个炸弹连锁 */
+#define BOMB_AIR_MIN  3                     /* 一次爆炸至少撒几个 */
+#define BOMB_AIR_MAX  5
+#define BOMB_AIR_MS   340u                  /* 火花存活时间 */
+#define BOMB_AIR_SPREAD 22                  /* 起点离爆心最远 22 px */
+#define BOMB_AIR_V8   11                    /* 向外飘的速度（1/8 px/帧） */
+#define BOMB_FLASH_STRENGTH 190u            /* 引信倒数：整颗往白里闪的浓度 */
 
 //==================== 判定框（★ 不是整张贴图的包围盒）====================
 //  ★ 人物碰撞体积 = 【脚到眼睛】的小长方形：头/头发不参与判定，脚参与。
@@ -192,7 +223,7 @@ enum {
 /* HUD 占哪几格（脏区单位）：前 3 行 × 前 6 列 = 192×96 像素。
    这几格每帧都要进脏区，否则上一次画的数字不会被擦掉。 */
 #define HUD_CELLS_X 6
-#define HUD_CELLS_Y 11                      /* FPS/BULLETS/CMD/STAGE + 心 + DMG/MOVE/BSPD/RANGE/RATE/COINS */
+#define HUD_CELLS_Y 12                      /* FPS/BULLETS/CMD/STAGE + 心 + DMG/MOVE/BSPD/RANGE/RATE/COINS/BOMB */
 /* Boss 血条（顶部居中）；它占的格子也要标脏，否则擦不干净会留残影 */
 #define HUD_HP_W   400
 #define HUD_HP_H   14
@@ -228,6 +259,7 @@ extern int g_arena_x0, g_arena_y0, g_arena_x1, g_arena_y1;
 #define KEY_DOWN     0x4u
 #define KEY_UP       0x8u
 #define KEY_RESTART  0x10u                  /* R 键（只从串口来）：按一下重开一局（边沿触发） */
+#define KEY_BOMB     0x20u                  /* B 键：放炸弹（上升沿） */
 
 //==================== 性能诊断（正常演示用 0）====================
 //  0 = 正常游戏
@@ -317,6 +349,35 @@ typedef struct {
     int          y      : 16;
 } old_t;
 typedef struct { short x, y; unsigned char active; unsigned char type; } item_t;
+
+typedef struct {
+    unsigned char active;       /* 0 = 空槽 */
+    unsigned char state;        /* 0 = 引信；1 = 爆炸动画 */
+    signed char   room;
+    signed char   rx, ry;       /* 推动的亚像素余量 */
+    short x, y;
+    short vx8, vy8;             /* 滑动速度（1/8 px/帧） */
+    u32 fuse_until;
+    u32 boom_until;
+} bomb_t;
+
+typedef struct {
+    unsigned char active;
+    signed char   room;
+    short x, y;
+} bomb_pickup_t;
+
+/*  爆炸火花：炸弹炸开时在爆心周围随机撒 3~5 个，向外飘一小段就消失。
+ *  纯表现层 —— 不参与碰撞，也不结算伤害。  */
+typedef struct {
+    unsigned char active;
+    signed char   room;
+    signed char   rx, ry;       /* 飘动的亚像素余量 */
+    short x, y;
+    short vx8, vy8;             /* 向外飘的速度（1/8 px/帧） */
+    u32 until;
+} bomb_air_t;
+
 typedef struct {
     unsigned char active;
     unsigned char hp;
@@ -328,8 +389,9 @@ typedef struct {
     u32 hit_until;              /* 被子弹打中后的闪红显示到什么时候（0 = 不闪） */
 } mob_t;
 typedef struct { unsigned char active; signed char room; short x, y; } coin_t;
-typedef struct { unsigned char active; signed char room; short x, y; } web_t;
-typedef struct { unsigned char active; signed char room; short x, y; } stone_t;
+/*  石头 / 箱子 / 板条箱不再有实体池：
+ *  位置和种类都在房间布局（room_layout_t）里，运行时只记"哪个房间的第几个对象碎了"
+ *  （game_room.c 的 s_broken[]）。石头可被炸弹炸碎；箱子/板条箱只挡人挡弹。  */
 /*==============================================================================
  *  Boss 的数据结构（★ 招式是【数据】，不是代码）
  *------------------------------------------------------------------------------
@@ -448,7 +510,15 @@ int gameover_stage;                 /* 结束时的关卡（要显示出来） *
     shot_t shot;                        /* ★ Boss 挂的弹幕发射器（小怪以后也各挂一个） */
     /* 道具 */
     item_t item;
-    int boss_drop_pending;              /* Boss 掉的饰品还没捡（重进 Boss 房要恢复） */
+    int boss_drop_pending;
+    /* 炸弹 */
+    int bomb_count;                     /* 可放置数量 */
+    bomb_t bombs[N_BOMBS];
+    old_t old_bomb[2][N_BOMBS];
+    bomb_pickup_t bomb_pickup;
+    old_t old_bomb_pickup[2];              /* Boss 掉的饰品还没捡（重进 Boss 房要恢复） */
+    bomb_air_t bomb_airs[N_BOMB_AIRS];      /* 爆炸火花（表现层） */
+    old_t old_bomb_air[2][N_BOMB_AIRS];
     /* 子弹池 */
     bullet_t bullets[N_BULLETS];
     /* 每块缓冲各记一份"这个元素上次画在哪"（双缓冲下两块内容不同） */
@@ -459,10 +529,6 @@ int gameover_stage;                 /* 结束时的关卡（要显示出来） *
     coin_t coin_items[N_COINS];
     old_t old_mob[2][N_MOBS];
     old_t old_coin[2][N_COINS];
-    web_t webs[N_WEBS];
-    old_t old_web[2][N_WEBS];
-    stone_t stones[N_STONES];
-    old_t old_stone[2][N_STONES];
     int coins;                          /* 本局金币数（下一层保留，新一局清零） */
     /* 显示与统计 */
     int front;                          /* 正在显示的那块；后台 = front ^ 1 */
@@ -496,6 +562,7 @@ extern const asset_desc_t *const g_assets_ptr;
 
 u32  game_keys_read(void);
 int  game_take_spawn_item(void);             /* 取一次"按了 P"（取完清） */
+int  game_take_bomb(void);                   /* 取一次"按了 B"（取完清） */
 int  game_take_restart(void);       /* 这一帧有没有"按过 R"（取完清零） */
 
 //==================== 状态 / 时钟 / 上屏（game_state.c）====================
@@ -543,22 +610,46 @@ extern int g_cam_quant;
  *  game_room_validate() 启动自检。  */
 #define MAP_COLS    40
 #define MAP_ROWS    23
-#define ROOM_GRID_W 6
-#define ROOM_GRID_H 6
+#define ROOM_GRID_W 7
+#define ROOM_GRID_H 7
 #define ROOM_COUNT  (ROOM_GRID_W * ROOM_GRID_H)
-enum { ROOM_NONE = -1, ROOM_START, ROOM_EMPTY, ROOM_ITEM, ROOM_SHOP, ROOM_BOSS };
+enum { ROOM_NONE = -1, ROOM_START, ROOM_EMPTY, ROOM_ITEM, ROOM_SHOP, ROOM_BOSS,
+       ROOM_HIDDEN,          /* 隐藏房：1×1、基岩地板、四面隐藏门，炸开才进得去 */
+       ROOM_HIDDEN_SUPER };  /* 预留：本版不生成 */
 
 int  game_room_id(void);
 int  game_room_start(void);          /* 本轮起点房间的格子编号 */
 int  game_room_type(void);           /* 当前房间的类型：ROOM_START / EMPTY / ITEM / SHOP / BOSS */
+int  game_room_layout(void);         /* 当前房间用的固定布局下标；-1 = 没有（走随机兜底） */
+int  game_room_cell_gone(int room, int x, int y);      /* 这间房的 (x,y) 格上那个 interact 是否已被破坏 */
+void game_room_clear_broken(void);                    /* 新一局 / 换一层：清空"已破坏"清单 */
+void game_room_mark_cell_gone(int room, int x, int y); /* 标记破坏（重进房间 / 重建布局后不再出现） */
+int  game_room_prev_layout(void);    /* 换房前的蓝图下标（-1 = 无） */
+int  game_room_prop_dirty(void);     /* 换房后还要为"旧蓝图的对象"标脏几帧（帧数递减） */
 void game_room_pos(int *gx, int *gy);/* 当前房间在 6×6 网格里的坐标 */
 int  game_room_type_at(int gx, int gy); /* 任意格子的房间类型；无房间 = ROOM_NONE */
-int  game_room_door_asset(int dir);  /* 看周围 4 格的类型决定这扇门用哪张贴图 */
-int  game_room_door_exists(int dir); /* 邻居格有没有房间（门本身存在，不看锁） */
-int  game_room_door_open(int dir);   /* 能不能传送：有邻居且无怪/Boss；贴图仍看 exists */
+int  game_room_owner_at(int gx, int gy);/* 这一格属于哪间房（锚点格号）；空格 = -1 */
+void game_room_span(int *w, int *h);    /* 当前房间占几格（1×1 / 2×2） */
+int  game_room_flip(void);              /* 异形房镜像：bit0 左右翻、bit1 上下翻（0 = 原图） */
+int  game_room_cell_walkable(int tx, int ty);  /* 这一格能不能站人（地板 / 门洞） */
+/*  ★ 门按【格子位置】查，不再按方向：一间房可以有多扇同方向的门（L 形房、2×2 房）。
+ *    每扇门通到哪间房，由它"朝房间内那一格"所在的格子、再往外走一格决定。 */
+int  game_room_door_target(int tx, int ty);      /* 通到的房间 id；-1 = 外面没房间（画成墙） */
+int  game_room_door_asset_at(int tx, int ty);    /* 这扇门用哪张贴图（非门格返回 normal） */
+int  game_room_door_exists_at(int tx, int ty);   /* 外面有没有房间 */
+int  game_room_door_open_at(int tx, int ty);     /* 能不能传送：有邻居且无怪 / 非 Boss 战 */
+int  game_room_door_visible(int tx, int ty);    /* 这扇门【画不画】：隐藏连接没炸开就是 0（当墙） */
+int  game_room_door_hide_cell(int tx, int ty, int *ix, int *iy); /* 洞口图贴哪格（隐藏连接专用） */
+int  game_room_hidden_is_open(int a, int b);    /* 这两间房之间的隐藏连接炸开了没（a/b 顺序无关） */
+int  game_room_hidden_open(int a, int b);       /* 记为已打开；返回 1 = 这次新打开 */
+void game_room_hidden_reset(void);              /* 换层 / 新一局：全部封回去 */
+int  game_room_blast_hidden(int cx, int cy, int r);  /* 炸弹：命中未开的隐藏门就打开，返回打开条数 */
 int  game_room_validate(void);       /* 启动自检：起点/道具/商店/Boss 唯一 / 特殊房不直连 / 空间不相邻 / 连通 */
 void game_room_reset(void);
 void game_room_step(void);
+
+/*  一帧的模型更新（玩家 / 生命 / Boss / 子弹 / 怪 / 炸弹 / 金币 / 商店）：只改 g，不画 */
+void game_update_step(u32 keys, u32 now);
 void game_room_request(int target, int entry_dir);  /* 剧情跳转；entry_dir < 0 = 落在房间中心 */
 void game_room_request_full(int target, int entry_dir); /* 同上，但强制整屏重铺（清旧怪贴图） */
 void game_room_mark_used(int room);  /* 标记"这间的道具已经拿过了" */
@@ -574,16 +665,41 @@ void game_room_new_run(void);        /* 新一轮：清掉所有"已用过/已�
 void game_room_door_bounds(int px, int py, int *x0, int *y0, int *x1, int *y1);
 int  game_room_find_type(int type);    /* 按房间类型找格子编号（-1 = 没有） */
 int  game_room_pending(void);
+int  game_room_rebuild_pending(void);
+int  game_room_finish_rebuild(void);
 int  game_room_commit(void);
 
-const char          (*game_world_map(void))[MAP_MAX_COLS + 1];
-const unsigned char (*game_world_rot(void))[MAP_MAX_COLS];
+/*  一张地图 = 框架参数（或异形表）+ 世界像素尺寸。
+ *  ★ 墙 / 地板 / 门 / 角块都是【生成】的（game_frame.c），不再整张表存：
+ *    两张框架 = 几十字节，加新房间只要加一行参数。
+ *  map/rot 非 0 时才是"异形房"（手画的不规则地形），生成规则不生效。 */
+typedef struct {
+    const char          (*map)[MAP_MAX_COLS + 1];   /* 0 = 按 frame 生成 */
+    const unsigned char (*rot)[MAP_MAX_COLS];       /* 0 = 按 frame 生成 */
+    frame_geom_t         frame;                     /* 尺寸 / 竞技场 / 门 / 木纹 / 角块 */
+    short                world_w, world_h;          /* 像素：相机可移动范围 */
+} world_map_t;
+
+int  game_world_map_count(void);        /* 地图池里有几张图 */
+const world_map_t *game_world_map_at(int idx);   /* 越界返回 0 */
+int  game_world_map_index(void);
+int  game_world_map_key_for_layout(int layout);        /* 当前用的是池子里第几张 */
+
+/*  逐格取地形 / 旋转：异形表或生成，调用方不用关心（越界返回 '.' / 0） */
+char          game_world_tile_at(int tx, int ty);
+unsigned char game_world_rot_at(int tx, int ty);
+int           game_world_dir_at(int tx, int ty);   /* 这一格的"朝向"（门用它，已按镜像翻过） */
+const char          (*game_world_map(void))[MAP_MAX_COLS + 1];   /* 异形表；生成时为 0 */
+const unsigned char (*game_world_rot(void))[MAP_MAX_COLS];       /* 同上 */
 void game_world_select(int room);
-int  game_world_cols(void);             /* 当前地图多少格宽（普通 40 / Boss 50） */
-int  game_world_rows(void);             /* 当前地图多少格高（普通 23 / Boss 28） */
+int  game_world_door_count(void);
+void game_world_door_at(int index, int *tx, int *ty);
+int  game_world_cols(void);             /* 当前地图多少格宽（普通 40 / Boss 45） */
+int  game_world_rows(void);             /* 当前地图多少格高（普通 23 / Boss 35） */
 int  game_world_w(void);                /* 当前世界像素宽（普通 1280 / Boss 1440） */
-int  game_world_h(void);                /* 当前世界像素高（普通 736  / Boss 1120） */
-int  game_world_is_boss(void);          /* 1 = 当前是 Boss 大房间 */
+int  game_world_h(void);                /* 当前世界像素高（普通 720  / Boss 1120） */
+int  game_world_is_boss(void);          /* 1 = 当前是 Boss 大房间（玩法语义，不是渲染语义） */
+int  game_world_terrain(void);          /* 1 = 异形房（逐格地形，需要逐格碰撞） */
 
 int  game_tile_asset(int tx, int ty);
 void game_blit_tile(u32 fb, int tx, int ty, int fill_bg);
@@ -690,6 +806,7 @@ void game_bullets_perf_fill(int count);
 void game_mobs_reset(void);                         /* 换房时清空当前房间的小怪 */
 void game_mobs_spawn(int count);                    /* 生成 count 只 slime */
 void game_mobs_spawn_bug(int count);                /* 生成 count 只 bug（0,1,对称1,0 动画） */
+int  game_mobs_spawn_at(int x, int y, int type);    /* 固定布局用：在 (x,y) 像素处放一只；1 = 成功 */
 void game_mobs_step(u32 now);                        /* 动画 / 追玩家 / 接触扣血 / 清房 */
 void game_mobs_submit(void);
 int  game_mobs_alive(void);
@@ -702,20 +819,18 @@ void game_coins_submit(void);
 int  game_coin_overlap(int x, int y, int w, int h);  /* 石头落点是否压住当前房间的金币 */
 
 //==================== 蜘蛛网（game_web.c）====================
-void game_web_reset(void);                           /* 新一局 / 新一关：全部清空 */
-void game_web_spawn(int count);                      /* 本房间第一次进才生成，之后不重随机 */
 int  game_web_slow_at(int x, int y);                 /* 当前房间的网是否踩中（减速） */
-void game_web_sync(int buf);                         /* 每帧记下 old_web（按房间过滤） */
 void game_web_submit(void);                          /* 画在地板上、人物下面 */
 int  game_web_overlap(int x, int y, int w, int h);   /* 矩形是否压住当前房间的网 */
 
 //==================== 可交互石头（game_stone.c）====================
-void game_stones_reset(void);                        /* 新一局 / 新一关：全部清空 */
-void game_stones_spawn(int count);                   /* 本房间第一次进才生成（避金币/网） */
+void game_stones_reset(void);                        /* 新一局 / 新一关：碰撞格失效（布局本身不变） */
+int  game_stones_blast(int cx, int cy, int r);       /* 炸弹冲击波：炸碎半径内的石头；返回块数 */
 int  game_stone_block(int px, int py);               /* 玩家左上角，按石头相对上下选脚底/眼睛边 */
 int  game_stone_hit_at(int x, int y);                /* 弹幕中心是否撞到石头（撞到就消失） */
 int  game_stone_overlap(int x, int y, int w, int h); /* 矩形是否和石头重叠（金币落点避让） */
-void game_stones_sync(int buf);                      /* 每帧记下 old_stone（按房间过滤） */
+int  game_stones_erase_at(int i, int *x, int *y);    /* 第 i 个"要补擦"的格子；1 = 有效（i 从 0 递增） */
+void game_stones_erase_tick(void);                   /* 帧末：待擦队列 ttl-- */
 void game_stones_submit(void);
 
 //==================== Boss（game_boss.c）====================
@@ -755,6 +870,16 @@ void game_item_spawn_at_player(void);      /* P 键：在玩家脚下生成一�
 void game_item_try_pickup(u32 now);
 void game_item_draw(u32 fb, u32 now, int buf);
 void game_item_submit(void);            /* 登记到渲染队列：z = 底边 y */
+
+/* ---- 炸弹 ---- */
+void game_bombs_reset(void);
+void game_bomb_spawn_pickup(int x, int y, int room);
+void game_bomb_pickup_try(u32 now);
+int  game_bomb_place(u32 now);
+int  game_bomb_push(int *nx, int *ny, int oldx, int oldy, u32 now);
+void game_bombs_step(u32 now);
+void game_bombs_prepare(unsigned char dirty[GRID_H][GRID_W], int buf);
+void game_bombs_submit(void);
 
 //==================== 商店（game_shop.c）====================
 void game_shop_reset(void);                                 /* 新一局 / 新一关 */

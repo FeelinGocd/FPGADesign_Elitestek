@@ -3,45 +3,58 @@
 /* ==========================================================================
    MAP DESIGNER · 房间设计器
    --------------------------------------------------------------------------
-   · 地图 40×23，32 px/格，画布 1280×720（最后一行 16 px）
+   · 画布尺寸自由：默认 40×23，上限 45×35（= game.h 的 MAP_MAX_COLS/ROWS）
+   · 32 px/格；尺寸从地图本身读，换尺寸 = 清空重画（不做内容迁移）
    · 地形层：. B W D C/X/Y/Z；对象层：slime/bug/web/stone/box/crate/exit
-   · 编辑结果保存成 output/room_map.txt；生成 C 写 output/game_world_map.c
+   · 存档只有一份：output/<name>.json；生成 C 是手动步骤，写 output/game_world_map.c
    · 校验 / C 生成 / 解析都在 mapfmt.py（服务端），前端只负责画和发请求
    ========================================================================== */
 (function () {
-  var COLS = 40;
-  var ROWS = 23;
   var TILE = 32;
-  var W = 1280;
-  var H = 720;
-  var ARENA = { x0: 288, y0: 128, x1: 1024, y1: 544 };
-  var ASSET_BASE = "../../res/pic/base/background/";
-  var INTERACT_BASE = "../../res/pic/base/background_interact/";
-  var MOB_BASE = "../../res/pic/character/mobs/";
+  var DEFAULT_COLS = 40;      /* 普通房：40×23 格 = 1280×736 px */
+  var DEFAULT_ROWS = 23;
+  var MAX_COLS = 45;          /* = game.h 的 MAP_MAX_COLS（Boss 房 45×35） */
+  var MAX_ROWS = 35;
+  var MIN_COLS = 8;
+  var MIN_ROWS = 8;
+  var REF_W = 1280;           /* 720p 参考框：只是参考，不参与校验 */
+  var REF_H = 720;
+  /* 当前画布像素尺寸，跟着 S.cols / S.rows 走（syncCanvas 里更新） */
+  var W = DEFAULT_COLS * TILE;
+  var H = DEFAULT_ROWS * TILE;
+  /* 素材路径不写死：启动时拉 /api/assets，把 res/pic 里现有的图对到笔刷上。
+     对不上的笔刷退回色块 + 名字，不会白屏。 */
+  var LEGACY_TYPE_WORDS = ["start", "empty", "item", "shop", "boss"];
   var CORNER_CODES = ["C", "X", "Y", "Z"];
   var CORNER_NAMES = ["C · 原样", "X · 水平翻", "Y · 垂直翻", "Z · 双向翻"];
   var DIRS = ["N", "E", "S", "W"];
-  var CODES = [".", "B", "W", "D", "C", "X", "Y", "Z"];
-  var DOOR_SLOTS = [[20, 2, 0], [32, 10, 1], [20, 17, 2], [7, 10, 3]];
+  var CODES = [".", "B", "W", "D", "C", "X", "Y", "Z", "H", "K", "S"];
+  var DOOR_CODES = { D: "door", H: "hide" };     /* 码 → 素材 id（H = 隐藏门） */
+  function isDoorCode(code) { return Object.prototype.hasOwnProperty.call(DOOR_CODES, code); }
   var MAP_HEADER = "# MAP_DESIGNER v3";
+  var PAGE_VERSION = "2026-10-24j";   /* 改前端就改一下，出问题时看状态栏 */
 
   var TILES = [
     { id: "empty", code: ".", name: "空白", color: "#090e14" },
-    { id: "floor", code: "B", name: "基岩地板", image: "minecraft_bedrock.png", base: ASSET_BASE },
-    { id: "wall", code: "W", name: "木墙", image: "minecraft_wood.png", base: ASSET_BASE },
-    { id: "door", code: "D", name: "门（2 格）", image: "background_door_normal.png", base: INTERACT_BASE },
-    { id: "corner", code: "C", name: "角块", image: "background_corner_wood.png", base: ASSET_BASE }
+    { id: "wood", code: "B", name: "木地板", image: "" },
+    { id: "wall", code: "W", name: "木墙", image: "" },
+    { id: "door", code: "D", name: "门（2 格）", image: "" },
+    { id: "corner", code: "C", name: "角块", image: "" },
+    /*  ★ 新笔刷一律加在末尾：前面的顺序是页面/肌肉记忆的一部分，插队会让"门"变成别的 */
+    { id: "hide", code: "H", name: "隐藏门（炸开才通）", image: "" },
+    { id: "bedrock", code: "K", name: "基岩地板（隐藏房）", image: "" },
+    { id: "stone_floor", code: "S", name: "石头地板", image: "", color: "#7f7f7f" }
   ];
 
   /* id 必须和 mapfmt.py / game.h 的 MAP_OBJ_* 一致。 */
   var OBJECT_DEFS = [
-    { id: "slime", code: 0, name: "史莱姆", image: MOB_BASE + "mobs_slime_00.png", layer: "actor" },
-    { id: "bug", code: 1, name: "甲虫", image: MOB_BASE + "mobs_bug_00_standUp.png", layer: "actor" },
-    { id: "web", code: 2, name: "蜘蛛网", image: INTERACT_BASE + "background_interact_web.png", layer: "scene" },
-    { id: "stone", code: 3, name: "石头", image: INTERACT_BASE + "background_interact_stone.png", layer: "actor" },
-    { id: "box", code: 4, name: "木箱", image: INTERACT_BASE + "background_interact_box.png", layer: "actor" },
-    { id: "crate", code: 5, name: "板条箱", image: INTERACT_BASE + "background_interact_crate.png", layer: "actor" },
-    { id: "exit", code: 6, name: "出口", image: INTERACT_BASE + "background_interact_eixt.png", layer: "scene" }
+    { id: "slime", code: 0, name: "史莱姆", image: "", layer: "actor" },
+    { id: "bug", code: 1, name: "甲虫", image: "", layer: "actor" },
+    { id: "web", code: 2, name: "蜘蛛网", image: "", layer: "scene" },
+    { id: "stone", code: 3, name: "石头", image: "", layer: "actor" },
+    { id: "box", code: 4, name: "木箱", image: "", layer: "actor" },
+    { id: "crate", code: 5, name: "板条箱", image: "", layer: "actor" },
+    { id: "exit", code: 6, name: "出口", image: "", layer: "scene" }
   ];
 
   var OBJECT_BY_ID = {};
@@ -72,21 +85,26 @@
   var importTextEl = $("importText");
   var fileNameEl = $("fileName");
   var cFileNameEl = $("cFileName");
+  var sizeColsEl = $("sizeCols");
+  var sizeRowsEl = $("sizeRows");
+  var templateListEl = $("templateList");
+  var templateNameEl = $("templateName");
+  var templateLabelEl = $("templateLabel");
   var fileListEl = $("fileList");
-  var alsoEmitEl = $("alsoEmit");
   var zoomSlider = $("zoomSlider");
   var zoomReadout = $("zoomReadout");
   var canvasWrap = $("canvasWrap");
-  var roomTypeEl = $("roomType");
   var layerTileEl = $("layerTile");
   var layerObjectEl = $("layerObject");
   var images = {};
 
   var S = {
-    map: grid("."),
-    rot: grid(0),
+    cols: DEFAULT_COLS,
+    rows: DEFAULT_ROWS,
+    map: grid(".", DEFAULT_COLS, DEFAULT_ROWS),
+    rot: grid(0, DEFAULT_COLS, DEFAULT_ROWS),
     objects: [],
-    roomType: "empty",
+    showRef: true,
     layer: "tile",
     brush: "W",
     corner: 0,
@@ -100,9 +118,10 @@
     beforeText: "",
     savedText: "",
     dirty: false,
-    file: "room_map.txt",
-    jsonFile: "room_map.json",
+    file: "room_map.json",
     cfile: "game_world_map.c",
+    templates: [],
+    templateId: "",
     lastC: "",
     issueCells: {},
     issues: [],
@@ -117,14 +136,55 @@
 
   /* ---------------------------------------------------------------- 工具 */
 
-  function grid(value) {
+  function grid(value, cols, rows) {
+    cols = cols === undefined ? S.cols : cols;
+    rows = rows === undefined ? S.rows : rows;
     var out = [];
-    for (var y = 0; y < ROWS; y++) {
+    for (var y = 0; y < rows; y++) {
       var row = [];
-      for (var x = 0; x < COLS; x++) row.push(value);
+      for (var x = 0; x < cols; x++) row.push(value);
       out.push(row);
     }
     return out;
+  }
+
+  /* 画布尺寸检查：越界直接抛给调用方（导入 / 换尺寸都走这里） */
+  function checkCanvas(cols, rows) {
+    if (!(cols >= MIN_COLS && cols <= MAX_COLS)) {
+      throw new Error("画布宽度 " + cols + " 格超出范围：" + MIN_COLS + " ~ " + MAX_COLS);
+    }
+    if (!(rows >= MIN_ROWS && rows <= MAX_ROWS)) {
+      throw new Error("画布高度 " + rows + " 格超出范围：" + MIN_ROWS + " ~ " + MAX_ROWS);
+    }
+  }
+
+  /* 竞技场 = 地板 B 的包围盒；和 mapfmt.py 的 arena_rect 同一套规则 */
+  function arenaRect() {
+    var x0 = S.cols, y0 = S.rows, x1 = -1, y1 = -1;
+    for (var y = 0; y < S.rows; y++) {
+      for (var x = 0; x < S.cols; x++) {
+        if (S.map[y][x] !== "B") continue;
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (x > x1) x1 = x;
+        if (y > y1) y1 = y;
+      }
+    }
+    if (x1 < 0) return { x0: 0, y0: 0, x1: S.cols - 1, y1: S.rows - 1, empty: true };
+    return { x0: x0, y0: y0, x1: x1, y1: y1, empty: false };
+  }
+
+  /* 四扇门的建议槽位：各边墙带正中（和 mapfmt.door_slots 一致） */
+  function doorSlots() {
+    var a = arenaRect();
+    var cx = Math.floor((a.x0 + a.x1) / 2);
+    var cy = Math.floor((a.y0 + a.y1) / 2);
+    return [
+      [cx, a.y0 - 2, 0],
+      [a.x1 + 1, cy, 1],
+      [cx, a.y1 + 1, 2],
+      [a.x0 - 2, cy, 3]
+    ];
   }
 
   function cloneGrid(g) {
@@ -139,13 +199,20 @@
     });
   }
 
-  function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+  function inBounds(x, y, cols, rows) {
+    cols = cols === undefined ? S.cols : cols;
+    rows = rows === undefined ? S.rows : rows;
+    return x >= 0 && x < cols && y >= 0 && y < rows;
+  }
 
   function doorPair(x, y, angle) { return (angle & 1) ? [x + 1, y] : [x, y + 1]; }
 
   function tileOf(code) {
     for (var i = 0; i < TILES.length; i++) if (TILES[i].code === code) return TILES[i];
-    if (CORNER_CODES.indexOf(code) >= 0) return TILES[4];
+    if (CORNER_CODES.indexOf(code) >= 0) {
+      /*  X/Y/Z 共用角块那张图 —— 按 id 找，别按下标（表里插一个笔刷就会错位）  */
+      for (var j = 0; j < TILES.length; j++) if (TILES[j].id === "corner") return TILES[j];
+    }
     return TILES[0];
   }
 
@@ -155,21 +222,102 @@
 
   function cloneState() {
     return {
+      cols: S.cols,
+      rows: S.rows,
       map: cloneGrid(S.map),
       rot: cloneGrid(S.rot),
-      objects: cloneObjects(S.objects),
-      roomType: S.roomType
+      objects: cloneObjects(S.objects)
     };
   }
 
-  function applyState(rows, rot, objects, roomType) {
+  function applyState(rows, rot, objects) {
     S.map = rows.map(function (row) { return row.split(""); });
-    S.rot = rot.map(function (row) { return row.slice(0, COLS); });
+    S.cols = S.map.length ? S.map[0].length : DEFAULT_COLS;
+    S.rows = S.map.length || DEFAULT_ROWS;
+    S.rot = [];
+    for (var y = 0; y < S.rows; y++) {
+      var src = rot && rot[y] ? rot[y] : [];
+      var line = [];
+      for (var x = 0; x < S.cols; x++) line.push(src[x] === undefined ? 0 : (src[x] & 3));
+      S.rot.push(line);
+    }
     S.objects = cloneObjects(objects);
-    S.roomType = roomType && ["start", "empty", "item", "shop"].indexOf(roomType) >= 0 ? roomType : "empty";
-    if (roomTypeEl) roomTypeEl.value = S.roomType;
+    syncCanvas();
+    updateSizeUi();
     S.hover = null;
     S.flash = null;
+  }
+
+  /* 尺寸变了：画布像素、CSS 尺寸、控件读数一起跟上 */
+  function syncCanvas() {
+    W = S.cols * TILE;
+    H = S.rows * TILE;
+    canvas.width = W;
+    canvas.height = H;
+    setZoom(S.zoom);
+  }
+
+  function updateSizeUi() {
+    if (sizeColsEl) sizeColsEl.value = String(S.cols);
+    if (sizeRowsEl) sizeRowsEl.value = String(S.rows);
+    var a = arenaRect();
+    var hint = $("sizeHint");
+    if (hint) {
+      hint.textContent = S.cols + " × " + S.rows + " 格 = " + (S.cols * TILE) + " × " + (S.rows * TILE) +
+        " px（" + MIN_COLS + "×" + MIN_ROWS + " ~ " + MAX_COLS + "×" + MAX_ROWS + "；换尺寸保留重叠部分）";
+    }
+    var sub = $("subTitle");
+    if (sub) {
+      sub.textContent = S.cols + " × " + S.rows + " · " + (S.cols * TILE) + " × " + (S.rows * TILE) +
+        " px · 32 px/格 · 地形 + 对象";
+    }
+    var info = $("constraintInfo");
+    if (info) {
+      info.innerHTML =
+        "<strong>画布</strong> " + S.cols + " × " + S.rows + " 格 = " + (S.cols * TILE) + " × " + (S.rows * TILE) + " px<br>" +
+        "<strong>竞技场</strong> " + a.x0 + "," + a.y0 + " → " + a.x1 + "," + a.y1 +
+        (a.empty ? "（还没有地板 B，竞技场是从 B 的包围盒推的）" : "") + "<br>" +
+        "<strong>墙带</strong> 2 格厚，门洞 2 格<br>" +
+        "<strong>门槽位</strong> " + doorSlots().map(function (slot) {
+          return DIRS[slot[2]] + "(" + slot[0] + "," + slot[1] + ")";
+        }).join(" ") + "<br>" +
+        "<strong>字符</strong> <code>.</code> 空 <code>B</code> 地板 <code>W</code> 墙 <code>D</code> 门 <code>C/X/Y/Z</code> 角块";
+    }
+  }
+
+  /* 换尺寸：保留左上角重叠的部分（变小时裁掉，变大时补空白），整个操作一步撤销。
+     想从干净骨架开始就用「小房间 / 大房间」模板。 */
+  function resizeCanvas(cols, rows) {
+    cols = Math.round(Number(cols));
+    rows = Math.round(Number(rows));
+    if (!isFinite(cols) || !isFinite(rows)) { setStatus("尺寸要是整数", false); return; }
+    try {
+      checkCanvas(cols, rows);
+    } catch (e) {
+      setStatus(e.message, false);
+      return;
+    }
+    if (cols === S.cols && rows === S.rows) { setStatus("尺寸没变：" + cols + " × " + rows); return; }
+    pushHistory();
+    var oldMap = S.map, oldRot = S.rot, oldObjects = S.objects;
+    var keepW = Math.min(S.cols, cols), keepH = Math.min(S.rows, rows);
+    S.cols = cols;
+    S.rows = rows;
+    S.map = grid(".", cols, rows);
+    S.rot = grid(0, cols, rows);
+    for (var y = 0; y < keepH; y++) {
+      for (var x = 0; x < keepW; x++) {
+        S.map[y][x] = oldMap[y][x];
+        S.rot[y][x] = oldRot[y][x];
+      }
+    }
+    S.objects = oldObjects.filter(function (obj) { return obj.x < cols && obj.y < rows; });
+    syncCanvas();
+    updateSizeUi();
+    changed();
+    var dropped = oldObjects.length - S.objects.length;
+    setStatus("画布改成 " + cols + " × " + rows + "（保留重叠部分" +
+      (dropped > 0 ? "，裁掉 " + dropped + " 个越界对象" : "") + "；Ctrl+Z 可撤销）");
   }
 
   function sortObjects(list) {
@@ -179,8 +327,8 @@
   }
 
   function serialize() {
-    var lines = [MAP_HEADER, "# TEMPLATE " + S.roomType];
-    for (var y = 0; y < ROWS; y++) {
+    var lines = [MAP_HEADER];
+    for (var y = 0; y < S.rows; y++) {
       lines.push(S.map[y].join(""));
     }
 
@@ -195,27 +343,52 @@
     }
 
     lines.push("# ROTATION");
-    for (var ry = 0; ry < ROWS; ry++) {
+    for (var ry = 0; ry < S.rows; ry++) {
       var row = [];
-      for (var rx = 0; rx < COLS; rx++) row.push(String(S.rot[ry][rx] & 3));
+      for (var rx = 0; rx < S.cols; rx++) row.push(String(S.rot[ry][rx] & 3));
       lines.push(row.join(""));
     }
     return lines.join("\n") + "\n";
   }
 
+  var TILE_INDEX = { ".": 0, "B": 1, "W": 2, "D": 3, "C": 4, "H": 5, "K": 6, "S": 7, "X": 8, "Y": 9, "Z": 10 };
+  var TILE_CHAR = {};
+  Object.keys(TILE_INDEX).forEach(function (ch) { TILE_CHAR[TILE_INDEX[ch]] = ch; });
+
   function serializeJson() {
     var objects = sortObjects(S.objects);
-    return JSON.stringify({
-      format: "map_designer",
-      version: 3,
-      room_type: S.roomType,
-      size: { cols: COLS, rows: ROWS, tile: TILE },
-      tiles: S.map.map(function (row) { return row.join(""); }),
-      rotation: S.rot.map(function (row) { return row.slice(); }),
-      objects: objects.map(function (obj) {
-        return { kind: obj.kind, x: obj.x, y: obj.y, arg: obj.arg };
-      })
-    }, null, 2) + "\n";
+    var lines = ["{"];
+    lines.push('  "format": "map_designer",');
+    lines.push('  "version": 4,');
+    lines.push('  "name": ' + JSON.stringify(baseName()) + ',');
+    lines.push('  "size": {"cols": ' + S.cols + ', "rows": ' + S.rows + ', "tile": ' + TILE + '},');
+    lines.push('  "tile_encoding": "index",');
+    lines.push('  "tiles": [');
+    for (var y = 0; y < S.rows; y++) {
+      var values = S.map[y].map(function (ch) { return TILE_INDEX[ch]; }).join(", ");
+      lines.push("    [" + values + "]" + (y + 1 < S.rows ? "," : ""));
+    }
+    lines.push("  ],");
+    lines.push('  "rotation": [');
+    for (var ry = 0; ry < S.rows; ry++) {
+      var rv = S.rot[ry].slice(0, S.cols).join(", ");
+      lines.push("    [" + rv + "]" + (ry + 1 < S.rows ? "," : ""));
+    }
+    lines.push("  ],");
+    if (objects.length) {
+      lines.push('  "objects": [');
+      for (var oi = 0; oi < objects.length; oi++) {
+        var obj = objects[oi];
+        lines.push('    {"kind": ' + JSON.stringify(obj.kind) +
+          ', "x": ' + obj.x + ', "y": ' + obj.y + ', "arg": ' + obj.arg + '}' +
+          (oi + 1 < objects.length ? "," : ""));
+      }
+      lines.push("  ]");
+    } else {
+      lines.push('  "objects": []');
+    }
+    lines.push("}");
+    return lines.join("\n") + "\n";
   }
 
   function normalizeKind(raw) {
@@ -228,7 +401,7 @@
     return aliases[kind] || kind;
   }
 
-  function parseObjectLine(line) {
+  function parseObjectLine(line, cols, rows) {
     var parts = line.trim().split(/[\s,]+/).filter(function (part) { return !!part; });
     if (parts.length < 3) throw new Error("对象要写成 kind x,y [arg]：" + line);
     if (parts.length > 4) throw new Error("对象只有 4 列（kind x y arg）：" + line);
@@ -238,7 +411,7 @@
     var y = Number(parts[2]);
     var arg = parts.length > 3 ? Number(parts[3]) : 0;
     if (!isFinite(x) || !isFinite(y) || !isFinite(arg)) throw new Error("对象坐标 / 参数不是整数：" + line);
-    if (!inBounds(x, y)) throw new Error("对象坐标越界：" + line);
+    if (!inBounds(x, y, cols, rows)) throw new Error("对象坐标越界：" + line);
     if (arg < 0 || arg > 255) throw new Error("对象参数必须在 0..255：" + line);
     return { kind: kind, x: x, y: y, arg: arg };
   }
@@ -251,25 +424,42 @@
     } catch (e) {
       throw new Error("JSON 解析失败：" + e.message);
     }
-    if (!data || !Array.isArray(data.tiles)) throw new Error("JSON 缺少 tiles 数组");
-    if (data.size && data.size.cols && Number(data.size.cols) !== COLS) throw new Error("JSON cols 不是 " + COLS);
-    if (data.size && data.size.rows && Number(data.size.rows) !== ROWS) throw new Error("JSON rows 不是 " + ROWS);
-    if (data.tiles.length !== ROWS) throw new Error("JSON 需要 " + ROWS + " 行 tiles");
-    var rows = [];
-    for (var y = 0; y < ROWS; y++) {
-      var line = data.tiles[y];
-      if (typeof line !== "string" || line.length !== COLS) throw new Error("JSON 第 " + (y + 1) + " 行不是 " + COLS + " 字符串");
-      for (var x = 0; x < COLS; x++) {
-        if (".BWDCXYZ".indexOf(line.charAt(x)) < 0) throw new Error("JSON 第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
-      }
-      rows.push(line);
+    if (!data || !Array.isArray(data.tiles) || !data.tiles.length) throw new Error("JSON 缺少 tiles 数组");
+    var height = data.tiles.length;
+    var numericTiles = Array.isArray(data.tiles[0]);
+    var cols = numericTiles ? data.tiles[0].length : (typeof data.tiles[0] === "string" ? data.tiles[0].length : 0);
+    if (!cols) throw new Error("JSON tiles 第 1 行既不是数字数组也不是字符串");
+    checkCanvas(cols, height);
+    if (data.size) {
+      if (data.size.cols && Number(data.size.cols) !== cols) throw new Error("JSON cols " + data.size.cols + " 和实际 " + cols + " 不一致");
+      if (data.size.rows && Number(data.size.rows) !== height) throw new Error("JSON rows " + data.size.rows + " 和实际 " + height + " 不一致");
     }
-    var rot = grid(0);
+    var rows = [];
+    for (var y = 0; y < height; y++) {
+      var line = data.tiles[y];
+      if (Array.isArray(line)) {
+        if (line.length !== cols) throw new Error("JSON 第 " + (y + 1) + " 行不是 " + cols + " 个数字");
+        var textRow = "";
+        for (var nx = 0; nx < cols; nx++) {
+          var ch = TILE_CHAR[Number(line[nx])];
+          if (!ch) throw new Error("JSON 第 " + (y + 1) + " 行第 " + (nx + 1) + " 列编号越界：" + line[nx]);
+          textRow += ch;
+        }
+        rows.push(textRow);
+      } else {
+        if (typeof line !== "string" || line.length !== cols) throw new Error("JSON 第 " + (y + 1) + " 行不是 " + cols + " 字符串");
+        for (var x = 0; x < cols; x++) {
+          if (".BWDHKCXYZS".indexOf(line.charAt(x)) < 0) throw new Error("JSON 第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
+        }
+        rows.push(line);
+      }
+    }
+    var rot = grid(0, cols, height);
     if (data.rotation) {
-      if (!Array.isArray(data.rotation) || data.rotation.length !== ROWS) throw new Error("JSON rotation 需要 " + ROWS + " 行");
-      for (var ry = 0; ry < ROWS; ry++) {
-        if (!Array.isArray(data.rotation[ry]) || data.rotation[ry].length !== COLS) throw new Error("JSON rotation 第 " + (ry + 1) + " 行长度不对");
-        for (var rx = 0; rx < COLS; rx++) {
+      if (!Array.isArray(data.rotation) || data.rotation.length !== height) throw new Error("JSON rotation 需要 " + height + " 行");
+      for (var ry = 0; ry < height; ry++) {
+        if (!Array.isArray(data.rotation[ry]) || data.rotation[ry].length !== cols) throw new Error("JSON rotation 第 " + (ry + 1) + " 行长度不对");
+        for (var rx = 0; rx < cols; rx++) {
           var value = Number(data.rotation[ry][rx]);
           if (!(value >= 0 && value <= 3)) throw new Error("JSON rotation 越界");
           rot[ry][rx] = value;
@@ -282,13 +472,11 @@
       var kind = normalizeKind(item.kind);
       if (!OBJECT_BY_ID[kind]) throw new Error("未知对象类型：" + item.kind);
       var x = Number(item.x), y = Number(item.y), arg = Number(item.arg || 0);
-      if (!inBounds(x, y)) throw new Error("JSON 对象坐标越界：" + item.kind + " " + item.x + "," + item.y);
+      if (!inBounds(x, y, cols, height)) throw new Error("JSON 对象坐标越界：" + item.kind + " " + item.x + "," + item.y);
       if (!(arg >= 0 && arg <= 255)) throw new Error("JSON 对象参数越界");
       objects.push({ kind: kind, x: x, y: y, arg: arg });
     });
-    var roomType = String(data.room_type || "empty").toLowerCase();
-    if (["start", "empty", "item", "shop", "boss"].indexOf(roomType) < 0) throw new Error("JSON 房间类型不认识：" + roomType);
-    return { rows: rows, rot: rot, objects: objects, roomType: roomType };
+    return { rows: rows, rot: rot, objects: objects };
   }
 
   function parseLocal(raw) {
@@ -323,7 +511,6 @@
     var rotLines = [];
     var rotArgs = "";
     var sawRotation = false;
-    var roomType = "empty";
 
     sections.forEach(function (section) {
       if (section.tag === "rotation") {
@@ -336,39 +523,30 @@
         objectLines = objectLines.concat(section.body);
         return;
       }
-      if (section.tag === "template" || section.tag === "room_type") {
-        var value = section.args.toLowerCase();
+      if (section.tag === "template" || section.tag === "room_type" || section.tag === "name") {
+        /* 旧文件的 '# TEMPLATE empty' 只是历史遗留：忽略，不改变图 */
         var rest = section.body.slice();
-        if (!value && rest.length) {
-          var first = rest[0].trim().toLowerCase();
-          if (["start", "empty", "item", "shop", "boss"].indexOf(first) >= 0) {
-            value = first;
-            rest.shift();
-          }
-        }
-        if (value) {
-          if (["start", "empty", "item", "shop", "boss"].indexOf(value) < 0) {
-            throw new Error("房间类型不认识：" + value);
-          }
-          roomType = value;
-        }
+        if (rest.length && LEGACY_TYPE_WORDS.indexOf(rest[0].trim().toLowerCase()) >= 0) rest.shift();
         mapLines = mapLines.concat(rest);
         return;
       }
       mapLines = mapLines.concat(section.body);
     });
 
-    if (mapLines.length !== ROWS) throw new Error("地图需要 " + ROWS + " 行，实际 " + mapLines.length + " 行");
+    if (!mapLines.length) throw new Error("地图是空的：至少要 " + MIN_ROWS + " 行");
+    var height = mapLines.length;
+    var cols = mapLines[0].length;
+    checkCanvas(cols, height);
     var rows = [];
-    for (var y = 0; y < ROWS; y++) {
-      if (mapLines[y].length !== COLS) throw new Error("第 " + (y + 1) + " 行长度 " + mapLines[y].length + "，需要 " + COLS);
-      for (var x = 0; x < COLS; x++) {
-        if (".BWDCXYZ".indexOf(mapLines[y].charAt(x)) < 0) throw new Error("第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
+    for (var y = 0; y < height; y++) {
+      if (mapLines[y].length !== cols) throw new Error("第 " + (y + 1) + " 行长度 " + mapLines[y].length + "，和第一行的 " + cols + " 不一致");
+      for (var x = 0; x < cols; x++) {
+        if (".BWDHKCXYZS".indexOf(mapLines[y].charAt(x)) < 0) throw new Error("第 " + (y + 1) + " 行第 " + (x + 1) + " 列有非法字符");
       }
       rows.push(mapLines[y]);
     }
 
-    var rot = grid(0);
+    var rot = grid(0, cols, height);
     if (sawRotation) {
       var cleanRot = rotLines.map(function (line) { return line.trim(); }).filter(function (line) { return !!line && line.charAt(0) !== "#"; });
       if (!cleanRot.length && rotArgs !== "sparse") throw new Error("# ROTATION 后面没有内容");
@@ -378,14 +556,14 @@
           var parts = cleanRot[s].split(/[\s,]+/);
           if (parts.length !== 3) throw new Error("稀疏旋转要写成 x,y,r");
           var sx = Number(parts[0]), sy = Number(parts[1]), sr = Number(parts[2]);
-          if (!(sx >= 0 && sx < COLS && sy >= 0 && sy < ROWS && sr >= 0 && sr <= 3)) throw new Error("稀疏旋转越界");
+          if (!(sx >= 0 && sx < cols && sy >= 0 && sy < height && sr >= 0 && sr <= 3)) throw new Error("稀疏旋转越界");
           rot[sy][sx] = sr;
         }
       } else {
-        if (cleanRot.length < ROWS) throw new Error("旋转表需要 " + ROWS + " 行");
-        for (var ry = 0; ry < ROWS; ry++) {
-          if (cleanRot[ry].length !== COLS) throw new Error("旋转表第 " + (ry + 1) + " 行长度不对");
-          for (var rx = 0; rx < COLS; rx++) {
+        if (cleanRot.length < height) throw new Error("旋转表需要 " + height + " 行");
+        for (var ry = 0; ry < height; ry++) {
+          if (cleanRot[ry].length !== cols) throw new Error("旋转表第 " + (ry + 1) + " 行长度不对");
+          for (var rx = 0; rx < cols; rx++) {
             var ch = cleanRot[ry].charAt(rx);
             if ("0123".indexOf(ch) < 0) throw new Error("旋转表第 " + (ry + 1) + " 行有非 0..3 字符");
             rot[ry][rx] = Number(ch);
@@ -394,8 +572,8 @@
       }
     }
 
-    var objects = objectLines.map(parseObjectLine);
-    return { rows: rows, rot: rot, objects: objects, roomType: roomType };
+    var objects = objectLines.map(function (line) { return parseObjectLine(line, cols, height); });
+    return { rows: rows, rot: rot, objects: objects };
   }
 
   /* ---------------------------------------------------------------- 状态 */
@@ -412,11 +590,13 @@
   }
 
   function restoreState(snap) {
+    S.cols = snap.cols || (snap.map.length ? snap.map[0].length : DEFAULT_COLS);
+    S.rows = snap.rows || snap.map.length || DEFAULT_ROWS;
     S.map = cloneGrid(snap.map);
     S.rot = cloneGrid(snap.rot);
     S.objects = cloneObjects(snap.objects);
-    S.roomType = snap.roomType || S.roomType;
-    if (roomTypeEl) roomTypeEl.value = S.roomType;
+    syncCanvas();
+    updateSizeUi();
     changed();
   }
 
@@ -444,14 +624,15 @@
 
   function putCell(x, y, code) {
     if (!inBounds(x, y)) return;
-    if (code === "D") { placeDoor(x, y); return; }
+    if (isDoorCode(code)) { placeDoor(x, y, code); return; }
     removeDoorAt(x, y);
     S.map[y][x] = code;
     S.rot[y][x] = code === "." ? 0 : (S.angle & 3);
   }
 
-  function placeDoor(x, y) {
+  function placeDoor(x, y, code) {
     var angle = S.angle & 3;
+    code = code || "D";
     var p = doorPair(x, y, angle);
     if (!inBounds(p[0], p[1])) {
       setStatus("门需要两格，这个位置放不下（" + DIRS[angle] + " 方向）", false);
@@ -459,7 +640,7 @@
     }
     removeDoorAt(x, y);
     removeDoorAt(p[0], p[1]);
-    S.map[y][x] = "D";
+    S.map[y][x] = code;
     S.rot[y][x] = angle;
     S.map[p[1]][p[0]] = ".";
     S.rot[p[1]][p[0]] = 0;
@@ -467,7 +648,7 @@
 
   function removeDoorAt(x, y) {
     if (!inBounds(x, y)) return;
-    if (S.map[y][x] === "D") {
+    if (isDoorCode(S.map[y][x])) {
       var p = doorPair(x, y, S.rot[y][x]);
       S.map[y][x] = ".";
       S.rot[y][x] = 0;
@@ -477,7 +658,7 @@
     var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     for (var i = 0; i < dirs.length; i++) {
       var nx = x + dirs[i][0], ny = y + dirs[i][1];
-      if (!inBounds(nx, ny) || S.map[ny][nx] !== "D") continue;
+      if (!inBounds(nx, ny) || !isDoorCode(S.map[ny][nx])) continue;
       var q = doorPair(nx, ny, S.rot[ny][nx]);
       if (q[0] === x && q[1] === y) { S.map[ny][nx] = "."; S.rot[ny][nx] = 0; }
     }
@@ -564,9 +745,11 @@
         drawTileImage(target, images.wall, wx, wy, TILE, spriteAngle, false, false);
       }
     }
-    if (!images.door) return;
+    var code = S.map[y][x];
+    var img = images[DOOR_CODES[code] || "door"];
+    if (!img) img = images.door;
+    if (!img) return;
 
-    var img = images.door;
     var dw = img.naturalWidth || 40;
     var dh = img.naturalHeight || 64;
     var ow = horiz ? dh : dw;
@@ -607,14 +790,13 @@
     target.lineWidth = 1;
     target.strokeStyle = "rgba(210,230,250,.10)";
     target.beginPath();
-    for (x = 0; x <= COLS; x++) {
+    for (x = 0; x <= S.cols; x++) {
       lx = x * TILE + 0.5;
       target.moveTo(lx, 0);
       target.lineTo(lx, H);
     }
-    for (y = 0; y <= ROWS; y++) {
+    for (y = 0; y <= S.rows; y++) {
       ly = y * TILE + 0.5;
-      if (ly > H) break;
       target.moveTo(0, ly);
       target.lineTo(W, ly);
     }
@@ -622,14 +804,13 @@
 
     target.strokeStyle = "rgba(90,170,255,.20)";
     target.beginPath();
-    for (x = 0; x <= COLS; x += 4) {
+    for (x = 0; x <= S.cols; x += 4) {
       lx = x * TILE + 0.5;
       target.moveTo(lx, 0);
       target.lineTo(lx, H);
     }
-    for (y = 0; y <= ROWS; y += 4) {
+    for (y = 0; y <= S.rows; y += 4) {
       ly = y * TILE + 0.5;
-      if (ly > H) break;
       target.moveTo(0, ly);
       target.lineTo(W, ly);
     }
@@ -640,19 +821,37 @@
   function drawOverlay(target) {
     target.save();
 
-    target.strokeStyle = "rgba(89,169,255,.55)";
+    var a = arenaRect();
+    var ax0 = a.x0 * TILE, ay0 = a.y0 * TILE;
+    var ax1 = (a.x1 + 1) * TILE, ay1 = (a.y1 + 1) * TILE;
+    target.strokeStyle = a.empty ? "rgba(231,200,106,.45)" : "rgba(89,169,255,.55)";
     target.lineWidth = 2;
-    target.strokeRect(ARENA.x0 + 1, ARENA.y0 + 1, ARENA.x1 - ARENA.x0 - 2, ARENA.y1 - ARENA.y0 - 2);
+    target.strokeRect(ax0 + 1, ay0 + 1, Math.max(ax1 - ax0 - 2, 1), Math.max(ay1 - ay0 - 2, 1));
 
     target.setLineDash([5, 5]);
     target.strokeStyle = "rgba(89,169,255,.30)";
     target.lineWidth = 1;
-    for (var i = 0; i < DOOR_SLOTS.length; i++) {
-      var slot = DOOR_SLOTS[i];
+    var slots = doorSlots();
+    for (var i = 0; i < slots.length; i++) {
+      var slot = slots[i];
       var horiz = (slot[2] & 1) !== 0;
       target.strokeRect(slot[0] * TILE + 0.5, slot[1] * TILE + 0.5, horiz ? 2 * TILE - 1 : TILE - 1, horiz ? TILE - 1 : 2 * TILE - 1);
     }
     target.setLineDash([]);
+
+    /* 720p 参考框：画布比 720p 大时才有意义（只是参考，不落盘） */
+    if (S.showRef && W >= REF_W && H >= REF_H) {
+      target.setLineDash([6, 6]);
+      target.strokeStyle = "rgba(120,200,160,.45)";
+      target.lineWidth = 2;
+      target.strokeRect(1, 1, REF_W - 2, REF_H - 2);
+      target.setLineDash([]);
+      target.fillStyle = "rgba(120,200,160,.80)";
+      target.font = "12px Consolas, monospace";
+      target.textAlign = "left";
+      target.textBaseline = "top";
+      target.fillText("720p 参考框 " + REF_W + " × " + REF_H + "（不参与校验）", 8, 8);
+    }
 
     for (var key in S.issueCells) {
       if (!Object.prototype.hasOwnProperty.call(S.issueCells, key)) continue;
@@ -684,15 +883,15 @@
     ctx.fillStyle = "#090e14";
     ctx.fillRect(0, 0, W, H);
 
-    for (var y = 0; y < ROWS; y++) {
-      for (var x = 0; x < COLS; x++) {
+    for (var y = 0; y < S.rows; y++) {
+      for (var x = 0; x < S.cols; x++) {
         var code = S.map[y][x];
-        if (code !== "." && code !== "D") paintCell(ctx, code, x, y);
+        if (code !== "." && !isDoorCode(code)) paintCell(ctx, code, x, y);
       }
     }
-    for (var dy = 0; dy < ROWS; dy++) {
-      for (var dx = 0; dx < COLS; dx++) {
-        if (S.map[dy][dx] === "D") paintDoor(ctx, dx, dy);
+    for (var dy = 0; dy < S.rows; dy++) {
+      for (var dx = 0; dx < S.cols; dx++) {
+        if (isDoorCode(S.map[dy][dx])) paintDoor(ctx, dx, dy);
       }
     }
 
@@ -747,6 +946,9 @@
     if (code === ".") {
       pctx.fillStyle = t.color;
       pctx.fillRect(16, 16, 64, 64);
+    } else if (!images[t.id]) {
+      pctx.fillStyle = t.color || "#172535";
+      pctx.fillRect(16, 16, 64, 64);
     } else if (images[t.id]) {
       var img = images[t.id];
       var dw = img.naturalWidth || 32;
@@ -765,7 +967,7 @@
     }
 
     var text = t.name + "\n字符：" + code;
-    if (code === "D") text += "\n方向：" + DIRS[S.angle & 3] + "（" + (S.angle & 3) * 90 + "°）";
+    if (isDoorCode(code)) text += "\n方向：" + DIRS[S.angle & 3] + "（" + (S.angle & 3) * 90 + "°）" + (code === "H" ? "\n隐藏门：炸弹炸开才通" : "");
     else if (t.id === "corner") text += "\n翻转：" + CORNER_NAMES[S.corner] + "\n旋转：" + (S.angle & 3) * 90 + "°";
     else if (code !== ".") text += "\n旋转：" + (S.angle & 3) * 90 + "°";
     $("previewText").textContent = text;
@@ -774,8 +976,8 @@
   function refreshInfo() {
     var counts = {};
     for (var i = 0; i < CODES.length; i++) counts[CODES[i]] = 0;
-    for (var y = 0; y < ROWS; y++) {
-      for (var x = 0; x < COLS; x++) counts[S.map[y][x]] += 1;
+    for (var y = 0; y < S.rows; y++) {
+      for (var x = 0; x < S.cols; x++) counts[S.map[y][x]] += 1;
     }
     var html = "";
     for (var k = 0; k < CODES.length; k++) {
@@ -792,7 +994,7 @@
       html += '<div class="count"><span>● ' + def.name + "</span><b>" + objectCounts[def.id] + "</b></div>";
     }
     countsEl.innerHTML = html;
-    mapTextEl.value = serialize();
+    mapTextEl.value = serializeJson();
     drawPreview();
   }
 
@@ -812,7 +1014,7 @@
     if (!p) { cursorEl.textContent = "—"; return; }
     var code = S.map[p.y][p.x];
     var text = p.x + "," + p.y + " · " + code;
-    if (code === "D") text += " · " + DIRS[S.rot[p.y][p.x] & 3];
+    if (isDoorCode(code)) text += " · " + DIRS[S.rot[p.y][p.x] & 3] + (code === "H" ? "（隐藏门）" : "");
     else if (code !== ".") text += " · " + (S.rot[p.y][p.x] & 3) * 90 + "°";
     var objs = objectsAt(p.x, p.y);
     if (objs.length) {
@@ -939,8 +1141,9 @@
     var hint = $("angleHint");
     if (S.layer === "object") {
       hint.textContent = "对象层不使用旋转；坐标按整格保存（×32 px）。";
-    } else if (S.brush === "D") {
-      hint.textContent = "门：角度就是方向 0=N 1=E 2=S 3=W；D 只占一格，另一格会自动清空。";
+    } else if (isDoorCode(S.brush)) {
+      hint.textContent = (S.brush === "H" ? "隐藏门" : "门") +
+        "：角度就是方向 0=N 1=E 2=S 3=W；只占一格，另一格会自动清空。";
     } else if (S.brush === "C") {
       hint.textContent = "角块先翻转再旋转；旋转值会写进 rot 表，和 C 侧的 corner_transform 一致。";
     } else {
@@ -950,13 +1153,45 @@
 
   /* ---------------------------------------------------------------- 视图 */
 
-  function setZoom(value, manual) {
-    S.zoom = Math.max(0.35, Math.min(2.5, value));
+  var ZOOM_MIN = 0.1;
+  var ZOOM_MAX = 8;
+
+  function setZoom(value, manual, anchor) {
+    var next = Number(value);
+    if (!isFinite(next)) return;
+    next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next));
+    var previous = S.zoom;
+    var contentX = 0;
+    var contentY = 0;
+    var oldRect = null;
+
+    if (anchor && previous > 0) {
+      oldRect = canvas.getBoundingClientRect();
+      contentX = (anchor.x - oldRect.left) / previous;
+      contentY = (anchor.y - oldRect.top) / previous;
+    }
+
+    S.zoom = next;
     canvas.style.width = (W * S.zoom) + "px";
     canvas.style.height = (H * S.zoom) + "px";
     zoomSlider.value = String(Math.round(S.zoom * 100));
-    zoomReadout.textContent = Math.round(S.zoom * 100) + "%";
+    zoomReadout.textContent = (Math.round(S.zoom * 1000) / 10) + "%";
+
+    if (anchor && oldRect) {
+      var newRect = canvas.getBoundingClientRect();
+      canvasWrap.scrollLeft += (newRect.left + contentX * next) - anchor.x;
+      canvasWrap.scrollTop += (newRect.top + contentY * next) - anchor.y;
+    }
+
     if (manual) S.autoFit = false;
+  }
+
+  function zoomAtCenter(value) {
+    var rect = canvasWrap.getBoundingClientRect();
+    setZoom(value, true, {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    });
   }
 
   function fit() {
@@ -1068,12 +1303,18 @@
   }
 
   async function save() {
-    if (!S.served) { setStatus("保存需要 serve.py 打开页面", false); return; }
-    if (S.loading) { setStatus("正在读取 output/room_map.txt，请稍后再保存", "busy"); return; }
-    S.file = fileNameEl.value.trim() || "room_map.txt";
+    if (!S.served) { setStatus("保存需要 serve.py 打开页面（当前是 file://，可用「下载 .json」兜底）", false); return; }
+    if (S.loading) { setStatus("正在读取 output/room_map.json，请稍后再保存", "busy"); return; }
+    S.file = fileNameEl.value.trim() || "room_map.json";
     setStatus("保存中…", "busy");
-    var response = await apiPost("/api/save?name=" + encodeURIComponent(S.file), serialize());
-    var json = await readJson(response);
+    var response, json;
+    try {
+      response = await apiPost("/api/save?name=" + encodeURIComponent(S.file), serialize());
+      json = await readJson(response);
+    } catch (e) {
+      setStatus("保存失败：" + e.message + "（连不上 serve.py？页面 " + PAGE_VERSION + "）", false);
+      return;
+    }
     if (!json.ok) {
       if (json.issues) renderIssues(json.issues);
       setStatus("保存失败：" + (json.error || "未知错误"), false);
@@ -1082,14 +1323,12 @@
     S.savedText = json.text;
     S.file = json.file || S.file;
     fileNameEl.value = S.file;
-    S.jsonFile = json.json_file || (baseName() + ".json");
     markDirty();
     saveDraftNow(false);
     if (json.issues) renderIssues(json.issues);
-    var message = "已保存 output/" + S.file + " + " + S.jsonFile;
-    if (alsoEmitEl.checked) {
-      var ok = await emitC(true);
-      if (ok) message += "，并生成 output/" + S.cfile;
+    var message = "已保存 output/" + S.file;
+    if (json.error_count) {
+      message += "（有 " + json.error_count + " 个错误，进代码前要修掉）";
     }
     await refreshList();
     refreshInfo();
@@ -1098,7 +1337,7 @@
 
   async function emitC(quiet) {
     if (!S.served) { if (!quiet) setStatus("生成 C 需要 serve.py", false); return false; }
-    if (S.loading) { if (!quiet) setStatus("正在读取 output/room_map.txt，请稍后再生成", "busy"); return false; }
+    if (S.loading) { if (!quiet) setStatus("正在读取 output/room_map.json，请稍后再生成", "busy"); return false; }
     S.cfile = cFileNameEl.value.trim() || "game_world_map.c";
     var response = await apiPost(
       "/api/emit_c?name=" + encodeURIComponent(S.cfile) + "&map=" + encodeURIComponent(S.file),
@@ -1116,6 +1355,118 @@
     return true;
   }
 
+  /* 模板：内置 1×1 / L / 2×2 + templates/custom/ 下的自定义模板。
+   *  ★ 列表走 /api/templates；自定义模板存盘走 /api/template_save，不用手动改 mapfmt.py。 */
+  var TEMPLATE_FALLBACK_LABELS = { template_1x1: "1×1 40×23", template_L: "L 形 45×35", template_2x2: "2×2 45×35" };
+
+  function findTemplate(id) {
+    for (var i = 0; i < S.templates.length; i++) {
+      if (S.templates[i].id === id) return S.templates[i];
+    }
+    return null;
+  }
+
+  function templateOptionLabel(tpl) {
+    var label = tpl.label || tpl.id;
+    if (!tpl.builtin) label = "自定义 · " + label;
+    if (tpl.size && label.indexOf("×") < 0) label += " · " + tpl.size[0] + "×" + tpl.size[1];
+    if (tpl.loadable === false) label += "（损坏）";
+    return label;
+  }
+
+  async function refreshTemplates(selectId) {
+    if (!S.served) return;
+    try {
+      var response = await apiGet("/api/templates");
+      var json = await readJson(response);
+      if (!json.ok) { setStatus("模板列表读取失败：" + (json.error || "未知错误"), false); return; }
+      S.templates = json.templates || [];
+      var previous = selectId || templateListEl.value;
+      templateListEl.innerHTML = "";
+      S.templates.forEach(function (tpl) {
+        var option = document.createElement("option");
+        option.value = tpl.id;
+        option.textContent = templateOptionLabel(tpl);
+        option.disabled = tpl.loadable === false;
+        templateListEl.appendChild(option);
+      });
+      if (previous && findTemplate(previous)) templateListEl.value = previous;
+    } catch (e) {
+      setStatus("模板列表读取失败：" + e.message, false);
+    }
+  }
+
+  async function loadTemplate(id) {
+    if (!S.served) { setStatus("模板需要 serve.py（file:// 下只能手动画）", false); return; }
+    var info = findTemplate(id);
+    var fallback = (info && info.label) || TEMPLATE_FALLBACK_LABELS[id] || id;
+    setStatus("载入模板 " + fallback + "…", "busy");
+    try {
+      var response = await apiGet("/api/template?size=" + encodeURIComponent(id));
+      var json = await readJson(response);
+      if (!json.ok) { setStatus("模板载入失败：" + (json.error || "未知错误"), false); return; }
+      var label = json.label || fallback;
+      var ok = await importRaw(json.text, label, false);
+      if (ok) {
+        S.templateId = id;
+        setStatus("已载入模板：" + label + "（" + json.size[0] + "×" + json.size[1] + "）");
+      }
+    } catch (e) {
+      setStatus("载入模板失败：" + e.message, false);
+    }
+  }
+
+  async function saveTemplate() {
+    if (!S.served) { setStatus("保存模板需要 serve.py", false); return; }
+    if (S.loading) { setStatus("正在读取 output 文件，请稍后再存模板", "busy"); return; }
+    var raw = templateNameEl.value.trim();
+    if (!raw) {
+      setStatus("先填模板文件名（英文/数字，例如 my_l_room）", false);
+      templateNameEl.focus();
+      return;
+    }
+    var slug = raw.replace(/\.json$/i, "");
+    var id = (slug.toLowerCase().indexOf("custom_") === 0 ? slug : "custom_" + slug).toLowerCase();
+    if (findTemplate(id) && !window.confirm("自定义模板 " + id + " 已存在，覆盖？")) return;
+    var label = templateLabelEl.value.trim() || slug.replace(/^custom_/i, "");
+    setStatus("保存模板 " + label + "…", "busy");
+    try {
+      var response = await apiPost(
+        "/api/template_save?name=" + encodeURIComponent(raw) + "&label=" + encodeURIComponent(label),
+        serialize()
+      );
+      var json = await readJson(response);
+      if (!json.ok) {
+        if (json.issues) renderIssues(json.issues);
+        setStatus("保存模板失败：" + (json.error || "未知错误"), false);
+        return;
+      }
+      S.templateId = json.template.id;
+      await refreshTemplates(json.template.id);
+      setStatus("已保存自定义模板：" + json.template.label + "（" + json.template.file + "）");
+    } catch (e) {
+      setStatus("保存模板失败：" + e.message, false);
+    }
+  }
+
+  async function deleteTemplate() {
+    var id = templateListEl.value;
+    if (!id) { setStatus("先选择一个模板", false); return; }
+    var info = findTemplate(id);
+    if (info && info.builtin) { setStatus("内置模板不能删除：" + id, false); return; }
+    if (!window.confirm("删除自定义模板 " + id + " ？")) return;
+    try {
+      var response = await apiPost("/api/template_delete?name=" + encodeURIComponent(id), "x");
+      var json = await readJson(response);
+      if (!json.ok) { setStatus("删除模板失败：" + (json.error || "未知错误"), false); return; }
+      if (S.templateId === id) S.templateId = "";
+      await refreshTemplates();
+      setStatus("已删除模板：" + id);
+    } catch (e) {
+      setStatus("删除模板失败：" + e.message, false);
+    }
+  }
+
   async function importRaw(text, label, fromDisk, record) {
     var data = null;
     if (S.served) {
@@ -1130,7 +1481,6 @@
         rows: json.rows,
         rot: json.rot,
         objects: json.objects || [],
-        roomType: json.room_type || "empty",
         issues: json.issues || [],
         format: json.format
       };
@@ -1145,7 +1495,6 @@
           rows: parsed.rows,
           rot: parsed.rot,
           objects: parsed.objects,
-          roomType: parsed.roomType,
           issues: [],
           format: text.trim().charAt(0) === "{" ? "json" : "text"
         };
@@ -1155,7 +1504,7 @@
       }
     }
     if (record !== false) pushHistory();
-    applyState(data.rows, data.rot, data.objects, data.roomType);
+    applyState(data.rows, data.rot, data.objects);
     if (fromDisk) { S.savedText = serialize(); }
     renderIssues(data.issues);
     refreshInfo();
@@ -1241,7 +1590,7 @@
   }
 
   function baseName() {
-    return (S.file || "room_map.txt").replace(/\.(txt|json)$/i, "");
+    return (S.file || "room_map.json").replace(/\.(txt|json)$/i, "");
   }
 
   function downloadTxt() {
@@ -1257,9 +1606,9 @@
   }
 
   function copyText() {
-    var text = serialize();
+    var text = serializeJson();
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { setStatus("已复制地图文本"); },
+      navigator.clipboard.writeText(text).then(function () { setStatus("已复制 JSON"); },
         function () { mapTextEl.select(); setStatus("浏览器不让写剪贴板，已选中文本框，Ctrl+C 复制", false); });
     } else {
       mapTextEl.select();
@@ -1286,7 +1635,6 @@
         map: S.map,
         rot: S.rot,
         objects: S.objects,
-        roomType: S.roomType,
         dirty: !!dirty
       }));
     } catch (e) { /* 隐私模式 / 配额满，忽略 */ }
@@ -1305,28 +1653,30 @@
       var map = Array.isArray(data) ? data : data.map;
       var rot = Array.isArray(data) ? null : data.rot;
       var objects = Array.isArray(data) ? [] : (data.objects || []);
-      var roomType = Array.isArray(data) ? "empty" : (data.roomType || "empty");
-      if (!Array.isArray(map) || map.length !== ROWS) return null;
+      if (!Array.isArray(map) || !map.length) return null;
+      var height = map.length;
+      var cols = Array.isArray(map[0]) ? map[0].length : 0;
+      if (!(cols >= MIN_COLS && cols <= MAX_COLS && height >= MIN_ROWS && height <= MAX_ROWS)) return null;
       var rows = [];
-      for (var y = 0; y < ROWS; y++) {
-        if (!Array.isArray(map[y]) || map[y].length !== COLS) return null;
+      for (var y = 0; y < height; y++) {
+        if (!Array.isArray(map[y]) || map[y].length !== cols) return null;
         rows.push(map[y].join(""));
       }
-      var rotGrid = grid(0);
-      if (Array.isArray(rot) && rot.length === ROWS) {
-        for (var ry = 0; ry < ROWS; ry++) {
+      var rotGrid = grid(0, cols, height);
+      if (Array.isArray(rot)) {
+        for (var ry = 0; ry < height && ry < rot.length; ry++) {
           if (!Array.isArray(rot[ry])) continue;
-          for (var rx = 0; rx < COLS && rx < rot[ry].length; rx++) rotGrid[ry][rx] = Number(rot[ry][rx]) & 3;
+          for (var rx = 0; rx < cols && rx < rot[ry].length; rx++) rotGrid[ry][rx] = Number(rot[ry][rx]) & 3;
         }
       }
       var cleanObjects = [];
       for (var i = 0; i < objects.length; i++) {
         var obj = objects[i];
-        if (!obj || !OBJECT_BY_ID[obj.kind] || !inBounds(obj.x, obj.y)) continue;
+        if (!obj || !OBJECT_BY_ID[obj.kind] || !inBounds(obj.x, obj.y, cols, height)) continue;
         cleanObjects.push({ kind: obj.kind, x: obj.x | 0, y: obj.y | 0, arg: obj.arg | 0 });
       }
       var dirty = Array.isArray(data) ? true : data.dirty !== false;
-      return { rows: rows, rot: rotGrid, objects: cleanObjects, roomType: roomType, dirty: dirty };
+      return { rows: rows, rot: rotGrid, objects: cleanObjects, dirty: dirty };
     } catch (e) {
       return null;
     }
@@ -1336,14 +1686,14 @@
 
   function loadImages() {
     var defs = TILES.concat(OBJECT_DEFS.map(function (def) {
-      return { id: def.id, image: def.image, base: "" };
+      return { id: def.id, image: def.image };
     }));
     var jobs = defs.filter(function (t) { return t.image; }).map(function (t) {
       return new Promise(function (resolve) {
         var image = new Image();
         image.onload = function () { images[t.id] = image; resolve(); };
         image.onerror = function () { images[t.id] = null; resolve(); };
-        image.src = (t.base || "") + t.image;
+        image.src = t.image;
       });
     });
     return Promise.all(jobs);
@@ -1351,21 +1701,88 @@
 
   /* ---------------------------------------------------------------- UI */
 
+  /* 把 /api/assets 的 roles 对到笔刷上（roles 的 key 就是 tile.id / object.id） */
+  function applyAssets(json) {
+    var roles = (json && json.roles) || {};
+    var files = (json && json.files) || [];
+
+    /*  角色表里没有的笔刷：拿 id 去 res/pic 的文件名里碰一下（大小写不敏感）。
+     *  ★ 这样新丢进 res/pic 的图（比如 hideEntrance）+ 新加的笔刷，
+     *    即使服务端还没重启、roles 里还没有这一项，也能直接显示。  */
+    function guess(id) {
+      var key = String(id).toLowerCase();
+      for (var i = 0; i < files.length; i++) {
+        if ((files[i].name || "").toLowerCase().indexOf(key) >= 0) {
+          var stamp = files[i].mtime_ns || files[i].size || Date.now();
+          return files[i].url + "?v=" + stamp;
+        }
+      }
+      return "";
+    }
+
+    TILES.forEach(function (tile) {
+      if (tile.id === "empty") return;
+      var hit = roles[tile.id];
+      tile.image = hit ? hit.url : guess(tile.id);
+    });
+    OBJECT_DEFS.forEach(function (def) {
+      var hit = roles[def.id];
+      def.image = hit ? hit.url : guess(def.id);
+    });
+    S.assets = json || null;
+  }
+
+  async function loadAssets() {
+    if (!S.served) return null;
+    try {
+      var response = await apiGet("/api/assets");
+      var json = await readJson(response);
+      if (!json.ok) throw new Error(json.error || "读取失败");
+      applyAssets(json);
+      if (json.missing && json.missing.length) {
+        setStatus("这些笔刷在 " + (json.root || "res/pic") + " 里没找到图，先用色块代替：" + json.missing.join("、"), false);
+      }
+      return json;
+    } catch (e) {
+      setStatus("素材列表读取失败：" + e.message, false);
+      return null;
+    }
+  }
+
+  /* 换图 / 挪目录后不用刷新页面：重扫 res/pic，重建两个笔刷面板 */
+  async function reloadAssets() {
+    if (!S.served) { setStatus("重载素材需要 serve.py", false); return; }
+    await loadAssets();
+    paletteEl.innerHTML = "";
+    objectPaletteEl.innerHTML = "";
+    buildPalette();
+    buildObjectPalette();
+    updateSelection();
+    await loadImages();
+    refreshInfo();
+    scheduleDraw();
+    var total = S.assets && S.assets.files ? S.assets.files.length : 0;
+    var missing = S.assets && S.assets.missing ? S.assets.missing : [];
+    setStatus("已重新扫描 " + ((S.assets && S.assets.root) || "res/pic") + "：" + total + " 张图" +
+      (missing.length ? "，缺笔刷：" + missing.join("、") : ""));
+  }
+
   function buildPalette() {
-    TILES.forEach(function (t) {
+    TILES.forEach(function (t, index) {
       var element = document.createElement("div");
       element.className = "tile";
       element.setAttribute("data-brush", t.code);
-      element.title = t.name + " [" + t.code + "]";
+      element.setAttribute("data-index", String(index));
+      element.title = index + " · " + t.name + "（地图字符 " + t.code + "）";
 
       var code = document.createElement("span");
       code.className = "code";
-      code.textContent = t.code;
+      code.textContent = String(index);
       element.appendChild(code);
 
       if (t.image) {
         var image = document.createElement("img");
-        image.src = (t.base || ASSET_BASE) + t.image;
+        image.src = t.image;
         image.alt = t.name;
         element.appendChild(image);
       } else {
@@ -1445,22 +1862,24 @@
 
     canvasWrap.addEventListener("wheel", function (event) {
       event.preventDefault();
-      setZoom(S.zoom * (event.deltaY < 0 ? 1.1 : 1 / 1.1), true);
+      var factor = Math.exp(-event.deltaY * 0.0015);
+      factor = Math.max(0.5, Math.min(2, factor));
+      setZoom(S.zoom * factor, true, { x: event.clientX, y: event.clientY });
     }, { passive: false });
 
     $("btnFit").addEventListener("click", fit);
-    $("btn100").addEventListener("click", function () { setZoom(1, true); });
-    $("btn150").addEventListener("click", function () { setZoom(1.5, true); });
-    zoomSlider.addEventListener("input", function () { setZoom(Number(zoomSlider.value) / 100, true); });
+    $("btn100").addEventListener("click", function () { zoomAtCenter(1); });
+    $("btn150").addEventListener("click", function () { zoomAtCenter(1.5); });
+    zoomSlider.addEventListener("input", function () {
+      var rect = canvasWrap.getBoundingClientRect();
+      setZoom(Number(zoomSlider.value) / 100, true, {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      });
+    });
 
     layerTileEl.addEventListener("click", function () { selectLayer("tile"); });
     layerObjectEl.addEventListener("click", function () { selectLayer("object"); });
-    roomTypeEl.addEventListener("change", function () {
-      var value = roomTypeEl.value;
-      S.roomType = ["start", "empty", "item", "shop"].indexOf(value) >= 0 ? value : "empty";
-      changed();
-    });
-
     $("fwView").addEventListener("change", function () {
       S.fwView = this.checked;
       drawPreview();
@@ -1479,9 +1898,32 @@
     $("btnUndo").addEventListener("click", undo);
     $("btnRedo").addEventListener("click", redo);
 
+    $("btnAssets").addEventListener("click", function () { reloadAssets(); });
+    $("btnTplLoad").addEventListener("click", function () { loadTemplate(templateListEl.value); });
+    $("btnTplSave").addEventListener("click", saveTemplate);
+    $("btnTplDelete").addEventListener("click", deleteTemplate);
+
+    $("btnSize").addEventListener("click", function () {
+      var cols = Number(sizeColsEl.value);
+      var rows = Number(sizeRowsEl.value);
+      if (cols === S.cols && rows === S.rows) {
+        setStatus("尺寸没变：" + cols + " × " + rows);
+        return;
+      }
+      if (!window.confirm("画布改成 " + cols + " × " + rows + " 格？当前地图和对象会被清空（Ctrl+Z 可撤销）。")) {
+        updateSizeUi();
+        return;
+      }
+      resizeCanvas(cols, rows);
+    });
+    $("refFrame").addEventListener("change", function () {
+      S.showRef = this.checked;
+      scheduleDraw();
+    });
+
     $("btnValidate").addEventListener("click", runValidate);
     $("btnSave").addEventListener("click", save);
-    $("btnLoad").addEventListener("click", function () { loadName(fileNameEl.value.trim() || "room_map.txt"); });
+    $("btnLoad").addEventListener("click", function () { loadName(fileNameEl.value.trim() || "room_map.json"); });
     $("btnRefresh").addEventListener("click", refreshList);
     $("btnDelete").addEventListener("click", deleteFile);
     $("btnEmitC").addEventListener("click", function () { emitC(false); });
@@ -1531,26 +1973,28 @@
       if (key === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
       if (key === "y") { event.preventDefault(); redo(); return; }
       if (key === "s") { event.preventDefault(); save(); return; }
+      if (key === "0") { event.preventDefault(); zoomAtCenter(1); return; }
       return;
     }
 
     if (key === "o") selectLayer(S.layer === "tile" ? "object" : "tile");
     else if (key === "b") selectBrush("B");
+    else if (key === "k") selectBrush("K");
+    else if (key === "s") selectBrush("S");
     else if (key === "w") selectBrush("W");
     else if (key === "d") selectBrush("D");
+    else if (key === "h") selectBrush("H");
     else if (key === "e") selectBrush(".");
     else if (key === "r") cycle();
-    else if (key === "0") fit();
-    else if (key === "+" || key === "=") setZoom(S.zoom + 0.25, true);
-    else if (key === "-") setZoom(S.zoom - 0.25, true);
-    else if (key >= "1" && key <= "7") {
-      var index = Number(key) - 1;
+    else if (key === "f") fit();
+    else if (key === "+" || key === "=") zoomAtCenter(S.zoom * 1.25);
+    else if (key === "-") zoomAtCenter(S.zoom / 1.25);
+    else if (key >= "0" && key <= "9") {
+      var index = Number(key);
       if (S.layer === "object") {
         if (OBJECT_DEFS[index]) selectObject(OBJECT_DEFS[index].id);
-      } else if (S.brush === "C") {
-        if (index < 4) setCorner(index);
-      } else if (index < 4) {
-        setAngle(index);
+      } else if (TILES[index]) {
+        selectBrush(TILES[index].code);
       }
     } else return;
     event.preventDefault();
@@ -1559,8 +2003,6 @@
   /* ---------------------------------------------------------------- 启动 */
 
   function boot() {
-    buildPalette();
-    buildObjectPalette();
     buildCornerRow();
     buildAngleRow();
     bindUi();
@@ -1568,21 +2010,30 @@
     updateLayerHint();
     updateAngleHint();
     setZoom(1);
+    syncCanvas();
+    updateSizeUi();
+    if ($("refFrame")) $("refFrame").checked = S.showRef;
     window.requestAnimationFrame(fit);
 
     var draft = loadDraft();
     var useDraft = !!(draft && (!S.served || draft.dirty));
     if (useDraft) {
-      applyState(draft.rows, draft.rot, draft.objects, draft.roomType);
+      applyState(draft.rows, draft.rot, draft.objects);
       S.history.length = 0;
       S.future.length = 0;
       S.savedText = "";
       setStatus("已恢复本地草稿（有未保存修改）；要读磁盘上的文件请点「读取」。");
     }
 
-    loadImages().then(function () {
+    /* 素材列表 → 笔刷 → 图片，全部来自 res/pic（不再写死文件名） */
+    loadAssets().then(function () {
+      buildPalette();
+      buildObjectPalette();
+      updateSelection();
+      return loadImages();
+    }).then(function () {
       var missing = TILES.filter(function (t) { return t.image && !images[t.id]; }).map(function (t) { return t.image; })
-        .concat(OBJECT_DEFS.filter(function (d) { return !images[d.id]; }).map(function (d) { return d.id; }));
+        .concat(OBJECT_DEFS.filter(function (d) { return d.image && !images[d.id]; }).map(function (d) { return d.image; }));
       if (missing.length) setStatus("素材加载失败：" + missing.join("、") + "（检查 res/pic/）", false);
       refreshInfo();
       scheduleDraw();
@@ -1593,10 +2044,17 @@
     scheduleDraw();
 
     if (S.served) {
+      apiGet("/api/health").then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        setStatus("已连接 serve.py · 页面 " + PAGE_VERSION);
+      }).catch(function () {
+        setStatus("连不上 serve.py（页面 " + PAGE_VERSION + "）——检查终端里的服务是否还在跑", false);
+      });
       refreshList();
+      refreshTemplates();
       if (!useDraft) {
         S.loading = true;
-        loadName("room_map.txt", true, false).finally(function () { S.loading = false; });
+        loadName("room_map.json", true, false).finally(function () { S.loading = false; });
       }
       scheduleValidate();
     } else {

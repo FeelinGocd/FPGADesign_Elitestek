@@ -92,20 +92,25 @@ void game_hud_dirty_row(unsigned char dirty[GRID_H][GRID_W], int row)
  *  ★ 以前这里给每行画 "0" 占位，数字又是 CK 精灵（透明像素不写）：
  *    相机一移动、标签重画一次，0 就叠在真实数字的透明缝里 ⇒ 屏幕上
  *    "00 和真实数字重叠"。数字统一由 game_hud_frame() 在更高的 z 层画。  */
+/*  ★ 每行的标签/位数只写这一份：静态层和每帧重画都用它。
+ *    以前静态层把 12 个标签手抄一遍，改了名字（或加一行）两处就会对不上。
+ *    0 = 这一行没有标签（第 4 行是血量，由 game_vital.c 画）。  */
+static const char *const s_row_label[HUD_CELLS_Y] = {
+    "FPS", "BULLETS", "CMD", "STAGE", 0,
+    "DMG", "MOVE", "BSPD", "RANGE", "RATE",
+    "COINS", "BOMB"
+};
+static const unsigned char s_row_digits[HUD_CELLS_Y] = {
+    2, 3, 3, 2, 0, 2, 2, 2, 3, 2, 3, 1
+};
+
 void game_hud_static(u32 fb)
 {
+    int i;
+
     fb = game_view_fb(fb);
-    hud_label(fb, HUD_LABEL_X, 0  * HUD_ROW_H, "FPS");
-    hud_label(fb, HUD_LABEL_X, 1  * HUD_ROW_H, "BULLETS");
-    hud_label(fb, HUD_LABEL_X, 2  * HUD_ROW_H, "CMD");
-    hud_label(fb, HUD_LABEL_X, 3  * HUD_ROW_H, "STAGE");
-    /*  第 4 行 = 血量（game_vital.c 画）  */
-    hud_label(fb, HUD_LABEL_X, 5  * HUD_ROW_H, "DMG");
-    hud_label(fb, HUD_LABEL_X, 6  * HUD_ROW_H, "MOVE");
-    hud_label(fb, HUD_LABEL_X, 7  * HUD_ROW_H, "BSPD");
-    hud_label(fb, HUD_LABEL_X, 8  * HUD_ROW_H, "RANGE");
-    hud_label(fb, HUD_LABEL_X, 9  * HUD_ROW_H, "RATE");
-    hud_label(fb, HUD_LABEL_X, 10 * HUD_ROW_H, "COINS");
+    for (i = 0; i < HUD_CELLS_Y; ++i)
+        if (s_row_label[i]) hud_label(fb, HUD_LABEL_X, i * HUD_ROW_H, s_row_label[i]);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -124,6 +129,7 @@ static void hud_values(int fps, int cmd_frame, int total_bullets, int coins, int
     v[8] = g.stats.range;
     v[9] = (int)(60u / FIRE_EVERY);
     v[10] = coins;
+    v[11] = g.bomb_count;
 }
 
 /*  ★ 帧首调用：把"和这块缓冲上次画的不一样"的行标脏（旧文字由脏区恢复擦掉）。
@@ -214,10 +220,6 @@ int game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
 /*  绘制：把标脏过的行画出来（没标脏的不用管）  */
 void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, int coins, int full)
 {
-    static const char *labels[HUD_CELLS_Y] = { "FPS", "BULLETS", "CMD", "STAGE", 0,
-                                               "DMG", "MOVE", "BSPD", "RANGE", "RATE",
-                                               "COINS" };
-    static const int digits[HUD_CELLS_Y]   = { 2, 3, 3, 2, 0, 2, 2, 2, 3, 2, 3 };
     int v[HUD_CELLS_Y];
     int i;
 
@@ -228,7 +230,7 @@ void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, 
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
         if (!full && !s_draw[buf][i]) continue;
-        hud_row(fb, i, labels[i], v[i], digits[i]);
+        hud_row(fb, i, s_row_label[i], v[i], s_row_digits[i]);
         s_draw[buf][i] = 0;
     }
 }

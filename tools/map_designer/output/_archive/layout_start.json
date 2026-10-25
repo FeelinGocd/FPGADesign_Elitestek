@@ -1,7 +1,7 @@
 {
   "format": "map_designer",
   "version": 3,
-  "room_type": "empty",
+  "name": "start",
   "size": {
     "cols": 40,
     "rows": 23,
@@ -1002,65 +1002,17 @@
   ],
   "objects": [
     {
-      "kind": "exit",
-      "x": 20,
-      "y": 5,
-      "arg": 0
-    },
-    {
-      "kind": "box",
-      "x": 17,
-      "y": 6,
-      "arg": 0
-    },
-    {
       "kind": "web",
       "x": 15,
-      "y": 7,
-      "arg": 0
-    },
-    {
-      "kind": "slime",
-      "x": 12,
-      "y": 8,
-      "arg": 0
-    },
-    {
-      "kind": "slime",
-      "x": 27,
-      "y": 8,
-      "arg": 0
-    },
-    {
-      "kind": "stone",
-      "x": 11,
-      "y": 10,
-      "arg": 0
-    },
-    {
-      "kind": "stone",
-      "x": 29,
-      "y": 10,
-      "arg": 0
-    },
-    {
-      "kind": "bug",
-      "x": 20,
-      "y": 12,
+      "y": 9,
       "arg": 0
     },
     {
       "kind": "web",
       "x": 25,
-      "y": 13,
-      "arg": 0
-    },
-    {
-      "kind": "crate",
-      "x": 23,
-      "y": 15,
+      "y": 9,
       "arg": 0
     }
   ],
-  "sha256": "304de6c5a42411b4695fdb70d55470ed76852f6374a667c659eb4e0139e878a8"
+  "sha256": "8d091e01bc87260727edefce2cf7d50ec9792eb336668db0c1e35730d2303619"
 }

@@ -55,6 +55,45 @@ static int rect_hit(int ax, int ay, int aw, int ah,
            ay < by + bh && ay + ah > by;
 }
 
+/*  这只怪"脚下"那一格能不能站人（和玩家撞墙判定同一套：
+ *  身体最下面一行、水平中心）。  */
+static int mob_foot_cell(int x, int y, int *tx, int *ty)
+{
+    *tx = (x + MOB_W / 2) / TILE;
+    *ty = (y + MOB_H - 1) / TILE;
+    return game_room_cell_walkable(*tx, *ty);
+}
+
+/*  随机挑一个【能站人】的格子当出生点（格左上角对齐，正好 32×32 一格）。
+ *  ★ 以前直接在竞技场矩形里撒像素：L 形房的缺口和内墙都在这个矩形里，
+ *    怪会刷在黑区/墙里，之后又只夹矩形边走 ⇒ 穿墙追人、隔墙咬人
+ *    （2026-10-24 抓到）。现在先查地板，再要求离玩家至少 2 格（不贴脸出生）。  */
+static int mob_spawn_pos(int *ox, int *oy)
+{
+    int tx0 = ARENA_X0 / TILE, ty0 = ARENA_Y0 / TILE;
+    int tx1 = (ARENA_X1 - 1) / TILE, ty1 = (ARENA_Y1 - 1) / TILE;
+    int px = (g.x + PW / 2) / TILE;             /* 玩家脚下那一格 */
+    int py = (g.y + PH - 1) / TILE;
+    int tries;
+
+    if (tx1 < tx0 || ty1 < ty0) return 0;
+    for (tries = 0; tries < 96; ++tries) {
+        int tx = tx0 + (int)(mob_rand() % (u32)(tx1 - tx0 + 1));
+        int ty = ty0 + (int)(mob_rand() % (u32)(ty1 - ty0 + 1));
+        int d;
+
+        if (!game_room_cell_walkable(tx, ty)) continue;
+        d = tx - px; if (d < 0) d = -d;
+        if (d < 2) continue;
+        d = ty - py; if (d < 0) d = -d;
+        if (d < 2) continue;
+        *ox = tx * TILE;
+        *oy = ty * TILE;
+        return 1;
+    }
+    return 0;
+}
+
 void game_mobs_reset(void)
 {
     int i, b;
@@ -76,14 +115,16 @@ void game_mobs_spawn(int count)
 
     for (i = 0; i < N_MOBS && n < count; ++i) {
         mob_t *m = &g.mobs[i];
+        int sx = 0, sy = 0;
 
         if (m->active) continue;
+        if (!mob_spawn_pos(&sx, &sy)) break;    /* 这间房挑不出能站的格子：不生成 */
         m->active = 1;
         m->type = MOB_SLIME;
         m->hp = MOB_HP;
         m->frame = 0;
-        m->x = (short)(ARENA_X0 + 64 + (int)(mob_rand() % (u32)(ARENA_X1 - ARENA_X0 - 128 - MOB_W)));
-        m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
+        m->x = (short)sx;
+        m->y = (short)sy;
         m->move_next = game_ms() + 250u + (mob_rand() % 350u);
         m->hop_until = 0u;
         m->hit_until = 0u;
@@ -100,20 +141,55 @@ void game_mobs_spawn_bug(int count)
 
     for (i = 0; i < N_MOBS && n < count; ++i) {
         mob_t *m = &g.mobs[i];
+        int sx = 0, sy = 0;
 
         if (m->active) continue;
+        if (!mob_spawn_pos(&sx, &sy)) break;    /* 同上 */
         m->active = 1;
         m->type = MOB_BUG;
         m->hp = BUG_HP;
         m->frame = 0;
-        m->x = (short)(ARENA_X0 + 64 + (int)(mob_rand() % (u32)(ARENA_X1 - ARENA_X0 - 128 - MOB_W)));
-        m->y = (short)(ARENA_Y0 + 64 + (int)(mob_rand() % (u32)(ARENA_Y1 - ARENA_Y0 - 128 - MOB_H)));
+        m->x = (short)sx;
+        m->y = (short)sy;
         m->move_next = game_ms() + 100u + (mob_rand() % 200u);
         m->hop_until = game_ms() + BUG_FRAME_MS;
         m->hit_until = 0u;
         ++n;
     }
     s_spawned = 1;
+}
+
+/*  固定布局用：在像素坐标 (x,y) 放一只怪（type 用 OBJ_SLIME / OBJ_BUG 的编号）。
+ *  和随机版共用同一套初始化，只是位置是设计好的（房间设计器里的对象层）。  */
+int game_mobs_spawn_at(int x, int y, int type)
+{
+    int i;
+
+    if (x < ARENA_X0 || y < ARENA_Y0) return 0;
+    if (x + MOB_W > ARENA_X1 || y + MOB_H > ARENA_Y1) return 0;
+
+    for (i = 0; i < N_MOBS; ++i) {
+        mob_t *m = &g.mobs[i];
+
+        if (m->active) continue;
+        m->active = 1;
+        m->type = (unsigned char)((type == MOB_BUG) ? MOB_BUG : MOB_SLIME);
+        m->hp = (m->type == MOB_BUG) ? BUG_HP : MOB_HP;
+        m->frame = 0;
+        m->x = (short)x;
+        m->y = (short)y;
+        if (m->type == MOB_BUG) {
+            m->move_next = game_ms() + 100u + (mob_rand() % 200u);
+            m->hop_until = game_ms() + BUG_FRAME_MS;
+        } else {
+            m->move_next = game_ms() + 250u + (mob_rand() % 350u);
+            m->hop_until = 0u;
+        }
+        m->hit_until = 0u;
+        s_spawned = 1;
+        return 1;
+    }
+    return 0;
 }
 
 int game_mobs_alive(void)
@@ -155,8 +231,11 @@ void game_mobs_step(u32 now)
     for (i = 0; i < N_MOBS; ++i) {
         mob_t *m = &g.mobs[i];
         int px, py, mx, my, dx, dy;
+        int ox, oy, tx, ty;
 
         if (!m->active) continue;
+        ox = m->x;                                  /* 这一步之前在哪（撞墙回退用） */
+        oy = m->y;
 
         if (m->type == MOB_BUG) {
             /*  bug：每 30 ms 朝玩家走 1 px；4 步动画 0, 1, 对称1, 0 */
@@ -208,6 +287,15 @@ void game_mobs_step(u32 now)
                 m->hop_until = now + 180u;
                 m->move_next = now + 520u + (mob_rand() % 320u);
             }
+        }
+
+        /*  ★ 只认【能站人的格子】：怪不能钻进缺口/内墙（L 形房），也不能穿墙追人。
+         *    以前只夹竞技场矩形，L 房的怪会沿直线穿过缺口那面墙贴到玩家身上，
+         *    还隔着墙咬人（2026-10-24 抓到）。分轴回退 —— 贴着墙还能滑一步。  */
+        if (!mob_foot_cell(m->x, m->y, &tx, &ty)) {
+            if (mob_foot_cell(m->x, oy, &tx, &ty))      m->y = (short)oy;
+            else if (mob_foot_cell(ox, m->y, &tx, &ty)) m->x = (short)ox;
+            else { m->x = (short)ox; m->y = (short)oy; }
         }
 
         /*  接触伤害：玩家【脚到眼睛】矩形 vs 小怪【大方块】  */

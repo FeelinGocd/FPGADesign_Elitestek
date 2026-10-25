@@ -258,28 +258,10 @@ void game_item_apply(int type)
     for (i = 0; i < m->lives; ++i) game_vital_extra_life();
     /*  m->hp_max 先保留字段：等血条 UI 支持“上限变化”后再接。  */
 
-    g.stats.move_v8 += m->move_v8;
-    if (g.stats.move_v8 < 8)  g.stats.move_v8 = 8;
-    if (g.stats.move_v8 > 48) g.stats.move_v8 = 48;
-
-    g.stats.fire_every += m->fire_every;
-    if (g.stats.fire_every < 1)  g.stats.fire_every = 1;
-    if (g.stats.fire_every > 60) g.stats.fire_every = 60;
-
-    g.stats.bullet_speed += m->bullet_speed;
-    if (g.stats.bullet_speed < 1)  g.stats.bullet_speed = 1;
-    if (g.stats.bullet_speed > 12) g.stats.bullet_speed = 12;
-
-    g.stats.range += m->range;
-    if (g.stats.range < 1)  g.stats.range = 1;
-    if (g.stats.range > 99) g.stats.range = 99;
-
-    g.stats.damage += m->damage;
-    if (g.stats.damage < 1) g.stats.damage = 1;
-    if (g.stats.damage > 9) g.stats.damage = 9;
-
-    if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
-    if (m->triple) g.fire_triple = 1;
+    /*  ★ 属性不在这里逐项加：背包已经多了一件，直接从背包【整体重算】。
+     *    以前这里和 item_recompute_stats() 各抄一份"加 + 钳位"，两处钳位值
+     *    改一处忘一处就会漂（例如加滿道具后再死一次，属性会和捡的时候不一样）。  */
+    item_recompute_stats();
 }
 
 /*----------------------------------------------------------------------------*/

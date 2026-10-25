@@ -14,12 +14,13 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
     W / ↑ 上      S / ↓ 下      A / ← 左      D / → 右（可以斜着按）
     R            按一下重开一局（不用按住）
     P            在玩家脚下生成一个道具（当前池子只刷 MagicCard）
+    B            放置炸弹
     /            进入"命令行"：敲完回车发给板子（回车不会当移动键）
     ESC 退出（松手即停，所以也可以随时按 Ctrl+C）
 
 协议（板端 game/game_input.c）:
     两字节帧:  0xA5  +  mask
-    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit6 P
+    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 B / bit6 P
     只在掩码变化时发一次；板端 500 ms 收不到就自动回落到板载按键。
 """
 import argparse
@@ -67,6 +68,7 @@ VK = {
     0x41: 0x1,   # A
     0x44: 0x2,   # D
     0x52: 0x10,  # R：按一下重开一局
+    0x42: 0x20,  # B：放炸弹
     0x50: 0x40,  # P：在玩家脚下生成一个道具
 }
 VK_ESC = 0x1B
@@ -190,6 +192,7 @@ def main():
                 last_send = now
                 # 状态行（覆盖同一行，别刷屏）
                 names = []
+                if mask & 0x20: names.append("BOMB")
                 if mask & 0x40: names.append("SPAWN")
                 if mask & 0x10: names.append("RESTART")
                 if mask & 0x8: names.append("UP")

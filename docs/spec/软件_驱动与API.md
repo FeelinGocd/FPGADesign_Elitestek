@@ -149,19 +149,33 @@ CI_gpu2d_combineTintRect(asset_base_word, stride_word,
 
 | 路径 | 接口 | 用在哪 |
 |---|---|---|
-| **硬件 90° 旋转** | `extra/flip` 里带 `GPU2D_ROT90`（= `0x4`） | 要现场转、或者不想多存素材 |
-| **预生成 `_up` 素材** | 命令直接指向 `<名>_up` 那张（`pic2pram.py` 打包时自动转好） | 方向固定、数量少 —— **子弹走这条** |
+| **硬件按列取样（`ROT90`）** | `extra/flip` 里带 `GPU2D_ROT90`（= `0x4`），**再按方向叠 `FLIP_X`/`FLIP_Y`** | 要现场转、或者不想多存素材 |
+| **预生成 `_up` 素材** | 命令直接指向 `<名>_up` 那张（`pic2pram.py` 预留了这条路） | ★ **当前没有任何 `_up` 素材**：子弹/门都是硬件 `ROT90`（见下面遗留 #1）；只有“方向固定 + 不想吃 1/4 吞吐”时才值得走这条 |
 
 ```c
-/* 硬件旋转：w/h 由驱动自动交换，画出来就是转了 90° 的精灵 */
-CI_gpu2d_spriteFlipCK(base, stride, fb, x, y, w, h, GPU2D_ROT90);
+/* ★ ROT90 单用是【转置】(out(x,y)=src(y,x))，不是旋转；w/h 由驱动自动交换 */
+CI_gpu2d_spriteFlipCK(base, stride, fb, x, y, w, h, GPU2D_ROT90);                 /* 转置 */
+CI_gpu2d_spriteFlipCK(base, stride, fb, x, y, w, h, GPU2D_ROT90 | GPU2D_FLIP_X);  /* 顺时针 90° */
+CI_gpu2d_spriteFlipCK(base, stride, fb, x, y, w, h, GPU2D_ROT90 | GPU2D_FLIP_Y);  /* 逆时针 90° */
 ```
+
+| 想要 | `extra` / `flip` 传什么 |
+|---|---|
+| 转置（沿主对角线镜像） | `GPU2D_ROT90` |
+| **顺时针 90°** | `GPU2D_ROT90 \| GPU2D_FLIP_X` |
+| **逆时针 90°** | `GPU2D_ROT90 \| GPU2D_FLIP_Y` |
+| 180° | `GPU2D_FLIP_X \| GPU2D_FLIP_Y` |
+
+> 判据：**画出来是镜像的就说明裸用了 `ROT90`**。条纹木纹、圆点子弹这类对称图形，
+> 转置和旋转长得一样（1024 px 里差不到 100 px），靠「看着像」验不出来 —— 必须用带方向性的图
+> （箭头 / 门 / 斜接角）。
 
 **角色的左右：只存【朝右】一套**（`pic2pram.py` 会跳过名字带 `_left` 的图）—— 要朝左就带 `GPU2D_FLIP_X`。
 省下来的 PRAM 很可观（56×72 一帧 1008 字，三套动作只存一套就省下 ~6000 字）。
 
 ★ **旋转慢约 4 倍**（一拍只取 1 个索引，攒 4 个才够一拍像素）⇒ 只用来转小图（子弹 / 图标），别转大角色。
-★ 已验证：仿真逐字节 err=0（`tb_m2loopback` 第 11 段），上板子弹上下方向正常。
+★ 已验证：仿真逐字节 err=0（`tb_m2loopback` 第 11 段，**验的是裸 `ROT90` = 转置**），上板子弹上下方向正常。
+★ `ROT90|FLIP_X` / `ROT90|FLIP_Y` 这两种组合**还没有逐字节用例**（2026-10-24，见 `硬件_加速器.md` §7）。
 
 **四方向动画表怎么摆**（`game/game_player.c` 就是这么写的）：每个方向一张序列表 + 每一拍是否翻面，共用同一套「朝右」素材：
 
@@ -170,7 +184,59 @@ static const int side_seq[] = { R_00_standUp, R_01_right, R_00_standUp, R_01_rig
 static const u32 down_flip[] = { 0u, 0u, 0u, GPU2D_FLIP_X, 0u };   /* 朝下时靠 MX 复用同一帧 */
 ```
 
-★ 注意：**旋转生效时硬件会屏蔽 MX**（旋转已经决定取样方向，再叠 MX 语义会打架）。
+★ 注意：**旋转生效时 `PaletteDecoder` 会屏蔽 MX 的「字内反序」**，但 **MX 本身仍然有效** ——
+`PaletteSource` 拿它选「这一列从下往上取」，效果就是左右翻；所以 `ROT90|FLIP_X` 才是顺时针 90°（见上表）。
+
+### 2.4 房间贴图的 rot（设计器 ↔ 固件，2026-10-24 对齐）
+
+地图每格 = **一个字符 + 一个 `rot`(0..3)**（`tools/map_designer` 里画，`game_layout_data.c` 里导出）。
+
+| 字符 | 含义 | `rot` 的含义 |
+|---|---|---|
+| `B` / `W` | 基岩地板 / 木墙 | **顺时针 90° × rot**（木纹方向） |
+| `C` / `X` / `Y` / `Z` | 角块：不翻 / 左右翻 / 上下翻 / 两次翻 | 同上，**叠在翻转之后** |
+| `D` | 门（1×2 格，地图里只写一格） | **门的方向**：N=0 / E=1 / S=2 / W=3（`rot & 1` = 横门） |
+
+**变换顺序**：先按字符翻、再按 `rot` **顺时针**转 —— 和设计器预览完全一致
+（`app.js` 里是 `rotate(angle*90)` → `scale(fx,fy)`；canvas 后写的先作用，所以实际是「先翻后转」）。
+
+**固件只查这两张表**（`game_world.c`，别在别处自己拼标志位）：
+
+```c
+/* rot = 顺时针 90°；★ 裸 ROT90 是转置，所以 90/270 必须带 FLIP_X / FLIP_Y */
+static const u32 rot_flag[4] = { 0u,
+                                 GPU2D_ROT90 | GPU2D_FLIP_X,   /* 顺时针 90° */
+                                 GPU2D_FLIP_X | GPU2D_FLIP_Y,  /* 180° */
+                                 GPU2D_ROT90 | GPU2D_FLIP_Y }; /* 顺时针 270°（= 逆时针 90°） */
+
+/* 角块：行 = rot，列 = C / X / Y / Z（字符是「翻转」，不是「朝向序号」） */
+static const u32 corner_flag[4][4] = {
+    { 0u,                        GPU2D_FLIP_X,                          GPU2D_FLIP_Y,                          GPU2D_FLIP_X|GPU2D_FLIP_Y },
+    { GPU2D_ROT90|GPU2D_FLIP_X,  GPU2D_ROT90|GPU2D_FLIP_X|GPU2D_FLIP_Y, GPU2D_ROT90,                          GPU2D_ROT90|GPU2D_FLIP_Y },
+    { GPU2D_FLIP_X|GPU2D_FLIP_Y, GPU2D_FLIP_Y,                          GPU2D_FLIP_X,                          0u },
+    { GPU2D_ROT90|GPU2D_FLIP_Y,  GPU2D_ROT90,                           GPU2D_ROT90|GPU2D_FLIP_X|GPU2D_FLIP_Y, GPU2D_ROT90|GPU2D_FLIP_X },
+};
+```
+
+这两张表**逐像素复现设计器**（16 种角块组合、4 个门方向、整张 L 房和标准房 0 误差），
+2026-10-24 上板确认：房间四角、左右墙、四扇门都对上了。
+
+**怎么一眼看出查错了表**（下面两条是修之前真实见到的现象，留着当排障指纹）：
+
+| 你看到的 | 根因 | 正确时 |
+|---|---|---|
+| **右下角的角块长成左下角的样子** | 角块 `Y`/`X` 走了裸 `ROT90`（= 转置），和 `Z` 的 180° 只差缝上一点明暗（1024 px 里只差 60 px） | 用 `FLIP_Y`，与 BL 差 556 px，一眼是两个角 |
+| **最右边的墙和最左边的墙一个样** | 东墙 `rot=1` 画成逆时针 90°、西墙 `rot=3` 画成转置，条纹木纹下两者只差 72 px | `rot=1` 顺时针、`rot=3` 逆时针，两者差 180°（528 px） |
+
+> ★ 两条是**同一个根因**：**裸 `ROT90` 是转置**。见到「角块/门像隔壁那个」「左右两边的墙一样」，
+> 先查 `rot_flag` / `corner_flag` 有没有退回「90° 用 `ROT90|MY`、270° 用 `ROT90`」的写法。
+
+**本节遗留（2026-10-24）**
+
+| # | 遗留 | 怎么办 |
+|---|---|---|
+| 1 | `game/game_bullet.c` 的 `dir_flip[4] = { 0, FLIP_X, ROT90, ROT90\|FLIP_Y }` 还是旧写法：**UP 用了裸 `ROT90`（转置）**、DOWN 用了逆时针 90° | 正确是 `{ 0, FLIP_X, ROT90\|FLIP_Y, ROT90\|FLIP_X }`（UP 逆时针、DOWN 顺时针）。圆弹 `bullet_type_A_base` 基本看不出来，`bullet_type_C_Uranus` 这种带方向的会镜像，改的时候顺手看一眼 |
+| 2 | 设计器 `app.js` / `index.html` 的 `fwView`（「固件视角，tile_rot 里 1↔3 互换」）已过时：固件早就没有 1↔3 互换了，勾上只会让预览再错 180° | 删掉这个开关和 `drawAngle()` 里的互换（预览直接 `S.rot & 3`） |
 
 ---
 
@@ -602,7 +668,7 @@ FENCE;
 | 字节 | 含义 |
 |---|---|
 | 0 | `0xA5` 帧头 |
-| 1 | `mask`：bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R 重开 / bit5 T 无敌 |
+| 1 | `mask`：bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R 重开 / bit5 B 炸弹 / bit6 P 生成 |
 
 - **只在掩码变化时发一次**；板端收到后 `PAD_TIMEOUT = 500 ms` 内一直有效 ⇒ 不需要按固定周期刷。
 - 带帧头是为了让板子自己打印的文本、或者别的串口助手发的字符不会被误当成按键。
@@ -691,6 +757,7 @@ uv run tools/GamePad/game_pad.py -p COM5       # 连上，W/A/S/D 或方向键�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v4.27 | 2026-10-24 | ① §2.3 补 `ROT90` 的真实映射：**裸 `ROT90` = 转置**（`out(x,y)=src(y,x)`），顺时针 90° = `ROT90\|FLIP_X`、逆时针 90° = `ROT90\|FLIP_Y`；修正「旋转屏蔽 MX」的说法（只屏蔽字内反序，MX 仍用来选列方向）；② 新增 **§2.4「房间贴图的 rot（设计器 ↔ 固件）」**：字符 = 翻转、rot = 顺时针、门 rot = 方向，给出 `rot_flag[4]` / `corner_flag[4][4]` 两张表 + 「右下角像左下角 / 右墙像左墙」两条排障指纹；③ `game_world.c` 两张表已按 §2.4 换掉，2026-10-24 上板角块/墙/门正常；④ 遗留：`game_bullet.c` 的 `dir_flip`（UP/DOWN 仍裸用 ROT90）、设计器 `fwView` 1↔3 开关待删 |
 | v4.26 | 2026-10-23 | ① 小怪被玩家子弹打中且存活时**闪红 120 ms**（MODE=4 tint+alpha，保留软边）；② 门贴图与"能不能传送"解耦：只要邻居格有房间，门就按正常门渲染；有怪/Boss 活着只影响 `game_room_door_open()`（传送），不再把门画成木墙；③ 玩家换房落点改为**门朝向那一格的中心点**（身体矩形中心 = `cx*32+16, cy*32+16`），不再贴墙内 8 px；④ 顺带修复右门的门洞几何（内半格在 D 左侧，原来门洞落到场地外导致右侧门无法触发传送），以及右门无邻居、不画门时 D 右侧那格墙皮漏画（看起来门窗整体偏一格）；⑤ 修正 Boss 大房间四角各 1 格紧贴角落的墙格旋转（左上/右上顶墙 0、左下左墙 3、右下右墙 1），与普通房同款角块对齐 |
 | v4.25 | 2026-10-23 | Boss 大房间相机 + HUD 搬家修复：① g_hud_need 每帧清零（以前只置不清）；② 面板脏区按 32×32 瓦片恢复，cam_y 非 32 倍数时会擦到相邻行 ⇒ 新增 game_hud_prepare_overlap()，在 vital/飘心标脏之后把被波及的相邻行补进重画列表（不再只补画"数值变了的那一行"）；③ 道具池按瓦片重叠检测，被弹幕/实体擦到也补画；④ 击破 Boss 后立即退出 PHASE_FIGHT，顶部血条随 3 帧 fade 消失；⑤ 初始化调用 lb_detect_unaligned()（以前写了没调用，老 bitstream 会丢非 16B 对齐基址） |
 | v4.24 | 2026-10-22 | 进入下一层强制 `same_layout=0` 整屏重铺：交互物 reset 后旧 `old_*` 已清，不能再走快速路径；清掉上一层留下的石头 / 网 / 金币 / 商店商品像素 |

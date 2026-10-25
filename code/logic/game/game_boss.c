@@ -102,80 +102,35 @@ static void rain_wave(void)
     }
 }
 
-/*----------------------------------------------------------------------------*/
-/*  当前【朝向方向】里最近的敌人中心；没有返回 0。
- *  方向按“主轴”分：横向差 >= 纵向差 ⇒ 左/右，否则上/下。
- *  这样玩家背对/侧对怪物时不会自动转火，必须自己把朝向转过去。  */
-int game_enemy_in_dir(int dir, int *tx, int *ty)
+/*  某个方向是不是目标所在的"主轴"方向：横向差 >= 纵向差 ⇒ 左右，否则上下。
+ *  ★ 自动开火和"最近敌人"两处瞄准共用这一条，别再各写一份 if 链。  */
+static int dir_match(int dir, int dx, int dy)
 {
-    int i, best = -1, bestd = 0x7fffffff;
-    int px = g.x + PW / 2;
-    int py = g.y + PH / 2;
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
 
-    /*  Boss 房：Boss 优先（Boss 房不会同时有 slime）  */
-    if (g.phase == PHASE_FIGHT && g.boss_hp > 0) {
-        int bx = g.boss_x + BB_OFF_X + BB_W / 2;
-        int by = g.boss_y + BB_OFF_Y + BB_H / 2;
-        int dx = bx - px, dy = by - py;
-        int adx = dx < 0 ? -dx : dx;
-        int ady = dy < 0 ? -dy : dy;
-        int match;
+    if (dir == LEFT)  return dx < 0 && adx >= ady;
+    if (dir == RIGHT) return dx > 0 && adx >= ady;
+    if (dir == UP)    return dy < 0 && ady >= adx;
+    return dy > 0 && ady >= adx;
+}
 
-        if (dir == LEFT)       match = (dx < 0 && adx >= ady);
-        else if (dir == RIGHT) match = (dx > 0 && adx >= ady);
-        else if (dir == UP)    match = (dy < 0 && ady >= adx);
-        else                   match = (dy > 0 && ady >= adx);
-
-        if (match) {
-            *tx = bx;
-            *ty = by;
-            return 1;
-        }
-        return 0;
-    }
-
-    for (i = 0; i < N_MOBS; ++i) {
-        const mob_t *m = &g.mobs[i];
-        int dx, dy, adx, ady, d, match;
-
-        if (!m->active) continue;
-        dx = m->x + 16 - px;
-        dy = m->y + 16 - py;
-        adx = dx < 0 ? -dx : dx;
-        ady = dy < 0 ? -dy : dy;
-
-        if (dir == LEFT)       match = (dx < 0 && adx >= ady);
-        else if (dir == RIGHT) match = (dx > 0 && adx >= ady);
-        else if (dir == UP)    match = (dy < 0 && ady >= adx);
-        else                   match = (dy > 0 && ady >= adx);
-        if (!match) continue;
-
-        d = adx + ady;
-        if (d < bestd) { bestd = d; best = i; }
-    }
-    if (best < 0) return 0;
-
-    *tx = g.mobs[best].x + 16;
-    *ty = g.mobs[best].y + 16;
+/*  Boss 房的 Boss 中心（没开战 / 已击破返回 0）。Boss 房不会同时有小怪。  */
+static int boss_center(int *tx, int *ty)
+{
+    if (g.phase != PHASE_FIGHT || g.boss_hp <= 0) return 0;
+    *tx = g.boss_x + BB_OFF_X + BB_W / 2;        /* 瞄判定框中心，不是贴图中心 */
+    *ty = g.boss_y + BB_OFF_Y + BB_H / 2;
     return 1;
 }
 
-/*----------------------------------------------------------------------------*/
-/*  最近的敌人中心（保留给非射击用途；玩家自动开火改用 game_enemy_in_dir）。  */
-int game_nearest_enemy(int *tx, int *ty)
+/*  最近的活着的 slime 中心（dir < 0 = 不限方向）。返回下标，-1 = 没有。  */
+static int nearest_mob(int dir, int *tx, int *ty)
 {
     int i, best = -1, bestd = 0x7fffffff;
     int px = g.x + PW / 2;
     int py = g.y + PH / 2;
 
-    /*  Boss 房：Boss 优先（Boss 房不会同时有 slime）  */
-    if (g.phase == PHASE_FIGHT && g.boss_hp > 0) {
-        *tx = g.boss_x + BB_OFF_X + BB_W / 2;        /* 瞄判定框中心，不是贴图中心 */
-        *ty = g.boss_y + BB_OFF_Y + BB_H / 2;
-        return 1;
-    }
-
-    /*  普通 / 道具房：找最近的 slime  */
     for (i = 0; i < N_MOBS; ++i) {
         const mob_t *m = &g.mobs[i];
         int dx, dy, d;
@@ -183,16 +138,34 @@ int game_nearest_enemy(int *tx, int *ty)
         if (!m->active) continue;
         dx = m->x + 16 - px;
         dy = m->y + 16 - py;
-        if (dx < 0) dx = -dx;
-        if (dy < 0) dy = -dy;
-        d = dx + dy;
+        if (dir >= 0 && !dir_match(dir, dx, dy)) continue;
+        d = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
         if (d < bestd) { bestd = d; best = i; }
     }
-    if (best < 0) return 0;
-
+    if (best < 0) return -1;
     *tx = g.mobs[best].x + 16;
     *ty = g.mobs[best].y + 16;
-    return 1;
+    return best;
+}
+
+/*  当前【朝向方向】里最近的敌人中心；没有返回 0。
+ *  ★ 玩家背对/侧对怪物时不会自动转火，必须自己把朝向转过去。  */
+int game_enemy_in_dir(int dir, int *tx, int *ty)
+{
+    if (boss_center(tx, ty)) {
+        int dx = *tx - (g.x + PW / 2);
+        int dy = *ty - (g.y + PH / 2);
+
+        return dir_match(dir, dx, dy);
+    }
+    return nearest_mob(dir, tx, ty) >= 0;
+}
+
+/*  最近的敌人中心（保留给非射击用途；玩家自动开火用 game_enemy_in_dir）。  */
+int game_nearest_enemy(int *tx, int *ty)
+{
+    if (boss_center(tx, ty)) return 1;
+    return nearest_mob(-1, tx, ty) >= 0;
 }
 
 /*----------------------------------------------------------------------------*/

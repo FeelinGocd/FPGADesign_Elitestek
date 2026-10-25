@@ -54,7 +54,9 @@ static void hud_vals_update(int fps, int bullets, int cmd, int coins)
 }
 
 /*  分段计时（CLINT 原始 tick → us）。默认开；只想省代码/不想看日志时改 0。  */
+#ifndef GAME_PROFILE
 #define GAME_PROFILE 1
+#endif
 #if GAME_PROFILE
 static u32 s_pf_begin, s_pf_update, s_pf_draw, s_pf_fence, s_pf_present;
 static u32 s_pf_begin_max, s_pf_update_max, s_pf_draw_max;
@@ -118,42 +120,8 @@ static void frame_begin(u32 now)
 
 /*----------------------------------------------------------------------------*/
 /*  ② 更新模型  */
-static void game_update(u32 keys, u32 now)
-{
-    if (game_perf_frozen()) return;     /* 压测 mode 1：冻结玩法，只跑绘制 */
-
-    /*  P：在玩家脚下生成一个道具（调试用；当前池子只刷 MagicCard）  */
-    {
-        int spawn_req = game_take_spawn_item();
-        if (spawn_req && g.phase != PHASE_GAMEOVER) game_item_spawn_at_player();
-    }
-
-    game_vital_step(now);               /* 死亡动画 / 补满 / 命数 */
-    if (game_vital_over()) {            /* 命数耗尽：进 GAME OVER 画面（不再直接重开） */
-        game_vital_clear_over();
-        game_enter_gameover(now);
-        return;
-    }
-
-    /*  ★ GAME OVER 期间【不冻结玩法】：世界照常走，只是玩家不画、不挨打。
-     *    冻结的话两块缓冲会各停一格，交替显示就成了抽搐。  */
-    if (g.phase == PHASE_GAMEOVER && (int)(now - g.gameover_until) >= 0) {
-        game_restart();
-        return;
-    }
-    /*  ★ GAME OVER 期间【玩家逻辑停】（不移动/不开火），但世界照常跑：
-     *    Boss 继续动、弹幕继续飞。玩家不画，所以不会留下残影。  */
-    if (g.phase != PHASE_GAMEOVER && !game_vital_dead(now))
-        game_player_step(keys, now);
-    game_camera_step();                 /* Boss 房窗口跟随玩家；普通房固定 0 */
-    if (g.phase != PHASE_GAMEOVER)
-        game_room_step();
-    game_boss_step(now);
-    game_bullets_step(now);
-    game_mobs_step(now);                /* slime：动画 / 追玩家 / 清房奖励 */
-    game_coins_step(now);               /* 金币拾取：肚子碰到 +1 */
-    game_shop_step(now);                /* 商店：身体碰商品 → 扣币 / 回血 / 给道具 */
-}
+/*----------------------------------------------------------------------------*/
+/*  更新逻辑在 game_update.c；换房检测由主循环在更新之后调 game_room_step() */
 
 /*==============================================================================
  *  渲染层号系统（★ 硬件没有 z 缓冲，层序 = 命令下发顺序，后画的盖前面的）
@@ -358,12 +326,28 @@ static void game_draw(u32 now, int buf)
     for (i = 0; i < N_COINS; ++i)
         if (g.old_coin[buf][i].active)
             game_mark_dirty(g_dirty, g.old_coin[buf][i].x, g.old_coin[buf][i].y, 24, 24);
-    for (i = 0; i < N_WEBS; ++i)
-        if (g.old_web[buf][i].active)
-            game_mark_dirty(g_dirty, g.old_web[buf][i].x, g.old_web[buf][i].y, 32, 32);
-    for (i = 0; i < N_STONES; ++i)
-        if (g.old_stone[buf][i].active)
-            game_mark_dirty(g_dirty, g.old_stone[buf][i].x, g.old_stone[buf][i].y, 32, 32);
+    /*  蜘蛛网已经没有实例（位置来自蓝图）：只在换房后的两帧里，
+     *  把【旧房间】的网所在格补标脏，否则上一个房间的网会留在缓冲里。  */
+    if (game_room_prop_dirty()) {
+        const room_layout_t *pl = game_layout(game_room_prev_layout());
+        int k;
+
+        if (pl)
+            for (k = 0; k < (int)pl->n_objs; ++k) {
+                int kind = pl->objs[k].kind;
+                /* 静态物没有 old_*：位置就在蓝图里，按布局把旧房间这几格补脏 */
+                if (kind == OBJ_WEB || kind == OBJ_STONE ||
+                    kind == OBJ_BOX || kind == OBJ_CRATE)
+                    game_mark_dirty(g_dirty, pl->objs[k].x * TILE,
+                                    pl->objs[k].y * TILE, TILE, TILE);
+            }
+    }
+    {
+        int ex, ey, k;
+
+        for (k = 0; game_stones_erase_at(k, &ex, &ey); ++k)
+            game_mark_dirty(g_dirty, ex, ey, 32, 32);
+    }
 
     /* HUD 的文字：只有"数字变了"或"有精灵压在它那块"时才重画并标脏。
        平时一条命令都不花 —— 之前每帧都标 32 个格子，把帧率压下去了（移动发卡）。 */
@@ -381,6 +365,7 @@ static void game_draw(u32 now, int buf)
 
         game_vital_prepare(g_dirty, buf);
         game_item_prepare(g_dirty, buf);
+        game_bombs_prepare(g_dirty, buf);
         game_vital_mark_dirty(g_dirty);     /* 飘心也会压到面板上：先标脏再查重叠 */
 
         /*  ★ 第二次检查：vital / 飘心 / 实体的脏瓦片可能跨到相邻 HUD 行，
@@ -447,8 +432,6 @@ static void game_draw(u32 now, int buf)
      *    （飘心的标脏已提前到上面的 HUD 重叠检查之前。）  */
     game_bullets_sync(buf);             /* 脏区用：记下这一帧每颗弹画在哪 */
     game_coins_sync(buf);               /* 金币同样：擦完旧位置再把 old_coin 对齐到这一帧 */
-    game_web_sync(buf);                 /* 网 / 石头：同样按当前房间对齐 old 位置 */
-    game_stones_sync(buf);
     game_shop_sync(buf);                /* 商店商品：房间 + 位置的 old 对齐 */
 
     /*  ★ 先提交、再统一排序绘制：z 小的在下、z 大的在上（同 z 保持提交顺序）。
@@ -470,8 +453,11 @@ static void game_draw(u32 now, int buf)
     game_web_submit();
     game_stones_submit();
     game_item_submit();
+    game_bombs_submit();
 
     rl_draw_all(fb, now, buf);
+
+    game_stones_erase_tick();          /* 待擦队列：这一帧已经标过了，ttl-- */
 
     g_hud_full = 0;
     g.hud_cam_x[buf] = g.cam_x;
@@ -543,7 +529,7 @@ static int frame_end(u32 now, int buf)
 void game_demo_run(void)
 {
     bsp_printf("\r\nGAME: KEY0=left KEY1=right KEY2=down KEY3=up, auto fire\r\n");
-    bsp_printf("DEBUG CMDS: R = restart, P = spawn item (type + Enter)\r\n");
+    bsp_printf("DEBUG CMDS: R = restart, P = spawn item, B = bomb (type + Enter)\r\n");
     if (PERF_TEST_MODE == 1)
         bsp_printf("PERF TEST: fixed model, bullet levels 16/32/64/96/128/160/192\r\n");
     else if (PERF_TEST_MODE == 2)
@@ -569,6 +555,11 @@ void game_demo_run(void)
             if (!game_room_commit()) return;
             continue;
         }
+
+        if (game_room_rebuild_pending()) {
+            if (!game_room_finish_rebuild()) return;
+            continue;
+        }
 #if GAME_PROFILE
         {
             u32 t0 = prof_now();
@@ -579,7 +570,7 @@ void game_demo_run(void)
                 prof_add(&s_pf_begin, &s_pf_begin_max, t1 - t0);
                 t0 = t1;
             }
-            game_update(keys, now);
+            game_update_step(keys, now);
             game_room_step();   /* 检测是否走进门 → 置 s_pending */
             {
                 u32 t1 = prof_now();
@@ -594,7 +585,7 @@ void game_demo_run(void)
         }
 #else
         frame_begin(now);
-        game_update(keys, now);
+        game_update_step(keys, now);
         game_room_step();   /* 检测是否走进门 → 置 s_pending */
         game_draw(now, back);
 #endif

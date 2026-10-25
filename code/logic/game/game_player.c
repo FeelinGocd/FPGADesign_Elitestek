@@ -99,11 +99,15 @@ void game_player_step(u32 keys, u32 now)
     else if (my < 0) g.dir = UP;
     else if (my > 0) g.dir = DOWN;
 
-    /*  ★ 撞墙 = 【脚到眼睛】的身体矩形撞到场地边界（基岩），不是整张贴图包围盒。
-     *    头/脚/尾巴可以探进墙里；正对着门时门洞那一段再往外放一点，让人走进门。  */
+    /*  ★ 撞墙只看【脚底那一点】贴到场地边界：
+     *    以前用整个碰撞盒去贴边界（身体一碰到墙线就停），等于把墙算厚了 31 px，
+     *    所以"脚底判定"在房间最上面根本没机会生效（2026-10-24 发现）。
+     *    现在脚能一直走到墙根，头/身体可以探进墙带里。  */
     {
-        int bx0 = ARENA_X0 - PB_OFF_X, by0 = ARENA_Y0 - PB_OFF_Y;
-        int bx1 = ARENA_X1 - PB_OFF_X - PB_W, by1 = ARENA_Y1 - PB_OFF_Y - PB_H;
+        int bx0 = ARENA_X0 - (PB_OFF_X + PB_W / 2);
+        int by0 = ARENA_Y0 - (PB_OFF_Y + PB_H - 1);
+        int bx1 = ARENA_X1 - 1 - (PB_OFF_X + PB_W / 2);
+        int by1 = ARENA_Y1 - 1 - (PB_OFF_Y + PB_H - 1);
 
         game_room_door_bounds(nx, ny, &bx0, &by0, &bx1, &by1);
 
@@ -111,6 +115,28 @@ void game_player_step(u32 keys, u32 now)
         if (nx > bx1) { nx = bx1; g.vx8 = 0; g.rx = 0; }
         if (ny < by0) { ny = by0; g.vy8 = 0; g.ry = 0; }
         if (ny > by1) { ny = by1; g.vy8 = 0; g.ry = 0; }
+    }
+
+    /*  ★ 统一规则：只有【地板 / 门洞】能走，墙和黑边都挡。
+     *    按【脚底那一格】逐格判定，分轴回退（可以贴着墙走）。
+     *    普通房的矩形边界本来就和地板一致，所以行为不变；L 形房靠这条挡住缺口。  */
+    {
+        int fx = (nx + PB_OFF_X + PB_W / 2) / TILE;
+        int fy = (ny + PB_OFF_Y + PB_H - 1) / TILE;   /* ★ 碰撞盒最下面那一行，不留 8 px */
+        int ox = (g.x + PB_OFF_X + PB_W / 2) / TILE;
+        int oy = (g.y + PB_OFF_Y + PB_H - 1) / TILE;
+
+        if (!game_room_cell_walkable(fx, fy)) {
+            if (game_room_cell_walkable(fx, oy)) {
+                ny = g.y;
+            } else if (game_room_cell_walkable(ox, fy)) {
+                nx = g.x;
+            } else {
+                nx = g.x;
+                ny = g.y;
+            }
+            g.vx8 = 0; g.vy8 = 0; g.rx = 0; g.ry = 0;
+        }
     }
 
     /*  ★ 可交互石头：石头在上挡脚底、石头在下挡最上一排（眼睛）；分轴处理，可以贴着石头滑动  */
@@ -126,11 +152,15 @@ void game_player_step(u32 keys, u32 now)
         g.vx8 = 0; g.vy8 = 0; g.rx = 0; g.ry = 0;
     }
 
+    /*  可推动炸弹：撞上时把速度传给它，玩家停在炸弹后面。  */
+    game_bomb_push(&nx, &ny, g.x, g.y, now);
+
     g.moving = (nx != g.x || ny != g.y || g.vx8 != 0 || g.vy8 != 0);
     g.x = nx;
     g.y = ny;
 
     game_item_try_pickup(now);
+    game_bomb_pickup_try(now);
 
     /* 动画只在"一直在走、方向没变"时推进；停下或换向立刻回到站立帧。 */
     if (!g.moving || !g.was_moving || g.dir != g.last_dir) g.anim = 0u;
@@ -217,7 +247,7 @@ void game_player_draw(u32 fb, u32 now, int buf)
     /*  重生保护期：整块不画 = 闪烁（脏区照样擦得到，不会留残影）  */
     /*  GAME OVER：玩家不画（但记下位置，好让脏区把上一帧擦掉）  */
     if (g.phase == PHASE_GAMEOVER || game_vital_dead(now)) {
-        /* ??????????????????????????? */
+        /* 不画人，只记下旧位置，交给脏区把上一帧擦掉 */
         g.old_player[buf].active = 1;
         g.old_player[buf].x = g.x;
         g.old_player[buf].y = g.y;

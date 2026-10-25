@@ -6,7 +6,10 @@
 //       实时对比显示【纯软件 CPU 渲染】与【硬件加速渲染】的帧率差异"
 //
 //  画面
-//      分屏半幅 = 960 x 1080, 行距 2880 字节(不是全屏的 5760)。
+//      分屏半幅 = 640 x 720（可见宽度 640 = 720p 的 1280 的一半）。
+//      ★ 行距仍是 2880 字节（= 960 像素画布）：720p 只收窄了可见窗口，
+//        帧缓冲物理布局沿用 1080p 时代的跨距，见 docs/spec/硬件_显示通路.md §13。
+//        所以：可见 x 范围 0..639，画布 x 范围 0..959，多余部分不读不写。
 //      左半(A_L/B_L) 由 2D 加速器用 FILL 命令画; 右半(A_R/B_R) 由 CPU 逐字节写。
 //      两边跑【同一个方块数组、同一条运动轨迹】—— 只有"谁在画"不同。
 //
@@ -45,9 +48,9 @@
 /*------------------------------------------------------------------------------
  * 分屏半幅几何与地址(★ 和 main.c 的 LB_A_L/LB_A_R/LB_B_L/LB_B_R 必须一致)
  *----------------------------------------------------------------------------*/
-#define SPLIT_HALF_W        960
-#define SPLIT_HALF_H        1080
-#define SPLIT_LINE_BYTES    2880u               /* 960 * 3 */
+#define SPLIT_HALF_W        640                 /* 可见宽：1280 / 2（720p） */
+#define SPLIT_HALF_H        720                 /* 可见高：720p 的 720 行 */
+#define SPLIT_LINE_BYTES    2880u               /* 画布行距仍是 960*3（RTL 分屏段跨距 = 5760/2） */
 #define SPLIT_A_L           0x09000000u
 #define SPLIT_A_R           0x09400000u
 #define SPLIT_B_L           0x09800000u
@@ -565,21 +568,21 @@ static void blocks_setup(int n, int w, int h)
     layer_order_rebuild();              /* ★ 元素表建好/换档之后都要重建顺序表 */
 }
 
+/*  一维弹跳：走一步，撞边就贴边并反向（x / y 两个轴共用）。  */
+static void bounce(int *pos, int *vel, int lo, int hi)
+{
+    *pos += *vel;
+    if (*pos < lo) { *pos = lo; *vel = -*vel; }
+    if (*pos > hi) { *pos = hi; *vel = -*vel; }
+}
+
 static void blocks_step(void)
 {
     int i;
 
     for (i = 0; i < g_blk_n; i++) {
-        g_b[i].x += g_b[i].vx;
-        if (g_b[i].x < 0) { g_b[i].x = 0; g_b[i].vx = -g_b[i].vx; }
-        if (g_b[i].x > SPLIT_HALF_W - g_blk_w) {
-            g_b[i].x = SPLIT_HALF_W - g_blk_w; g_b[i].vx = -g_b[i].vx;
-        }
-        g_b[i].y += g_b[i].vy;
-        if (g_b[i].y < 0) { g_b[i].y = 0; g_b[i].vy = -g_b[i].vy; }   /* ★ 走满全高 */
-        if (g_b[i].y > SPLIT_HALF_H - g_blk_h) {
-            g_b[i].y = SPLIT_HALF_H - g_blk_h; g_b[i].vy = -g_b[i].vy;
-        }
+        bounce(&g_b[i].x, &g_b[i].vx, 0, SPLIT_HALF_W - g_blk_w);
+        bounce(&g_b[i].y, &g_b[i].vy, 0, SPLIT_HALF_H - g_blk_h);   /* ★ 走满全高 */
     }
 }
 

@@ -67,18 +67,20 @@ PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #     调色板被带偏、素材全错（踩过一次）。
 #   ★ 顺序 = 素材编号顺序：**新素材一律加在最后**，这样已有素材的编号不动。
 #   ★ res/pic/_原始图/ 放的是没缩过的原图，**故意不列在这里**（不参与打包）。
+#   ★★ 2026-10-24：res/pic 重组过（`base/*` 拉平到顶层、`character/bullet` → `bullet`、
+#      `base/alpha` 里的玻璃并进 `background/`）。下面按**当前**目录结构写。
+#      顺序仍然是"素材编号顺序"：**新目录一律加在最后**，否则已有素材编号会整体后移。
 PIC_DIRS_DEFAULT = [
     PIC_DIR / "character" / "bigFish",         # 角色跑动帧
     PIC_DIR / "character" / "TheBoss",         # Boss 动画帧
-    PIC_DIR / "base" / "num",       # 数字 0-9（HUD / 菜单）
-    PIC_DIR / "base" / "Eng",
-    PIC_DIR / "base" / "alpha",              # 带 α 的素材（玻璃等）
-    PIC_DIR / "base" / "background", # 房间地面/墙体材质（corner/doors/bedrock/wood 保持原编号）
-    PIC_DIR / "base" / "specialEffect", # 受伤/状态特效
-    PIC_DIR / "character" / "bullet", # Token 子弹本体 / 效果层
-    PIC_DIR / "accessory", # 道具底座与道具图层
-    PIC_DIR / "character" / "mobs",   # 小怪（slime 2 帧）
-    PIC_DIR / "base" / "background_interact", # 新背景装饰：不挤占原有地砖/墙的编号
+    PIC_DIR / "UI" / "num",                    # 数字 0-9（HUD / 菜单）
+    PIC_DIR / "UI" / "Eng",                    # 英文字母
+    PIC_DIR / "background",                    # 地砖/墙/基岩 + 玻璃（原 base/alpha 并进来了）
+    PIC_DIR / "specialEffect",                 # 受伤/状态特效
+    PIC_DIR / "bullet",                        # Token 子弹本体 / 效果层
+    PIC_DIR / "accessory",                     # 道具底座与道具图层
+    PIC_DIR / "character" / "mobs",            # 小怪（slime 2 帧）
+    PIC_DIR / "background_interact",           # 背景装饰 + 门 + 隐藏门
 ]
 OUT_DIR     = Path(__file__).resolve().parent / "output"   # 报告 + 素材表（不给综合用）
 #   ★ Efinity 综合时，$readmemh 的相对路径是按【工程目录】解析的 —— 工程里 SoC 自己
