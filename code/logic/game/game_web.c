@@ -35,8 +35,9 @@ int game_web_slow_at(int x, int y)
         int wx, wy;
 
         if (o->kind != OBJ_WEB) continue;
-        wx = (int)o->x * TILE;
-        wy = (int)o->y * TILE;
+        game_layout_obj_cell(L, o, game_room_flip(), &wx, &wy);
+        wx *= TILE;
+        wy *= TILE;
         if (x >= wx && x < wx + WEB_SIZE &&
             y >= wy && y < wy + WEB_SIZE) return 1;
     }
@@ -55,8 +56,9 @@ int game_web_overlap(int x, int y, int w, int h)
         int wx, wy;
 
         if (o->kind != OBJ_WEB) continue;
-        wx = (int)o->x * TILE;
-        wy = (int)o->y * TILE;
+        game_layout_obj_cell(L, o, game_room_flip(), &wx, &wy);
+        wx *= TILE;
+        wy *= TILE;
         if (x < wx + WEB_SIZE && x + w > wx &&
             y < wy + WEB_SIZE && y + h > wy) return 1;
     }
@@ -68,22 +70,25 @@ static void web_draw_one(u32 fb, u32 now, int buf, int i)
 {
     const room_layout_t *L = web_set();
     const asset_desc_t *a = &g_assets[ASSET_background_interact_web];
+    int x, y;
 
     (void)now;
     (void)buf;
     if (!L || i < 0 || i >= (int)L->n_objs) return;
     if (L->objs[i].kind != OBJ_WEB) return;
 
+    game_layout_obj_cell(L, &L->objs[i], game_room_flip(), &x, &y);
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
-                             (u32)((int)L->objs[i].x * TILE),
-                             (u32)((int)L->objs[i].y * TILE),
+                             (u32)(x * TILE), (u32)(y * TILE),
                              WEB_SIZE, WEB_SIZE, 0u);
 }
 
-void game_web_submit(void)
+void game_web_submit(int buf)
 {
     const room_layout_t *L = web_set();
     int i;
+
+    (void)buf;
 
     if (!L) return;
     for (i = 0; i < (int)L->n_objs; ++i) {
@@ -91,9 +96,16 @@ void game_web_submit(void)
         int x, y;
 
         if (o->kind != OBJ_WEB) continue;
-        x = (int)o->x * TILE;
-        y = (int)o->y * TILE;
+        game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
+        x *= TILE;
+        y *= TILE;
         if (!game_visible_world(x, y, WEB_SIZE, WEB_SIZE)) continue;
+#if GAME_STATIC_CULL
+        if (!game_static_draw_force() &&
+            !game_dirty_touches(x / TILE, y / TILE,
+                                (x + WEB_SIZE - 1) / TILE + 1,
+                                (y + WEB_SIZE - 1) / TILE + 1)) continue;
+#endif
         rl_push(Z_SCENE + 2, web_draw_one, i);      /* 画在地板上、人物下面 */
     }
 }

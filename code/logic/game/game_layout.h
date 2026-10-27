@@ -31,22 +31,35 @@ typedef struct {
  *  尺寸上限和 game.h 的 MAP_MAX_* 一致（game.h 里有 static assert 对着）。  */
 #define LAYOUT_MAX_COLS 45
 #define LAYOUT_MAX_ROWS 35
+#define LAYOUT_ROT_COLS ((LAYOUT_MAX_COLS + 3) / 4)
 
 typedef struct {
     const char          (*tiles)[LAYOUT_MAX_COLS + 1];
-    const unsigned char (*rot)[LAYOUT_MAX_COLS];
+    const unsigned char (*rot)[LAYOUT_ROT_COLS]; /* four 2-bit rotations/byte */
     unsigned char cols, rows;           /* 画布格数 */
     short ax0, ay0, ax1, ay1;           /* 竞技场格坐标（含边界） */
     short world_w, world_h;             /* 世界像素尺寸（相机范围） */
+    unsigned char mirror_x, mirror_y;   /* 内容外接框 min+max，与地形镜像轴一致 */
 } layout_terrain_t;
 
 typedef struct {
     const char        *name;
     const obj_place_t *objs;
     unsigned char      n_objs;
-    unsigned char      map;             /* 用 g_maps[] 里第几张（标准矩形房）；0 = 普通房 40×23 */
-    const layout_terrain_t *terrain;    /* 非 0 = 异形房，自带地形，忽略 map */
+    unsigned char      map;             /* 矩形：g_maps[] 下标；逐格地图：生成器分配的共享地图身份 */
+    const layout_terrain_t *terrain;    /* 非 0 = 指向共享固定地形，多个对象布局可以共用 */
 } room_layout_t;
+
+/* 输入标准布局格坐标，输出当前朝向的格坐标；破坏状态仍按标准坐标记录。 */
+static inline void game_layout_obj_cell(const room_layout_t *layout, const obj_place_t *obj,
+                                        int flip, int *x, int *y)
+{
+    *x = obj->x;
+    *y = obj->y;
+    if (!layout->terrain) return;
+    if (flip & 1) *x = (int)layout->terrain->mirror_x - *x;
+    if (flip & 2) *y = (int)layout->terrain->mirror_y - *y;
+}
 
 /*  房间类型标志  */
 enum {
@@ -63,7 +76,7 @@ typedef struct {
     unsigned char flags;
     short         door_asset;   /* 特殊门贴图；-1 = 普通门 */
     unsigned int  color;        /* 小地图颜色 0x00RRGGBB */
-    unsigned char layouts[8];   /* 布局池；0xFF 结尾（最多 8 张，n_layouts 是实际张数） */
+    unsigned char layouts[8];   /* 策略参考布局，首项指定空间；实际方案扫描生成表，无 8 张限制 */
     unsigned char n_layouts;
 } room_kind_t;
 
@@ -75,3 +88,5 @@ int                game_kind_special(int room_type);
 const room_layout_t *game_layout(int idx);
 /*  按 (房间类型, 房间 id) 确定性挑一张布局：同一间房每次进都一样  */
 int                game_layout_pick(int room_type, int room_id);
+/* 按参考布局的固定空间选对象方案；L 型从左下空缺的同一空间池选择。 */
+int                game_layout_pick_like(int prototype, int room_type, int room_id);

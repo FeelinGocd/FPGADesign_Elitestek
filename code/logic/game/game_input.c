@@ -33,24 +33,31 @@ static int  s_cmd_n;
 /*  P 键生成道具请求 / B 放置炸弹请求  */
 static int s_spawn_req;
 static int s_bomb_req;
-
-static int cmd_is(const char *a, const char *b)
-{
-    while (*a && *b) { if (*a++ != *b++) return 0; }
-    return *a == 0 && *b == 0;
-}
+#if GAME_BOSS_DEBUG
+static int s_boss_req;
+#if GAME_PROFILE
+static int s_stats_req;
+#endif
+#endif
 
 static void cmd_exec(void)
 {
+    int single = (s_cmd_n == 1);
+    int command = (unsigned char)s_cmd[0] | 0x20;
     s_cmd[s_cmd_n] = 0;
     s_cmd_n = 0;
 
-    if (cmd_is(s_cmd, "P") || cmd_is(s_cmd, "p")) {
+    if (single && command == 'p') {
         s_spawn_req = 1;
         bsp_printf("DEBUG: spawn queued\r\n");
-    } else if (cmd_is(s_cmd, "B") || cmd_is(s_cmd, "b")) {
+    } else if (single && command == 'b') {
         s_bomb_req = 1;
         bsp_printf("DEBUG: bomb queued\r\n");
+#if GAME_BOSS_DEBUG && GAME_PROFILE
+    } else if (s_cmd[0] == 's' && s_cmd[1] == 't' &&
+               s_cmd[2] == 'a' && s_cmd[3] == 't' && s_cmd[4] == 0) {
+        s_stats_req = 1;
+#endif
     } else if (s_cmd[0] != 0) {
         bsp_printf("DEBUG: unknown cmd '%s' (P/B)\r\n", s_cmd);
     }
@@ -80,6 +87,23 @@ int game_take_bomb(void)
     return r;
 }
 
+#if GAME_BOSS_DEBUG
+int game_take_boss_jump(void)
+{
+    int r = s_boss_req;
+    s_boss_req = 0;
+    return r;
+}
+#if GAME_PROFILE
+int game_take_debug_stats(void)
+{
+    int r = s_stats_req;
+    s_stats_req = 0;
+    return r;
+}
+#endif
+#endif
+
 /*----------------------------------------------------------------------------*/
 u32 game_keys_read(void)
 {
@@ -93,7 +117,7 @@ u32 game_keys_read(void)
          *    不能再按"可打印字符"区分。  */
         if (s_want_mask) {
             s_want_mask = 0;
-            s_keys = (u32)c & 0x7Fu;        /* bit0..3 方向 / bit4 R / bit5 B / bit6 P */
+            s_keys = (u32)c & 0xFFu;        /* bit0..3 方向 / bit4 R / bit5 B / bit6 P / bit7 T */
             /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
                照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
             if (s_keys & KEY_RESTART) s_restart_req = 1;
@@ -103,6 +127,10 @@ u32 game_keys_read(void)
                 s_spawn_req = 1;
             if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
                 s_bomb_req = 1;
+#if GAME_BOSS_DEBUG
+            if ((s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
+                s_boss_req = 1;
+#endif
             s_prev_mask = s_keys;
 
             s_until = game_ms() + PAD_TIMEOUT;

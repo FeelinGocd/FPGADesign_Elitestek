@@ -16,23 +16,20 @@
 #include "CI_gpu2d.h"
 
 #define STONE_SIZE 32
-/*  ★ 竞技场尺寸随房间变（普通 23×13 / Boss 29×21）⇒ 网格按最大世界建表，
- *    循环仍用当前 SG_AW/SG_AH。  */
-#define SG_MAX_AW 46                                /* 最大竞技场格数（Boss 29×21，留余量） */
-#define SG_MAX_AH 24
-#define SG_AW ((ARENA_X1 - ARENA_X0) / STONE_SIZE)
-#define SG_AH ((ARENA_Y1 - ARENA_Y0) / STONE_SIZE)
+/* Absolute map cells avoid duplicating arena-origin conversions and cover
+ * all legal 45x35 maps; the previous 24-row bitmap could overflow in L rooms. */
 
 /*  当前房间的石头占用表：32 px 格对齐，碰撞只查 1 个格 / 身体覆盖的几格。
  *  s_grid_room 与当前房间不一致时重建；换房/炸碎后置 -1。  */
-#define SG_CELLS (SG_MAX_AW * SG_MAX_AH)
+#define SG_CELLS (MAP_MAX_COLS * MAP_MAX_ROWS)
 #define SG_BITS  ((SG_CELLS + 7) / 8)
-#define SG_IDX(i, j) ((j) * SG_MAX_AW + (i))
+#define SG_IDX(i, j) ((j) * MAP_MAX_COLS + (i))
 #define SG_GET(a, i) (((a)[(i) >> 3] >> ((i) & 7)) & 1u)
 #define SG_SET(a, i) ((a)[(i) >> 3] |= (unsigned char)(1u << ((i) & 7)))
 
 static unsigned char s_stone_grid[SG_BITS];
 static signed char   s_grid_room = -1;
+static unsigned char s_grid_has_blockers;
 
 /*  当前房间的布局（没有布局 = 这间房没有石头）  */
 static const room_layout_t *stone_layout(void)
@@ -53,6 +50,7 @@ static void stone_grid_build(void)
     int i, b;
 
     for (b = 0; b < SG_BITS; ++b) s_stone_grid[b] = 0;
+    s_grid_has_blockers = 0u;
 
     if (L) {
         for (i = 0; i < (int)L->n_objs; ++i) {
@@ -61,10 +59,12 @@ static void stone_grid_build(void)
 
             if (!is_blocker((int)o->kind)) continue;
             if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;      /* 已经炸掉的不占格 */
-            gx = ((int)o->x * TILE - ARENA_X0) / STONE_SIZE;
-            gy = ((int)o->y * TILE - ARENA_Y0) / STONE_SIZE;
-            if (gx >= 0 && gx < SG_AW && gy >= 0 && gy < SG_AH)
+            game_layout_obj_cell(L, o, game_room_flip(), &gx, &gy);
+            if (gx >= 0 && gx < MAP_MAX_COLS && gy >= 0 && gy < MAP_MAX_ROWS)
+            {
                 SG_SET(s_stone_grid, SG_IDX(gx, gy));
+                s_grid_has_blockers = 1u;
+            }
         }
     }
     s_grid_room = room;
@@ -75,39 +75,76 @@ static void stone_grid_ensure(void)
     if (s_grid_room != (signed char)game_room_id()) stone_grid_build();
 }
 
+int game_stone_has_blockers(void)
+{
+    stone_grid_ensure();
+    return s_grid_has_blockers != 0u;
+}
+
 /*  石头按"相对上下"只挡迎面的那条边：
  *    · 石头在上、人物在下 → 用脚底（向上走时脚先碰到石头下沿）；
  *    · 反之石头在下、人物在上 → 用最上一排（眼睛，向下走时先碰到石头上沿）。
  *  这样人物上半身可以叠进石头，不会因为整条身体矩形擦到石头就被卡住。  */
+static int stone_block_overlap(int px, int py, int sx, int sy)
+{
+    int ex, ey, ew, eh;
+    game_creature_foot_rect(px, py, PW, PH, &ex, &ey, &ew, &eh);
+
+    return ex < sx + STONE_SIZE && ex + ew > sx &&
+           ey < sy + STONE_SIZE && ey + eh > sy;
+}
+
+/* ???????????????????/????????????? */
 int game_stone_block(int px, int py)
 {
     const room_layout_t *L = stone_layout();
     signed char room = (signed char)game_room_id();
-    int pcy = py + PB_OFF_Y + PB_H / 2;
-    int ex = px + PB_OFF_X;
     int i;
 
     if (!L) return 0;
     for (i = 0; i < (int)L->n_objs; ++i) {
         const obj_place_t *o = &L->objs[i];
-        int sx, sy, ey, eh;
+        int sx, sy;
 
         if (!is_blocker((int)o->kind)) continue;
         if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;
+        game_layout_obj_cell(L, o, game_room_flip(), &sx, &sy);
+        sx *= TILE;
+        sy *= TILE;
+        if (stone_block_overlap(px, py, sx, sy)) return 1;
+    }
+    return 0;
+}
 
-        sx = (int)o->x * TILE;
-        sy = (int)o->y * TILE;
+/* ??????????????????????????????? */
+int game_stone_block_move(int old_px, int old_py, int px, int py)
+{
+    const room_layout_t *L = stone_layout();
+    signed char room = (signed char)game_room_id();
+    int old_l, old_t, old_w, old_h, old_r, old_b;
+    int new_l, new_t, new_w, new_h, new_r, new_b;
+    int dx = px - old_px, dy = py - old_py;
+    int i;
 
-        if (sy + STONE_SIZE / 2 < pcy) {
-            ey = py + PB_OFF_Y + PB_H - PB_FOOT_H;          /* 石头在上：脚底 */
-            eh = PB_FOOT_H;
-        } else {
-            ey = py + PB_OFF_Y;                             /* 石头在下：最上一排 */
-            eh = PB_TOP_H;
-        }
+    if (!L || (dx == 0 && dy == 0)) return 0;
+    game_creature_foot_rect(old_px, old_py, PW, PH, &old_l, &old_t, &old_w, &old_h);
+    game_creature_foot_rect(px, py, PW, PH, &new_l, &new_t, &new_w, &new_h);
+    old_r = old_l + old_w; old_b = old_t + old_h;
+    new_r = new_l + new_w; new_b = new_t + new_h;
+    for (i = 0; i < (int)L->n_objs; ++i) {
+        const obj_place_t *o = &L->objs[i];
+        int sx, sy;
 
-        if (ex < sx + STONE_SIZE && ex + PB_W > sx &&
-            ey < sy + STONE_SIZE && ey + eh > sy) return 1;
+        if (!is_blocker((int)o->kind)) continue;
+        if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;
+        game_layout_obj_cell(L, o, game_room_flip(), &sx, &sy);
+        sx *= TILE;
+        sy *= TILE;
+        if (!stone_block_overlap(px, py, sx, sy)) continue;
+        if (dx > 0 && old_r <= sx && new_r > sx) return 1;
+        if (dx < 0 && old_l >= sx + STONE_SIZE && new_l < sx + STONE_SIZE) return 1;
+        if (dy > 0 && old_b <= sy && new_b > sy) return 1;
+        if (dy < 0 && old_t >= sy + STONE_SIZE && new_t < sy + STONE_SIZE) return 1;
     }
     return 0;
 }
@@ -119,8 +156,11 @@ int game_stone_hit_at(int x, int y)
     if (x < ARENA_X0 || x >= ARENA_X1 ||
         y < ARENA_Y0 || y >= ARENA_Y1) return 0;
 
-    gx = (x - ARENA_X0) / STONE_SIZE;
-    gy = (y - ARENA_Y0) / STONE_SIZE;
+    /* STONE_SIZE is fixed at 32 and the arena coordinates are non-negative;
+     * use shifts in the 356-bullet collision hot path instead of software
+     * division on the RISC-V core. */
+    gx = x >> 5;
+    gy = y >> 5;
     stone_grid_ensure();
     return SG_GET(s_stone_grid, SG_IDX(gx, gy)) != 0u;
 }
@@ -146,13 +186,14 @@ int game_stones_blast(int cx, int cy, int r)
         if (o->kind != OBJ_STONE) continue;              /* 只有石头会被炸碎 */
         if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;
 
-        sx = (int)o->x * TILE + STONE_SIZE / 2;
-        sy = (int)o->y * TILE + STONE_SIZE / 2;
+        game_layout_obj_cell(L, o, game_room_flip(), &sx, &sy);
+        sx = sx * TILE + STONE_SIZE / 2;
+        sy = sy * TILE + STONE_SIZE / 2;
         d2 = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
         if (d2 > r2) continue;
 
         game_room_mark_cell_gone(room, (int)o->x, (int)o->y);
-        erase_push((int)o->x * TILE, (int)o->y * TILE);
+        erase_push(sx - STONE_SIZE / 2, sy - STONE_SIZE / 2);
         ++n;
     }
 
@@ -177,10 +218,10 @@ int game_stone_overlap(int x, int y, int w, int h)
     if (x1 >= ARENA_X1) x1 = ARENA_X1 - 1;
     if (y1 >= ARENA_Y1) y1 = ARENA_Y1 - 1;
 
-    i0 = (x0 - ARENA_X0) / STONE_SIZE;
-    i1 = (x1 - ARENA_X0) / STONE_SIZE;
-    j0 = (y0 - ARENA_Y0) / STONE_SIZE;
-    j1 = (y1 - ARENA_Y0) / STONE_SIZE;
+    i0 = x0 / STONE_SIZE;
+    i1 = x1 / STONE_SIZE;
+    j0 = y0 / STONE_SIZE;
+    j1 = y1 / STONE_SIZE;
 
     stone_grid_ensure();
     for (j = j0; j <= j1; ++j)
@@ -202,7 +243,7 @@ static void erase_push(int x, int y)
     if (s_erase_n >= ERASE_MAX) return;
     s_erase[s_erase_n].x = (short)x;
     s_erase[s_erase_n].y = (short)y;
-    s_erase[s_erase_n].ttl = 2u;
+    s_erase[s_erase_n].ttl = GAME_FB_COUNT;
     ++s_erase_n;
 }
 
@@ -257,6 +298,7 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
     const room_layout_t *L = stone_layout();
     const obj_place_t *o;
     const asset_desc_t *a;
+    int x, y;
 
     (void)now;
     (void)buf;
@@ -265,17 +307,71 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
     if (!is_blocker((int)o->kind)) return;
     if (game_room_cell_gone((int)game_room_id(), (int)o->x, (int)o->y)) return;
 
+    game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
     a = &g_assets[stone_asset((int)o->kind)];
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
-                             (u32)((int)o->x * TILE), (u32)((int)o->y * TILE),
+                             (u32)(x * TILE), (u32)(y * TILE),
                              STONE_SIZE, STONE_SIZE, 0u);
 }
 
-void game_stones_submit(void)
+#if GAME_STATIC_CULL
+static int stone_rect_touches(int x, int y, int w, int h,
+                              int ox, int oy, int ow, int oh)
+{
+    return x < ox + ow && x + w > ox && y < oy + oh && y + h > oy;
+}
+
+/* A newly entering actor may cover a retained stone even when none of the
+ * old sprite footprints dirtied its tile. Keep that stone in the z-sorted
+ * list so the original front/behind relationship remains correct. */
+static int stone_dynamic_touches(int x, int y)
+{
+    int i;
+    if (g.phase != PHASE_GAMEOVER &&
+        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE, g.x, g.y, PW, PH)) return 1;
+    for (i = 0; i < N_MOBS; ++i)
+        if (g.mobs[i].active &&
+            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                               g.mobs[i].x, g.mobs[i].y - 8, 32, 40)) return 1;
+    if (game_bullets_alive())
+        for (i = 0; i < N_BULLETS; ++i)
+            if (g.bullets[i].active &&
+                stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                                   g.bullets[i].x, g.bullets[i].y, BW, BH)) return 1;
+    if (g.item.active &&
+        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                           g.item.x, g.item.y, ITEM_W, ITEM_H)) return 1;
+    for (i = 0; i < N_COINS; ++i)
+        if (g.coin_items[i].active &&
+            g.coin_items[i].room == (signed char)game_room_id() &&
+            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                               g.coin_items[i].x, g.coin_items[i].y, 24, 24)) return 1;
+    for (i = 0; i < N_BOMBS; ++i)
+        if (g.bombs[i].active && g.bombs[i].room == (signed char)game_room_id() &&
+            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                               g.bombs[i].x, g.bombs[i].y, BOMB_W, BOMB_H)) return 1;
+    if (g.bomb_pickup.active &&
+        g.bomb_pickup.room == (signed char)game_room_id() &&
+        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                           g.bomb_pickup.x, g.bomb_pickup.y,
+                           BOMB_PICK_W, BOMB_PICK_H)) return 1;
+    for (i = 0; i < N_BOMB_AIRS; ++i)
+        if (g.bomb_airs[i].active &&
+            g.bomb_airs[i].room == (signed char)game_room_id() &&
+            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
+                               g.bomb_airs[i].x, g.bomb_airs[i].y,
+                               BOMB_PICK_W, BOMB_PICK_H)) return 1;
+    return 0;
+}
+#endif
+
+void game_stones_submit(int buf)
 {
     const room_layout_t *L = stone_layout();
     signed char room = (signed char)game_room_id();
     int i;
+
+    (void)buf;
 
     if (!L) return;
     for (i = 0; i < (int)L->n_objs; ++i) {
@@ -284,9 +380,17 @@ void game_stones_submit(void)
 
         if (!is_blocker((int)o->kind)) continue;
         if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;
-        x = (int)o->x * TILE;
-        y = (int)o->y * TILE;
+        game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
+        x *= TILE;
+        y *= TILE;
         if (!game_visible_world(x, y, STONE_SIZE, STONE_SIZE)) continue;
+#if GAME_STATIC_CULL
+        if (!game_static_draw_force() &&
+            !game_dirty_touches(x / TILE, y / TILE,
+                                (x + STONE_SIZE - 1) / TILE + 1,
+                                (y + STONE_SIZE - 1) / TILE + 1) &&
+            !stone_dynamic_touches(x, y)) continue;
+#endif
         rl_push(ACTOR_Z(y + STONE_SIZE), stone_draw_one, i);
     }
 }

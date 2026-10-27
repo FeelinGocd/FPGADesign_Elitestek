@@ -58,7 +58,7 @@ void game_coins_reset(void)
         g.coin_items[i].active = 0;
         g.coin_items[i].room   = -1;
     }
-    for (b = 0; b < 2; ++b)
+    for (b = 0; b < GAME_FB_COUNT; ++b)
         for (i = 0; i < N_COINS; ++i) g.old_coin[b][i].active = 0;
 }
 

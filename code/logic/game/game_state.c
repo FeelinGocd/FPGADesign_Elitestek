@@ -106,17 +106,18 @@ void game_camera_snap(void)
         g.cam_y = 0;
     }
     cam_align();
-    /* 不在这里清 cam_prev：同布局换房没有整屏重铺，game_draw 要靠
+    /* 不在这里清 HUD 的缓冲相机坐标：同布局换房没有整屏重铺，game_draw 要靠
      * prev != cam 来擦旧 HUD。整屏重铺的路径画完后再调 game_camera_synced()。 */
 }
 
 /*  整屏重铺之后调用：告诉 HUD 逻辑"新位置已经画好了，不用再擦旧 HUD"  */
 void game_camera_synced(void)
 {
-    g.cam_prev_x = g.cam_x;
-    g.cam_prev_y = g.cam_y;
-    g.hud_cam_x[0] = g.hud_cam_x[1] = g.cam_x;
-    g.hud_cam_y[0] = g.hud_cam_y[1] = g.cam_y;
+    int b;
+    for (b = 0; b < GAME_FB_COUNT; ++b) {
+        g.hud_cam_x[b] = g.cam_x;
+        g.hud_cam_y[b] = g.cam_y;
+    }
 }
 
 /*  每帧：Boss 房跟随（死区 + 每帧限速）
@@ -184,9 +185,14 @@ int game_finish_gpu(void)
 /*  把显示基址的两个槽都写成刚画好的那块（相位免疫），再等下一个帧边界。  */
 int game_present(u32 fb)
 {
+    lineBuffer_setFullBase(game_view_fb(fb), game_view_fb(fb));
+    return game_wait_display();
+}
+
+int game_wait_display(void)
+{
     u32 before, wait = 0u;
 
-    lineBuffer_setFullBase(game_view_fb(fb), game_view_fb(fb));
 #if IRQ_FRAME_USE
     before = IRQ_frame_count();
     while (IRQ_frame_count() == before && wait < 200000u) {
@@ -210,6 +216,8 @@ int game_present(u32 fb)
 void game_reset_state(void)
 {
     int i;
+
+    game_static_draw_reset();
 
     /* 玩家在初始房正中间（房间系统负责摆位置） */
     game_room_reset();
@@ -250,7 +258,6 @@ void game_reset_state(void)
 
     g.boss_x = (ARENA_X0 + ARENA_X1) / 2 - BOSS_W / 2;
     g.boss_y = (ARENA_Y0 + ARENA_Y1) / 2 - BOSS_H / 2;
-    g.boss_pattern = 0;
     g.boss_tick = 0u;
     g.stage = 1;                            /* 重开也从第 1 关开始 */
     g.score = 0;                            /* 本局得分清零 */
@@ -260,7 +267,6 @@ void game_reset_state(void)
     g.boss_locked = 0;
     g.boss_lock_until = 0u;
     g.boss_flash_until = 0u;
-    g.boss_dead_until = 0u;
     g.boss_wait_until = 0u;
     g.exit_active = 0;
     g.exit_dirty = 0;
@@ -291,17 +297,13 @@ void game_reset_state(void)
     g.probe_peak = 0; g.probe_peak_frame = 0; g.probe_peak_cmd = 0;
 
     game_bullets_clear();                   /* 同时复位 alive 计数 / 空闲槽栈 */
-    for (i = 0; i < N_BULLETS; ++i) {
-        g.old_bullets[0][i].active = 0;
-        g.old_bullets[1][i].active = 0;
+    for (i = 0; i < GAME_FB_COUNT; ++i) {
+        int j;
+        for (j = 0; j < N_BULLETS; ++j) g.old_bullets[i][j].active = 0;
+        g.old_item[i].active = 0;
+        g.old_boss[i].active = 0;
+        g.old_player[i].active = 0;
     }
-    g.old_item[0].active = 0;
-    g.old_item[1].active = 0;
-    g.old_boss[0].active = 0;
-    g.old_boss[1].active = 0;
-    g.old_player[0].active = 0;
-    g.old_player[1].active = 0;
-    g.front = 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -312,7 +314,6 @@ void game_enter_gameover(u32 now)
 {
     g.phase          = PHASE_GAMEOVER;
     g.gameover_until = now + GAMEOVER_MS;
-    g.gameover_stage = g.stage;
 
     game_bullets_clear();
 
@@ -333,8 +334,10 @@ static void spawn_layout_objects(const room_layout_t *L, int want_mobs,
 
     for (i = 0; i < (int)L->n_objs; ++i) {
         const obj_place_t *o = &L->objs[i];
-        int x = (int)o->x * TILE;
-        int y = (int)o->y * TILE;
+        int x, y;
+        game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
+        x *= TILE;
+        y *= TILE;
 
         /*  蓝图里这个对象已经打碎了 ⇒ 不再生成  */
         if (game_room_cell_gone((int)game_room_id(), (int)o->x, (int)o->y)) continue;
@@ -342,10 +345,8 @@ static void spawn_layout_objects(const room_layout_t *L, int want_mobs,
 
         switch (o->kind) {
         case OBJ_SLIME:
-            if (want_mobs && game_mobs_spawn_at(x, y, OBJ_SLIME)) ++*n_mob;
-            break;
         case OBJ_BUG:
-            if (want_mobs && game_mobs_spawn_at(x, y, OBJ_BUG)) ++*n_mob;
+            if (want_mobs && game_mobs_spawn_at(x, y, o->kind)) ++*n_mob;
             break;
         case OBJ_WEB:
             /*  网没有实例：位置就在蓝图里，渲染/减速都直接查表，这里不用生成  */
@@ -503,24 +504,17 @@ void game_boss_spawn(void)
 {
     g.boss_x = (ARENA_X0 + ARENA_X1) / 2 - BOSS_W / 2;
     g.boss_y = (ARENA_Y0 + ARENA_Y1) / 2 - BOSS_H / 2;
-    g.boss_hp = g_boss_def.hp;
-    g.boss_gate = g_boss_def.gate1;
-    g.boss_locked = 0;
     g.boss_lock_until = 0u;
     g.boss_flash_until = 0u;
-    g.boss_dead_until = 0u;
     g.boss_blink_cnt = 0;
     g.boss_blink_on = 0;
     g.boss_blink_next = 0u;
     g.boss_blink_cool = 0u;
-    g.boss_tick = 0u;
     g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
     g.exit_active = 0;
     g.exit_dirty = 0;
-    game_shot_stop(&g.shot);
 
-    g.old_boss[0].active = 0;               /* 不要在别的房间擦一个"上一场的 Boss" */
-    g.old_boss[1].active = 0;
+    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_boss[b].active = 0;
 
     game_start_fight();                     /* phase = FIGHT + 招式表初始化 */
 }
@@ -538,7 +532,6 @@ void game_start_fight(void)
     g.boss_gate = g_boss_def.gate1;
     g.boss_locked = 0;
     g.boss_tick = 0u;
-    g.boss_dead_until = 0u;
     bsp_printf("FIGHT: stage %d\r\n", g.stage);
 }
 
@@ -546,7 +539,11 @@ void game_start_fight(void)
 /*  重开一局：数据复位 + 两块缓冲重新铺地板（旧精灵自然被覆盖掉）  */
 int game_restart(void)
 {
-    static const u32 fb[2] = { FB_C, FB_D };
+    static const u32 fb[GAME_FB_COUNT] = { FB_C, FB_D
+#if GAME_TRIPLE_BUFFER
+        , FB_THIRD
+#endif
+    };
     u32 cmd0;
     int bi;
 
@@ -556,9 +553,9 @@ int game_restart(void)
 
     cmd0 = gpu2d_getCmdDone();
     gpu2d_exclusive_begin();
-    for (bi = 0; bi < 2; ++bi) game_draw_floor(fb[bi]);
+    for (bi = 0; bi < GAME_FB_COUNT; ++bi) game_draw_floor(fb[bi]);
     lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
-    if (gpu2d_exclusive_end(cmd0 + 2u * game_floor_cmd_count()) != 0) {
+    if (gpu2d_exclusive_end(cmd0 + (u32)GAME_FB_COUNT * game_floor_cmd_count()) != 0) {
         bsp_printf("RESTART ERROR: timeout\r\n");
         return 0;
     }
@@ -569,7 +566,11 @@ int game_restart(void)
 /*----------------------------------------------------------------------------*/
 int game_init(void)
 {
-    static const u32 fb[2] = { FB_C, FB_D };
+    static const u32 fb[GAME_FB_COUNT] = { FB_C, FB_D
+#if GAME_TRIPLE_BUFFER
+        , FB_THIRD
+#endif
+    };
     u32 init_cmd0;
     int bi;
 
@@ -603,18 +604,30 @@ int game_init(void)
     bsp_printf("INIT 3/7: wait display boundary\r\n");
     bsp_uDelay(20000u);
 
-    bsp_printf("INIT 4/7: draw floor into both buffers\r\n");
-    for (bi = 0; bi < 2; ++bi) {
+    bsp_printf("INIT 4/7: draw floor into %d buffers\r\n", GAME_FB_COUNT);
+    for (bi = 0; bi < GAME_FB_COUNT; ++bi) {
         bsp_printf("INIT 5/7: buffer %d\r\n", bi);
         game_draw_floor(fb[bi]);
     }
 
     bsp_printf("INIT 6/7: wait GPU\r\n");
     lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
-    if (gpu2d_exclusive_end(init_cmd0 + 2u * game_floor_cmd_count()) != 0) {
+    if (gpu2d_exclusive_end(init_cmd0 + (u32)GAME_FB_COUNT * game_floor_cmd_count()) != 0) {
         bsp_printf("INIT ERROR: initial floor timeout\r\n");
         return 0;
     }
+#if GAME_BG_COPY
+    {
+        u32 bg0 = gpu2d_getCmdDone();
+        u32 bg_cmds = game_background_build(FB_BG);
+        u32 bg_target = bg0 + bg_cmds;
+        if (gpu2d_waitCmdDone(bg_target, 10000000u) != 0) {
+            bsp_printf("INIT ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
+                       bg0, bg_cmds, bg_target, gpu2d_getCmdDone());
+            return 0;
+        }
+    }
+#endif
 
     bsp_printf("INIT 7/7: %dx%d ready, display re-enabled\r\n", SCR_W, SCR_H);
     game_camera_synced();

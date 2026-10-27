@@ -214,6 +214,23 @@ void CI_gpu2d_spriteAlphaTintRect(u32 asset_base, u32 stride, u32 dst_fb,
                              argb, strength, tone, extra);
 }
 
+void CI_gpu2d_spriteTintCKRect(u32 asset_base, u32 stride, u32 dst_fb,
+                                u32 dx, u32 dy, u32 w, u32 h,
+                                u32 argb, u32 strength, u32 tone, u32 flip)
+{
+    u32 dst = dst_fb + dy * ci_line_bytes() + dx * LINEBUFFER_PIXEL_BYTES;
+    u32 rot = (flip & GPU2D_ROT90) != 0u;
+    u32 base_flags = GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE |
+                     GPU2D_MODE_CKEY_EN | ((flip << 5) & 0x60u);
+    u32 tint_flags = GPU2D_MODE_CKEY | GPU2D_MODE_SPRITE |
+                     GPU2D_MODE_CKEY_EN;
+    u32 tint_param = ((tone & 7u) << 21) | ((strength & 0xFFu) << 12);
+
+    (void)ci_op(GPU2D_FID_BLIT, ci_wh(rot ? h : w, rot ? w : h), dst);
+    (void)ci_args_full(asset_base, base_flags, sprite_param(stride, rot), 1u);
+    (void)ci_args_full(argb, tint_flags, tint_param, 0u);
+}
+
 /*   —— 下面两个是"镜像"版：只多拼了 flags[5]/[6] ——
  *   ★ 源地址约定和普通 sprite 完全一样：要画那一段(未镜像时)的左边缘。
  *     倒读起点由硬件 CmdExec 自己算（行尾字 = 行首 + ceil(w/4) − 1），软件不用管。 */

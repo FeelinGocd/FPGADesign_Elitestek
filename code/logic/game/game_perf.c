@@ -18,7 +18,7 @@
 #include "user_gpu2d.h"
 #include "bsp.h"
 
-static const int counts[PERF_LEVELS] = { 16, 32, 64, 96, 128, 160, 192 };
+static const int counts[PERF_LEVELS] = { 16, 32, 48, 64, 80, 96 };
 
 static u32 t0, cmd0, frames;
 static int level;
@@ -32,8 +32,8 @@ void game_perf_init(void)
     } else if (PERF_TEST_MODE >= 2) {
         int i;
 
-        game_bullets_perf_fill(N_BULLETS);
-        for (i = 0; i < N_BULLETS; ++i) {
+        game_bullets_perf_fill(PERF_TEST_BULLETS);
+        for (i = 0; i < PERF_TEST_BULLETS && i < N_BULLETS; ++i) {
             g.bullets[i].vx = (i % 3) - 1;
             g.bullets[i].vy = ((i / 3) % 3) - 1;
             if (g.bullets[i].vx == 0 && g.bullets[i].vy == 0) g.bullets[i].vy = 1;
@@ -65,18 +65,24 @@ int game_perf_tick(u32 now)
 
     /* 这个 BSP 的 printf 只支持工程里用过的整数格式；不用 %u（会被当成浮点）。 */
     if (PERF_TEST_MODE == 1) {
+#if GAME_UART_TELEMETRY
         bsp_printf("PERF bullets=%d: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
                    counts[level], (int)frames, (int)dt,
                    (int)((frames * 1000u) / dt), (int)(dc / frames));
+#endif
         if (++level >= PERF_LEVELS) {
+#if GAME_UART_TELEMETRY
             bsp_printf("PERF DONE: all bullet levels completed\r\n");
+#endif
             return 0;
         }
         game_bullets_perf_fill(counts[level]);
     } else {
+#if GAME_UART_TELEMETRY
         bsp_printf("PERF dynamic: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
                    (int)frames, (int)dt,
                    (int)((frames * 1000u) / dt), (int)(dc / frames));
+#endif
     }
     frames = 0u;
     t0 = now;

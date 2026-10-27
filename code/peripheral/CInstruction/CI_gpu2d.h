@@ -69,9 +69,7 @@
  *   ★ MY 对两类源都成立；MX 目前只支持 PRAM 精灵源（DDR 源的行缓冲是 FIFO，倒着取不了）。 */
 #define GPU2D_FLIP_X   0x1u
 #define GPU2D_FLIP_Y   0x2u
-#define GPU2D_ROT90    0x4u   /* 按列取样 = 转置(out(x,y)=src(y,x))，不是旋转。
-                                 * 真 90°: ROT90|FLIP_X = 顺时针, ROT90|FLIP_Y = 逆时针;
-                                 * 见 docs/spec/硬件_加速器.md §1.6.1 那张 8 组合表 */
+#define GPU2D_ROT90    0x4u   /* screen CW 90deg: right-facing source -> down; add FLIP_Y for up */
 
 /* 硬件对每条 CI 回的固定标识("CMD1"), 必须和 CmdBuffer.v 的 CI_ID 一致 */
 #define GPU2D_CI_ID        0x434D4431u
@@ -160,6 +158,12 @@ void CI_gpu2d_spriteAlphaTint(u32 asset_base, u32 stride, u32 dst_addr,
 void CI_gpu2d_spriteAlphaTintRect(u32 asset_base, u32 stride, u32 dst_fb,
                                   u32 dx, u32 dy, u32 w, u32 h,
                                   u32 argb, u32 strength, u32 tone, u32 extra);
+
+/* Tint + white color key without destination alpha readback. The source
+ * alpha channel is ignored, so semi-transparent edges become opaque. */
+void CI_gpu2d_spriteTintCKRect(u32 asset_base, u32 stride, u32 dst_fb,
+                                u32 dx, u32 dy, u32 w, u32 h,
+                                u32 argb, u32 strength, u32 tone, u32 flip);
 
 /*   —— 图片合成：把两张 PRAM 素材图合成一张再写进目的 ——
  *   一条命令 = 3 条 CI（硬件只发一条命令，软件发三条）:

@@ -30,6 +30,7 @@
 #include "user_gpu2d.h"      /* APB 槽 2: 命令完成计数 / 带宽观测 */
 #include "compare_demo.h"   /* 分屏对比 Demo: 左半加速器 / 右半纯 CPU（基础要求 3c） */
 #include "game_demo.h"      /* 游戏 demo: 四方向移动 + 子弹池 + Boss 弹幕 + 道具 + GUI */
+#include "framebuffer_layout.h"
 
 /*------------------------------------------------------------------------------
  * 跑哪个 Demo（改这一行就切换，现在只有两个）:
@@ -52,15 +53,15 @@
  * 28 位)、不和别的用途撞车。程序跑在内部 RAM(0x00001000, 124KB), 不占 DDR。
  * 每块 6,220,800 字节 = 0x5EEC00:
  *   C: 0x0800_0000 ~ 0x085E_EBFF (上电默认显示这块)  D: 0x0880_0000 ~ 0x08DE_EBFF */
-#define LB_FRAME_C       0x08000000u
-#define LB_FRAME_D       0x08800000u
+#define LB_FRAME_C       DDR_FB_C
+#define LB_FRAME_D       DDR_FB_D
 
 // 分屏用四个半幅(每块 2.97MB, 4MB 一块, 互不重叠)
 //   A/B 是两块完整缓冲; 每块又分 左半(加速器画) / 右半(CPU 画)
-#define LB_A_L           0x09000000u
-#define LB_A_R           0x09400000u
-#define LB_B_L           0x09800000u
-#define LB_B_R           0x09C00000u
+#define LB_A_L           DDR_FB_A_LEFT
+#define LB_A_R           DDR_FB_A_RIGHT
+#define LB_B_L           DDR_FB_B_LEFT
+#define LB_B_R           DDR_FB_B_RIGHT
 
 // 铺几行: 只看最上面几行时可用 16(便于判断地址/行距/像素序), 整屏就是 LINEBUFFER_HEIGHT
 #define LB_TEST_LINES    LINEBUFFER_HEIGHT
@@ -158,9 +159,9 @@ void main(){
         bsp_printf("CKEY: 键色=0x%06x (相等 = 不写)  [0x2078]\r\n", lineBuffer_getCkeyColor());
         bsp_uDelay(2000000);
 
-        /* --- 开"帧起始"中断: 让 CPU 在硬件帧边界那一刻被叫醒 -------------------
-         *   这一版 ISR 先【只计数】: 用来确认"中断确实每个显示帧来一次"。
-         *   确认之后再把这帧的绘制搬进 ISR。 */
+        /* --- 开"帧起始"中断: 通知主循环显示边界 -------------------
+         *   ISR 只清事件并计数；游戏逻辑按独立时间步更新，绘制和交帧留在主循环。
+         *   显示基址须在边界前写好，不能等 ISR 进入后才提交。 */
         #if IRQ_FRAME_USE
                 IRQ_frame_init();
                 bsp_printf("IRQ: 帧起始中断已开(PLIC 号 %d), 先只看计数\r\n",

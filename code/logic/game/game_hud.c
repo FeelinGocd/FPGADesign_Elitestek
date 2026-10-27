@@ -2,17 +2,15 @@
 //  game_hud.c —— 左上角状态面板 + 右侧道具池 + Boss 血条 + 字幕
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · 面板每一行 = 【纯色底板(FILL) + 标签(CK字模) + 数字(CK字模)】
+//    · 面板每一行 = 标签(CK字模) + 数字(CK字模)，透明部分显示场景
 //    · 只有"这一行的数变了"才重画那一行；没变就一条命令都不发
 //  上一级是谁  : game/game_main.c（每帧 hud_submit()，各块带自己的 Z_HUD_* 层号）
 //  接口契约    :
-//    · 面板是【不透明】的：谁走到它后面都被盖住 → 不需要脏区恢复，也不留残影
+//    · 字模透明处不会覆盖旧字；移动/数值变化时必须先恢复旧字所在的场景
 //    · 数字必须定宽（digits 位），位数一变后面的内容会平移
 //  为什么这么做:
-//    · ★ 重影的根因：以前文字用 ALPHA 精灵画，同一个位置反复画不同数字时
-//      α 混合会把旧数字留在下面（FPS 位置出现 00/59/60 三层叠影）。
-//      ⇒ 每行先用 FILL 铺一块【不透明底板】把旧内容整块擦掉，再用 CK 字模直写。
-//      底板是一条 FILL 命令，比"恢复 60 格地砖"便宜两个数量级。
+//    · 擦除由帧首脏区恢复统一完成，标签与数字在实体之后提交。
+//    · 相机移动保留完整旧字模擦除；仅不透明的小地图可以只擦矩形差集。
 //  参考        : docs/spec/软件_驱动与API.md §5.2
 //==============================================================================
 #include "game.h"
@@ -48,7 +46,7 @@ static void hud_number(u32 fb, int x, int y, int value, int digits)
 {
     /*  ★ 16×8 加进来之后，素材表里 num0_16x24 / num0_16x8 / num1_16x24… 是交错的，
      *    不能再拿 ASSET_num0_16x24 + digit 连续寻址，否则会混进小号数字。  */
-    static const int big_digit[10] = {
+    static const unsigned short big_digit[10] = {
         ASSET_num0_16x24, ASSET_num1_16x24, ASSET_num2_16x24, ASSET_num3_16x24,
         ASSET_num4_16x24, ASSET_num5_16x24, ASSET_num6_16x24, ASSET_num7_16x24,
         ASSET_num8_16x24, ASSET_num9_16x24
@@ -82,7 +80,7 @@ void game_hud_char_at(u32 fb, int x, int y, int asset)   { hud_glyph(fb, x, y, a
 void game_hud_label_at(u32 fb, int x, int y, const char *t) { hud_label(fb, x, y, t); }
 void game_hud_number_at(u32 fb, int x, int y, int v, int d) { hud_number(fb, x, y, v, d); }
 /*  让别的模块标脏"面板某一行"（擦除交给帧首的脏区恢复）  */
-void game_hud_dirty_row(unsigned char dirty[GRID_H][GRID_W], int row)
+void game_hud_dirty_row(dirty_map_t dirty, int row)
 {
     game_mark_hud_dirty(dirty, HUD_PLATE_X, row * HUD_ROW_H, HUD_PLATE_W, HUD_ROW_H);
 }
@@ -103,6 +101,26 @@ static const char *const s_row_label[HUD_CELLS_Y] = {
 static const unsigned char s_row_digits[HUD_CELLS_Y] = {
     2, 3, 3, 2, 0, 2, 2, 2, 3, 2, 3, 1
 };
+
+/* Restore only glyph footprints; the panel has no opaque background.
+ * Keep the full vital row to cover hearts and a previous extra-life label. */
+void game_hud_mark_at(dirty_map_t dirty, int camx, int camy)
+{
+    int i;
+    for (i = 0; i < HUD_CELLS_Y; ++i) {
+        int len = 0;
+        if (!s_row_label[i]) {
+            game_mark_dirty(dirty, camx, camy + i * HUD_ROW_H,
+                            HUD_PLATE_W, HUD_ROW_H);
+            continue;
+        }
+        while (s_row_label[i][len]) ++len;
+        game_mark_dirty(dirty, camx + HUD_LABEL_X, camy + i * HUD_ROW_H,
+                        len * 16, 24);
+        game_mark_dirty(dirty, camx + HUD_VALUE_X, camy + i * HUD_ROW_H,
+                        s_row_digits[i] * 16, 24);
+    }
+}
 
 void game_hud_static(u32 fb)
 {
@@ -134,8 +152,8 @@ static void hud_values(int fps, int cmd_frame, int total_bullets, int coins, int
 
 /*  ★ 帧首调用：把"和这块缓冲上次画的不一样"的行标脏（旧文字由脏区恢复擦掉）。
  *    双缓冲各记各的 ⇒ 两块都不会闪、也不会互相留残影。  */
-static int s_draw[2][HUD_CELLS_Y];              /* 本帧要重画的行（prepare 置位，frame 消费） */
-static int s_last[2][HUD_CELLS_Y];              /* 每块缓冲上一次画的值（-1 = 没画过） */
+static unsigned char s_draw[GAME_FB_COUNT][HUD_CELLS_Y]; /* per-buffer row flags */
+static int s_last[GAME_FB_COUNT][HUD_CELLS_Y];              /* 每块缓冲上一次画的值（-1 = 没画过） */
 static int s_init;
 
 /*  ★ 整局重开 / 铺完地砖之后必须调一次：把两块缓冲的"上次值"作废，
@@ -144,15 +162,15 @@ void game_hud_invalidate(void)
 {
     int b, i;
 
-    for (b = 0; b < 2; ++b)
+    for (b = 0; b < GAME_FB_COUNT; ++b)
         for (i = 0; i < HUD_CELLS_Y; ++i) s_last[b][i] = -1;
-    for (b = 0; b < 2; ++b)
+    for (b = 0; b < GAME_FB_COUNT; ++b)
         for (i = 0; i < HUD_CELLS_Y; ++i) s_draw[b][i] = 1;
     s_init = 0;
 }
 
 /*  某一行的格子里有没有"别的精灵留下的脏"（有 ⇒ 这一行的字被擦掉了，要补画）  */
-static int row_touched(unsigned char dirty[GRID_H][GRID_W], int row)
+static int row_touched(dirty_map_t dirty, int row)
 {
     int tx, ty;
     int y0 = g.cam_y + row * HUD_ROW_H;
@@ -161,7 +179,7 @@ static int row_touched(unsigned char dirty[GRID_H][GRID_W], int row)
 
     for (ty = y0 / TILE; ty <= (y0 + HUD_ROW_H - 1) / TILE && ty < GRID_H; ++ty)
         for (tx = x0 / TILE; tx <= x1 / TILE && tx < GRID_W; ++tx)
-            if (dirty[ty][tx]) return 1;
+            if (dirty_get(dirty, tx, ty)) return 1;
     return 0;
 }
 
@@ -169,22 +187,21 @@ static int row_touched(unsigned char dirty[GRID_H][GRID_W], int row)
  *    脏区恢复是按 32×32 瓦片擦的，cam_y 不是 32 的倍数时，一行的脏区会跨
  *    两行瓦片 ⇒ 相邻的 HUD 行也会被擦掉。这里把所有"所占瓦片被擦过"的行
  *    补进 s_draw（只置重画位，不重复标脏），这样只补画真正被擦到的行。  */
-int game_hud_prepare_overlap(unsigned char dirty[GRID_H][GRID_W], int buf)
+int game_hud_prepare_overlap(dirty_map_t dirty, int buf)
 {
     int i, any = 0;
 
-    if (buf < 0 || buf > 1) buf = 0;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (!row_touched(dirty, i)) continue;
         any = 1;
-        /*  第 4 行是心/命数，由 game_vital 自己画；这里只负责让调用方
-         *  game_vital_invalidate()（g_hud_need 置位）。  */
+        /* 第 4 行由 hud_vital 在本帧补画；不作废另一块缓冲的生命值。 */
         if (i != 4) s_draw[buf][i] = 1;
     }
     return any;
 }
 
-int game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
+int game_hud_prepare(dirty_map_t dirty, int buf,
                      int fps, int cmd_frame, int total_bullets, int coins)
 {
     int any = 0;
@@ -194,11 +211,11 @@ int game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
     hud_values(fps, cmd_frame, total_bullets, coins, v);
 
     if (!s_init) {
-        for (i = 0; i < HUD_CELLS_Y; ++i) { s_last[0][i] = -1; s_last[1][i] = -1; }
+        for (i = 0; i < HUD_CELLS_Y; ++i) { int b; for (b = 0; b < GAME_FB_COUNT; ++b) s_last[b][i] = -1; }
         s_init = 1;
     }
 
-    if (buf < 0 || buf > 1) buf = 0;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
 
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
@@ -225,7 +242,7 @@ void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, 
 
     fb = game_view_fb(fb);
     hud_values(fps, cmd_frame, total_bullets, coins, v);
-    if (buf < 0 || buf > 1) buf = 0;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
 
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
@@ -288,7 +305,7 @@ void game_hud_toast(u32 fb, const char *text)
 
 /*----------------------------------------------------------------------------*/
 /*  ★ 面板是不透明底板 ⇒ 不再需要"标脏让地砖盖上来"那套（重影就是从那儿来的）  */
-void game_hud_mark_dirty(unsigned char dirty[GRID_H][GRID_W])
+void game_hud_mark_dirty(dirty_map_t dirty)
 {
     (void)dirty;
 }

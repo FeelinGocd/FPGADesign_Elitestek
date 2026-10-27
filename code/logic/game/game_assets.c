@@ -7,7 +7,8 @@
 //  为什么单独一个文件:
 //    · assets_desc.h 是 pic2pram.py 生成的，里面是
 //          static const asset_desc_t g_assets[] = { ... };
-//      带 static ⇒ 【每个包含它的 .c 都会各自复制一份】（59 项 × 20 字节 = 1.2 KB）。
+//      表项只存四个 32 位数（16 字节）；名称在生成注释与 report.txt 中，
+//      不再为游戏从不读取的 name 指针和字符串占 RAM。
 //      拆成多个 .c 之后，6 个文件各一份，RAM 白吃 7 KB。
 //      ⇒ 让本文件拿着那一份，别的模块通过 game_asset_table() 访问同一份。
 //  参考        : tools/img2hex/pic2pram.py（生成的表）、docs/spec/硬件_加速器.md §7.3

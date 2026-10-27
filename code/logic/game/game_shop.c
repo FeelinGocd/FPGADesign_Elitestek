@@ -38,14 +38,14 @@ typedef struct {
 } shop_good_t;
 
 /*  16×8 数字在素材表里和 16×24 交错排列，不能拿 num0 直接加下标。  */
-static const int s_num16x8[10] = {
+static const unsigned short s_num16x8[10] = {
     ASSET_num0_16x8, ASSET_num1_16x8, ASSET_num2_16x8, ASSET_num3_16x8,
     ASSET_num4_16x8, ASSET_num5_16x8, ASSET_num6_16x8, ASSET_num7_16x8,
     ASSET_num8_16x8, ASSET_num9_16x8
 };
 
 static shop_good_t s_goods[SHOP_GOODS];
-static old_t       s_old[2][SHOP_GOODS];
+static old_t       s_old[GAME_FB_COUNT][SHOP_GOODS];
 static signed char s_room = -1;
 
 static int shop_hit(int ax, int ay, int aw, int ah,
@@ -63,7 +63,7 @@ void game_shop_reset(void)
         s_goods[i].active = 0;
         s_goods[i].room = -1;
     }
-    for (b = 0; b < 2; ++b)
+    for (b = 0; b < GAME_FB_COUNT; ++b)
         for (i = 0; i < SHOP_GOODS; ++i) s_old[b][i].active = 0;
     s_room = -1;
 }
@@ -136,7 +136,6 @@ void game_shop_step(u32 now)
 
         if (good->kind == SHOP_KIND_HEART) {
             /*  满血不扣钱、不买走  */
-            if (game_vital_hp() >= HP_MAX) continue;
             if (!game_vital_heal_one()) continue;
             g.coins -= price;
             g.held_type = HELD_HEART;           /* get_acc 姿势头顶举 heart，不是上一个道具 */
@@ -156,7 +155,7 @@ void game_shop_step(u32 now)
 }
 
 /*  画出“这块缓冲上次画过的商品”需要擦的矩形；双缓冲各记一份。  */
-void game_shop_mark_old(unsigned char dirty[GRID_H][GRID_W], int buf)
+void game_shop_mark_old(dirty_map_t dirty, int buf)
 {
     int i;
 

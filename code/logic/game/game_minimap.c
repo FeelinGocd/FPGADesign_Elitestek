@@ -41,8 +41,8 @@ void game_minimap_reset(void)
 
 void game_minimap_refresh(void)
 {
-    static const int dx[4] = { 0, 1, 0, -1 };
-    static const int dy[4] = { -1, 0, 1, 0 };
+    static const signed char dx[4] = { 0, 1, 0, -1 };
+    static const signed char dy[4] = { -1, 0, 1, 0 };
     int gx, gy, d;
 
     game_room_pos(&gx, &gy);

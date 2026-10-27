@@ -26,14 +26,17 @@
 #define FX_RISE_MS     34u                   /* 每 34 ms 升 1 px（约 2 帧） */
 
 static int s_redraw;                         /* 本帧要不要重画血量行 */
-static int s_last_hp2[2] = { -1, -1 }, s_last_extra2[2] = { -1, -1 };
+static int s_last_hp2[GAME_FB_COUNT], s_last_extra2[GAME_FB_COUNT];
 
 /*  ★ 整局重开：把"上次画的值"作废，下一帧两块缓冲都会重画血量行  */
 void game_vital_invalidate(void)
 {
-    s_last_hp2[0] = s_last_hp2[1] = -1;
-    s_last_extra2[0] = s_last_extra2[1] = -1;
-    s_redraw = 2;
+    int b;
+    for (b = 0; b < GAME_FB_COUNT; ++b) {
+        s_last_hp2[b] = -1;
+        s_last_extra2[b] = -1;
+    }
+    s_redraw = GAME_FB_COUNT;
 }
 
 
@@ -73,9 +76,7 @@ void game_vital_refill(void)
 {
     s_hp = HP_MAX;
     s_dead_until = 0u;
-    s_last_hp2[0] = s_last_hp2[1] = -1;
-    s_last_extra2[0] = s_last_extra2[1] = -1;
-    s_redraw = 2;
+    game_vital_invalidate();
 }
 
 void game_vital_extra_life(void)
@@ -88,8 +89,7 @@ int game_vital_heal_one(void)
 {
     if (s_hp <= 0 || s_hp >= HP_MAX) return 0;
     ++s_hp;
-    s_last_hp2[0] = s_last_hp2[1] = -1;
-    s_redraw = 2;
+    game_vital_invalidate();
     return 1;
 }
 
@@ -108,6 +108,11 @@ int game_vital_hit(u32 now)
 {
     int i;
 
+#if GAME_BOSS_DEBUG
+    (void)now;
+    (void)i;
+    return 0;
+#endif
     if (g.phase == PHASE_GAMEOVER) return 0;     /* 结束画面里不再扣血 */
     if (game_vital_invuln(now)) return 0;
     if (s_dead_until != 0u)     return 0;
@@ -169,21 +174,21 @@ void game_vital_step(u32 now)
 
 /*----------------------------------------------------------------------------*/
 /*  帧首：血量/命数变化 → 把那一行标脏（旧心、旧 X2 由脏区恢复擦掉）  */
-void game_vital_prepare(unsigned char dirty[GRID_H][GRID_W], int buf)
+void game_vital_prepare(dirty_map_t dirty, int buf)
 {
     int extra = s_lives - 1;
 
-    if (buf > 1) buf = 0;
+    if (buf >= GAME_FB_COUNT) buf = 0;
     if (s_last_hp2[buf] == s_hp && s_last_extra2[buf] == extra) return;
 
     s_last_hp2[buf] = s_hp;
     s_last_extra2[buf] = extra;
     game_hud_dirty_row(dirty, VITAL_ROW);
-    s_redraw = 2;
+    s_redraw = GAME_FB_COUNT;
 }
 
 /*  脏区：飘心在动的时候标（它每帧都动）  */
-void game_vital_mark_dirty(unsigned char dirty[GRID_H][GRID_W])
+void game_vital_mark_dirty(dirty_map_t dirty)
 {
     int i;
 

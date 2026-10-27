@@ -23,6 +23,10 @@
 #include "game.h"
 #include "game_layout_data.h"
 
+#ifndef GAME_TEST_START_LAYOUT
+#define GAME_TEST_START_LAYOUT -1
+#endif
+
 /*  房间类型表：下标必须和 game.h 的 ROOM_xxx 枚举一一对应。
  *  布局池里的 LAY_xxx 是生成文件里的宏（按名字排序分配下标）。  */
 static const room_kind_t g_kinds[] = {
@@ -67,14 +71,48 @@ const room_layout_t *game_layout(int idx)
 
 /*  确定性挑选：同一间房（room_id）每次进都拿到同一张布局。
  *  用 room_id 做散列而不是用随机数，是为了"重进房间/死亡回退"后房间长一样。  */
-int game_layout_pick(int room_type, int room_id)
+int game_layout_pick_like(int prototype, int room_type, int room_id)
 {
-    const room_kind_t *k = game_kind(room_type);
+    const room_layout_t *base = game_layout(prototype);
     unsigned int h;
-
-    if (k->n_layouts == 0) return -1;
+    int i, count = 0, numbered = 0;
+    if (!base) return -1;
 
     h = (unsigned int)room_id * 2654435761u + (unsigned int)room_type * 40503u;
     h ^= h >> 13;
-    return (int)k->layouts[h % k->n_layouts];
+    for (i = 0; i < LAYOUT_COUNT; ++i)
+        if (g_layouts[i].map == base->map && g_layouts[i].terrain == base->terrain && g_layout_ids[i])
+            numbered = 1;
+    for (i = 0; i < LAYOUT_COUNT; ++i)
+        if (g_layouts[i].map == base->map && g_layouts[i].terrain == base->terrain &&
+            (!numbered || g_layout_ids[i])) ++count;
+    h %= (unsigned int)count;
+    for (i = 0; i < LAYOUT_COUNT; ++i) {
+        if (g_layouts[i].map != base->map || g_layouts[i].terrain != base->terrain) continue;
+        if (numbered && !g_layout_ids[i]) continue;
+        if (h-- == 0u) return i;
+    }
+    return prototype;
+}
+
+int game_layout_pick(int room_type, int room_id)
+{
+    const room_kind_t *k = game_kind(room_type);
+    int i;
+#if GAME_TEST_START_LAYOUT >= 0
+    if (room_type == ROOM_START) return GAME_TEST_START_LAYOUT;
+#endif
+    if (k->n_layouts == 0) return -1;
+    if (room_type == ROOM_START) {
+        /* 1x1_000 是唯一保留的起点空布局；旧参考布局仍可保留在生成表中。 */
+        for (i = 0; i < LAYOUT_COUNT; ++i) {
+            if (g_layouts[i].map == 0 && !g_layouts[i].terrain &&
+                g_layout_ids[i] == 0 && g_layouts[i].n_objs == 0)
+                return i;
+        }
+        return k->layouts[0];
+    }
+    /* 本轮只扩充普通房布局；特殊房保留指定方案，避免混入普通对象池。 */
+    if (room_type != ROOM_EMPTY) return k->layouts[0];
+    return game_layout_pick_like(k->layouts[0], room_type, room_id);
 }

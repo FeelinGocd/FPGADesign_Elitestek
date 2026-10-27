@@ -17,7 +17,7 @@
 #include "CI_gpu2d.h"
 #include "bsp.h"        /* bsp_printf（关卡切换时打一行日志） */
 
-static const int boss_seq[5] = { 0, 1, 2, 1, 0 };
+static const unsigned char boss_seq[5] = { 0, 1, 2, 1, 0 };
 
 static u32 rain_seed = 2463534242u;
 static int rain_side;               /* 这一波从哪边来：0 上 1 右 2 下 3 左（轮着来） */
@@ -41,11 +41,22 @@ static int eff_rain_drop(void)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  按 motion 摆 Boss 位置（现在数据里是 BOSS_STILL ⇒ 居中不动）  */
+/*  当前招式选运动池目标，再逐帧靠近；切招式时不会瞬移。  */
 static void boss_motion_step(u32 now)
 {
-    const boss_motion_t *m = &g_boss_def.motion;
-    int cx, cy;
+    unsigned int motion_idx = 0;
+    const boss_motion_t *m;
+    int cx, cy, tx, ty, off = 0, side_off = 0, max_step;
+#if GAME_BOSS_MOTION_TRACE
+    static int last_move = -1;
+    int old_x = g.boss_x, old_y = g.boss_y;
+#endif
+
+    if (g.shot.set == g_boss_def.moves && g.shot.move_idx >= 0 &&
+        g.shot.move_idx < g.shot.set->n_moves)
+        motion_idx = g.shot.set->moves[g.shot.move_idx].motion;
+    if (motion_idx >= g_boss_def.n_motions) motion_idx = 0;
+    m = &g_boss_def.motions[motion_idx];
 
     if (game_world_is_boss()) {
         cx = (ARENA_X0 + ARENA_X1) / 2 - g_boss_def.w / 2;
@@ -55,13 +66,58 @@ static void boss_motion_step(u32 now)
         cx = (SCR_W - g_boss_def.w) / 2;
         cy = (SCR_H - g_boss_def.h) / 2;
     }
-    int off;
+    tx = cx;
+    ty = cy;
+    if (m->kind == BOSS_SINE_X || m->kind == BOSS_SINE_Y ||
+        m->kind == BOSS_ORBIT) {
+        u32 step_ms = (u32)(m->period ? m->period : 1u) * 16u;
+        u32 phase = (now - g.boss_wait_until) % (step_ms * 64u);
+        u32 idx = phase / step_ms;
+        u32 frac = phase % step_ms;
+        int a = g_sin_tab[idx];
+        int b = g_sin_tab[(idx + 1u) & 63u];
 
-    if (m->kind == BOSS_STILL) { g.boss_x = cx; g.boss_y = cy; return; }
+        off = ((a * (int)(step_ms - frac) + b * (int)frac) * m->amp) /
+              ((int)step_ms * 64);
+        if (m->kind == BOSS_ORBIT) {
+            a = g_sin_tab[(idx + 16u) & 63u];
+            b = g_sin_tab[(idx + 17u) & 63u];
+            side_off = ((a * (int)(step_ms - frac) + b * (int)frac) *
+                        m->amp * 3) / ((int)step_ms * 256);
+        }
+    }
+    if (m->kind == BOSS_SINE_X) tx += off;
+    else if (m->kind == BOSS_SINE_Y) ty += off;
+    else if (m->kind == BOSS_ORBIT) { tx += off; ty += side_off; }
+    else if (m->kind == BOSS_LEFT) tx -= m->amp;
+    else if (m->kind == BOSS_RIGHT) tx += m->amp;
+    else if (m->kind == BOSS_UP) ty -= m->amp;
+    else if (m->kind == BOSS_DOWN) ty += m->amp;
 
-    off = (g_sin_tab[((now / ((u32)m->period * 16u + 1u)) & 63u)] * m->amp) >> 6;
-    if (m->kind == BOSS_SINE_X) { g.boss_x = cx + off; g.boss_y = cy; }
-    else                        { g.boss_x = cx;      g.boss_y = cy + off; }
+    if (game_world_is_boss()) {
+        if (tx < ARENA_X0) tx = ARENA_X0;
+        if (tx > ARENA_X1 - g_boss_def.w) tx = ARENA_X1 - g_boss_def.w;
+        if (ty < ARENA_Y0) ty = ARENA_Y0;
+        if (ty > ARENA_Y1 - g_boss_def.h) ty = ARENA_Y1 - g_boss_def.h;
+    }
+    max_step = m->speed ? m->speed : 1;
+    if (tx > g.boss_x + max_step) tx = g.boss_x + max_step;
+    if (tx < g.boss_x - max_step) tx = g.boss_x - max_step;
+    if (ty > g.boss_y + max_step) ty = g.boss_y + max_step;
+    if (ty < g.boss_y - max_step) ty = g.boss_y - max_step;
+    g.boss_x = tx;
+    g.boss_y = ty;
+#if GAME_BOSS_MOTION_TRACE
+    if (last_move != g.shot.move_idx) {
+        bsp_printf("BOSS MOVE: skill=%d motion=%d x=%d y=%d\r\n",
+                   g.shot.move_idx, (int)motion_idx, g.boss_x, g.boss_y);
+        last_move = g.shot.move_idx;
+    }
+    if (g.boss_x - old_x > max_step || old_x - g.boss_x > max_step ||
+        g.boss_y - old_y > max_step || old_y - g.boss_y > max_step)
+        bsp_printf("BOSS MOVE ERROR: dx=%d dy=%d max=%d\r\n",
+                   g.boss_x - old_x, g.boss_y - old_y, max_step);
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
@@ -196,7 +252,7 @@ void game_boss_step(u32 now)
         if (hx < g.exit_x + (int)ex->width && hx + PB_W > g.exit_x &&
             hy < g.exit_y + (int)ex->height && hy + PB_H > g.exit_y) {
             g.exit_active = 0;
-            g.exit_dirty = 2;
+            g.exit_dirty = GAME_FB_COUNT;
             ++g.stage;
             bsp_printf("STAGE %d\r\n", g.stage);
             game_room_new_run();
@@ -210,7 +266,7 @@ void game_boss_step(u32 now)
     if (g.phase != PHASE_FIGHT) return;         /* 非战斗阶段：Boss 不出弹 */
     if ((int)(now - g.boss_wait_until) < 0) return;  /* 进房先等 1 s 再出招 */
 
-    boss_motion_step(now);                      /* 位置由 g_boss_def.motion 决定 */
+    boss_motion_step(now);                      /* 位置由当前招式的运动池编号决定 */
 
     if (g.boss_hp <= 0) return;                 /* 已击破：等玩家走到 exit */
 
@@ -276,7 +332,7 @@ void game_boss_hit(u32 now)
         g.exit_x      = (ARENA_X0 + ARENA_X1) / 2 - 16;
         g.exit_y      = ARENA_Y0 + 64;                  /* 上面那扇门的门下 64 px */
         g.exit_dirty  = 0;
-        g.door_dirty  = 2;                              /* 无怪物了：门从"不可传送"变为可传送；重画一次 */
+        g.door_dirty  = GAME_FB_COUNT;
         bsp_printf("EXIT: room %d at (%d,%d)\r\n", g.exit_room, g.exit_x, g.exit_y);
 
         /*  Boss 击破：掉一个随机饰品（不再发金币）。

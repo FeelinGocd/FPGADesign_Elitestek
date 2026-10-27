@@ -10,6 +10,17 @@ void game_update_step(u32 keys, u32 now)
 {
     if (game_perf_frozen()) return;
 
+#if GAME_BOSS_BULLET_SWEEP
+    if (game_boss_stress_step()) {
+        /* The test owns the bullets, but PAD movement and the Boss camera
+         * must keep running so the visible-load test covers scrolling. */
+        game_player_step(keys, now);
+        game_camera_step();
+        game_bullets_stress_step();
+        return;
+    }
+#endif
+
     if (game_take_spawn_item() && g.phase != PHASE_GAMEOVER)
         game_item_spawn_at_player();
     if (game_take_bomb() && g.phase != PHASE_GAMEOVER)
@@ -22,11 +33,9 @@ void game_update_step(u32 keys, u32 now)
         return;
     }
 
-    /*  GAME OVER 倒计时到点：自动重开一局（世界照常走，玩家不画）  */
-    if (g.phase == PHASE_GAMEOVER && (int)(now - g.gameover_until) >= 0) {
-        game_restart();
-        return;
-    }
+    /* Restart is performed by the main loop, which first releases any
+     * framebuffer still queued for the next display boundary. */
+    if (g.phase == PHASE_GAMEOVER && (int)(now - g.gameover_until) >= 0) return;
 
     if (g.phase != PHASE_GAMEOVER && !game_vital_dead(now))
         game_player_step(keys, now);

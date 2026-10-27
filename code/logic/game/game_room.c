@@ -20,7 +20,11 @@
 #include "bsp.h"
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"
-#include "user_lineBuffer.h"
+
+/* Keep transition measurements available in IDE builds without custom flags. */
+#ifndef GAME_PROFILE
+#define GAME_PROFILE 1
+#endif
 
 /*  ★ L 房总开关：整份文件只在这里判一次。
  *    以前 6 处 #ifdef LAY_map_L 散在生成/布局两段里，布局改名或删掉时
@@ -79,6 +83,7 @@ static void room_clr(int id, unsigned char f)  { s_rooms[id].flags = (unsigned c
 /*  换房时记下"旧蓝图"，好把旧房间的静态道具从两块缓冲里擦掉。
  *  静态道具不再有实例、也不逐帧标脏，只在换房后的 2 帧（两块缓冲各一次）补标。  */
 static signed char   s_prev_layout = -1;
+static unsigned char s_prev_flip;
 static unsigned char s_prop_dirty;
 
 /*  房内 interact "已经被破坏"：只记 (房间, 格子 x, y)。
@@ -124,6 +129,7 @@ void game_room_clear_broken(void)
 }
 
 int game_room_prev_layout(void) { return (int)s_prev_layout; }
+int game_room_prev_flip(void) { return (int)s_prev_flip; }
 
 int game_room_prop_dirty(void)
 {
@@ -134,18 +140,21 @@ int game_room_prop_dirty(void)
 
 static int s_start_room;            /* 本轮起点房间的格子编号 */
 static int s_boss_anchor = -1;      /* Boss 2×2 的左上角（规范房间 id） */
+#if GAME_BOSS_DEBUG
+static int s_debug_boss_entry;
+#endif
 static int s_boss_entry = -1;       /* 生成时选中的 Boss 入口格（验证距离用） */
 
-/*  当前房间里的门：门格 + 门洞（两格）+ 朝向 + 通到的房间。
+/*  当前房间里的门：地图门格 + 内侧落点 + 朝向 + 通到的房间。
  *  ★ 一间房可以有 8 扇门、同方向可以有多扇（L 形、2×2 大房）。 */
 #define MAX_ROOM_DOORS 8
 typedef struct {
-    int dx, dy;     /* 地图上 D 格（门洞的第一格） */
-    int cx, cy;     /* 入口用的格子（门内侧 1 格，给 place_at_door 用） */
-    int dir;        /* 0 上 / 1 右 / 2 下 / 3 左  */
-    int room;       /* 通到的房间 id；-1 = 那格没房间 */
-    int cell;       /* 门归属的格子（本房间外接框里的那一格），进门对位用 */
-    int hidden;     /* 1 = 这是通往隐藏房的连接，没炸开前当墙、不可走、不传送 */
+    unsigned char dx, dy; /* D/H tile anchor; bounded by MAP_MAX_* */
+    unsigned char cx, cy; /* inward spawn cell */
+    unsigned char dir;    /* N/E/S/W = 0..3 */
+    signed char room;     /* destination room, -1 = wall */
+    signed char cell;     /* owning grid cell, -1 = none */
+    unsigned char hidden;
 } door_info_t;
 
 static int s_room;
@@ -155,7 +164,34 @@ static int s_entry_dir;         /* < 0 = 落在房间中心 */
 static int s_entry_cell = -1;   /* 从哪一格进来（多格房同方向有多扇门时用来对位） */
 static int s_lock;              /* 刚进过门 ⇒ 不重复触发 */
 static unsigned char s_force_full;
-static signed char s_rebuild_buf = -1;  /* 新一层：强制整屏重铺，清掉上一层的交互物像素 */
+/* A full transition owns the back buffer until its entry view is complete.
+ * The other buffer is repaired on its next ordinary rendering turn. */
+static signed char s_rebuild_buf = -1;
+enum { ROOM_BUILD_TILES, ROOM_BUILD_FINISH };
+static unsigned char s_rebuild_phase;
+static int s_rebuild_row, s_rebuild_last;
+#ifndef ROOM_BUILD_ROWS
+#define ROOM_BUILD_ROWS 2
+#endif
+#if ROOM_BUILD_ROWS < 1 || ROOM_BUILD_ROWS > 4
+#error ROOM_BUILD_ROWS must be between 1 and 4
+#endif
+/* Process several small batches before yielding. The millisecond clock can
+ * round by 1 ms; one already-started row batch may exceed this soft budget. */
+#ifndef ROOM_BUILD_BUDGET_MS
+#define ROOM_BUILD_BUDGET_MS 6u
+#endif
+#if ROOM_BUILD_BUDGET_MS < 1 || ROOM_BUILD_BUDGET_MS > 8
+#error ROOM_BUILD_BUDGET_MS must be between 1 and 8
+#endif
+#if GAME_PROFILE
+static u32 s_rebuild_t0;
+static u32 s_rebuild_cmds;
+static u32 s_rebuild_frames;
+static u32 s_rebuild_max_ticks;
+static u32 s_rebuild_max_cmds;
+static u32 s_rebuild_work_ticks;
+#endif
 
 static door_info_t s_doors[MAX_ROOM_DOORS];
 static int s_door_count;
@@ -195,7 +231,7 @@ int game_room_hidden_open(int a, int b)
     s_hopen_a[s_hopen_n] = (unsigned char)a;
     s_hopen_b[s_hopen_n] = (unsigned char)b;
     ++s_hopen_n;
-    g.door_dirty = 2;                   /* 两侧的门贴图都要重画（两块缓冲各一次） */
+    g.door_dirty = GAME_FB_COUNT;
     return 1;
 }
 
@@ -839,7 +875,7 @@ static int room_try_make_hidden(void)
     s_rooms[pick].w      = 1;
     s_rooms[pick].h      = 1;
     s_rooms[pick].owner  = -1;
-    s_rooms[pick].layout = (signed char)LAY_map_hidden_normal;
+    s_rooms[pick].layout = (signed char)game_layout_pick(ROOM_HIDDEN, pick);
     s_rooms[pick].flip   = 0;
     s_rooms[pick].reward = 0;
     s_rooms[pick].flags  = 0;
@@ -868,7 +904,7 @@ static void room_layout_generate(void)
 
     /*  给每间房挑一张固定布局（按房间类型 + 房间 id 确定性挑选）：
      *  同一间房重进 / 死亡回退都长一样；0xFF = 这类房没有固定布局（随机兜底）。
-     *  ★ 多格非 Boss 房 = L 形：形状在生成时就定了，布局跟着形状给，不从类型池里抽。  */
+     *  ★ 多格非 Boss 房 = L 形：固定空间以左下空缺为标准，从该空间的对象方案池选择。  */
     for (i = 0; i < ROOM_COUNT; ++i) {
         int t = (int)s_rooms[i].type;
 
@@ -878,7 +914,7 @@ static void room_layout_generate(void)
         }
 #if HAS_L_ROOM
         if (t != ROOM_BOSS && s_rooms[i].w > 1 && s_rooms[i].h > 1) {
-            s_rooms[i].layout = (signed char)LAY_map_L;
+            s_rooms[i].layout = (signed char)game_layout_pick_like(LAY_map_L, t, i);
             continue;
         }
 #endif
@@ -900,11 +936,17 @@ static void room_layout_generate(void)
 /*  ★ 触发判定只看【门格 D 本身】，不算"门下一格"：
  *    以前门洞是 D 格 + 朝内那一格共 2 格，人还在房间里、脚下离门一整格就传送了
  *    （上方的门最明显）。现在必须站进门槛里才算走门。
- *  ★ 另：门洞本身还是 2 格（D + 门内侧那格），那是【能不能站】用的，跟触发判定无关。  */
+ *  ★ 普通 D 保留两格门洞；隐藏 H 只有一格，内侧格是落点地板。 */
 static void door_slot(const door_info_t *door, int *x0, int *y0, int *w, int *h)
 {
     *x0 = door->dx * TILE;
     *y0 = door->dy * TILE;
+    if (door->hidden) {
+        int hx, hy;
+        game_world_hidden_cell(door->dx, door->dy, &hx, &hy);
+        *x0 = hx * TILE;
+        *y0 = hy * TILE;
+    }
     *w  = TILE;
     *h  = TILE;
 }
@@ -979,12 +1021,17 @@ static void doors_build(void)
         bh = y1 - y0 + 1;
     }
 
-    for (y = 0; y < rows && n < MAX_ROOM_DOORS; ++y)
-        for (x = 0; x < cols && n < MAX_ROOM_DOORS; ++x) {
-            int dir = game_world_dir_at(x, y);          /* ★ 门的"朝向"，不是贴图角度 */
+    /* game_world_select() already indexed all D/H cells. Reuse that list:
+     * scanning the whole map again was the dominant doors phase on transitions. */
+    for (i = 0; i < game_world_door_count() && n < MAX_ROOM_DOORS; ++i) {
+            int dir;
             int ix, iy, cgx, cgy, nx, ny, target = -1;
             int hidden;
-            char tc = game_world_tile_at(x, y);
+            char tc;
+
+            game_world_door_at(i, &x, &y);
+            tc = game_world_tile_at(x, y);
+            dir = game_world_dir_at(x, y);              /* ★ 门的"朝向"，不是贴图角度 */
 
             if (tc != 'D' && tc != 'H') continue;       /* 'D' 两格 / 'H' 隐藏门 1 格 */
 
@@ -1015,9 +1062,13 @@ static void doors_build(void)
              *  ★★ 只有接缝上的门才允许借格：L 形房的门都在各格中间，离接缝好几格，
              *    借格会在没有邻居的那半边凭空连出一扇门（两个北门通同一间隔壁房）。  */
             if (target < 0 &&
-                door_on_seam((ndx[dir] == 0) ? ix : iy,
-                             (ndx[dir] == 0) ? cols : rows,
-                             (ndx[dir] == 0) ? bw : bh)) {
+                (door_on_seam((ndx[dir] == 0) ? ix : iy,
+                              (ndx[dir] == 0) ? cols : rows,
+                              (ndx[dir] == 0) ? bw : bh)
+#if GAME_BOSS_1X1_TEST
+                 || s_rooms[room].type == ROOM_BOSS
+#endif
+                )) {
                 int c2;
 
                 for (c2 = 0; c2 < ROOM_COUNT; ++c2) {
@@ -1026,8 +1077,16 @@ static void doors_build(void)
                     int nx2, ny2, cell2;
 
                     if (rid != room || s_rooms[c2].type == ROOM_NONE) continue;
-                    if (ndx[dir] == 0 && (int)s_rooms[c2].gy != cgy) continue;   /* 上下门：同一行 */
-                    if (ndy[dir] == 0 && (int)s_rooms[c2].gx != cgx) continue;   /* 左右门：同一列 */
+                    if (ndx[dir] == 0 && (int)s_rooms[c2].gy != cgy
+#if GAME_BOSS_1X1_TEST
+                        && s_rooms[room].type != ROOM_BOSS
+#endif
+                       ) continue;   /* 上下门：同一行 */
+                    if (ndy[dir] == 0 && (int)s_rooms[c2].gx != cgx
+#if GAME_BOSS_1X1_TEST
+                        && s_rooms[room].type != ROOM_BOSS
+#endif
+                       ) continue;   /* 左右门：同一列 */
                     nx2 = (int)s_rooms[c2].gx + ndx[dir];
                     ny2 = (int)s_rooms[c2].gy + ndy[dir];
                     if (nx2 < 0 || nx2 >= ROOM_GRID_W || ny2 < 0 || ny2 >= ROOM_GRID_H) continue;
@@ -1075,6 +1134,22 @@ static void doors_build(void)
     }
 
     s_door_count = n;
+
+    /* Keep Boss connections observable on hardware. This is intentionally
+     * limited to doors touching a Boss room so normal play logs stay quiet. */
+    for (i = 0; i < s_door_count; ++i) {
+        int t = s_doors[i].room;
+        int cur = game_room_id();
+        if ((cur >= 0 && cur < ROOM_COUNT && s_rooms[cur].type == ROOM_BOSS) ||
+            (t >= 0 && t < ROOM_COUNT && s_rooms[t].type == ROOM_BOSS)) {
+            bsp_printf("ROOM DOOR: cur=%d type=%d cell=%d,%d dir=%d target=%d ttype=%d asset=%d hidden=%d\r\n",
+                       cur, (cur >= 0 && cur < ROOM_COUNT) ? (int)s_rooms[cur].type : -1,
+                       s_doors[i].dx, s_doors[i].dy, s_doors[i].dir, t,
+                       (t >= 0 && t < ROOM_COUNT) ? (int)s_rooms[t].type : -1,
+                       game_room_door_asset_at(s_doors[i].dx, s_doors[i].dy),
+                       s_doors[i].hidden);
+        }
+    }
 }
 
 /*  移动边界：只要这个方向【有邻居房间】，就把那一段门洞放行。
@@ -1177,7 +1252,7 @@ int game_room_owner_at(int gx, int gy)
     return (s_rooms[id].owner >= 0) ? (int)s_rooms[id].owner : id;
 }
 
-/*  这一格能不能站人：地板 B 可以；门洞（D 格 + 门内侧那格）也可以，
+/*  这一格能不能站人：地板 B/K 可以；可见门及其内侧格也可以，
  *  其余（黑边、L 的缺口、墙带）都不行。异形房靠它做逐格碰撞。  */
 int game_room_cell_walkable(int tx, int ty)
 {
@@ -1191,6 +1266,21 @@ int game_room_cell_walkable(int tx, int ty)
         if ((d->dx == tx && d->dy == ty) || (d->cx == tx && d->cy == ty)) return 1;
     }
     return 0;
+}
+
+int game_room_rect_walkable(int x, int y, int w, int h)
+{
+    int x0, y0, x1, y1, tx, ty;
+
+    if (w <= 0 || h <= 0 || x < 0 || y < 0) return 0;
+    x0 = x / TILE;
+    y0 = y / TILE;
+    x1 = (x + w - 1) / TILE;
+    y1 = (y + h - 1) / TILE;
+    for (ty = y0; ty <= y1; ++ty)
+        for (tx = x0; tx <= x1; ++tx)
+            if (!game_room_cell_walkable(tx, ty)) return 0;
+    return 1;
 }
 
 /*  当前房间占几格（普通 1×1，Boss/L 房 2×2）。  */
@@ -1251,11 +1341,14 @@ int game_room_blast_hidden(int cx, int cy, int r)
     for (i = 0; i < s_door_count; ++i) {
         const door_info_t *d = &s_doors[i];
         int me = game_room_id();
+        int sx, sy, sw, sh;
 
         if (d->room < 0 || !d->hidden) continue;
         if (game_room_hidden_is_open(me, d->room)) continue;
-        if (!hidden_rect_hit(cx, cy, d->dx * TILE, d->dy * TILE, r) &&
-            !hidden_rect_hit(cx, cy, d->cx * TILE, d->cy * TILE, r)) continue;
+        /* Same one-cell entrance as rendering, movement and teleport.
+         * cx/cy is a spawn floor cell for H, not a second door cell. */
+        door_slot(d, &sx, &sy, &sw, &sh);
+        if (!hidden_rect_hit(cx, cy, sx, sy, r)) continue;
         if (game_room_hidden_open(me, d->room)) {
             ++opened;
             bsp_printf("BOMB: hidden link %d <-> %d\r\n", me, (int)d->room);
@@ -1305,19 +1398,26 @@ int game_room_door_open_at(int tx, int ty)
 int game_room_door_asset_at(int tx, int ty)
 {
     const door_info_t *d = door_at(tx, ty);
-    int cur, dst, target;
+    int cur, dst, target, cur_room;
 
     if (s_room < 0 || s_room >= ROOM_COUNT)
         return ASSET_background_door_normal;
 
-    /*  ★ 炸开的隐藏连接换成"隐藏入口"那张图（32×32，压在门洞两格中缝上，
-     *    摆法见 game_world.c 的 door_xy）。门记录本身是【房间对】，
+    /* Boss occupies four grid records. Always use its canonical anchor when
+     * choosing the current-room door skin; otherwise a covered cell can be
+     * treated as an ordinary room during a transition. */
+    cur_room = game_room_id();
+    if (cur_room < 0 || cur_room >= ROOM_COUNT)
+        cur_room = s_room;
+
+    /*  ★ 炸开的隐藏连接换成单格入口（32×32，紧贴内侧地板，
+     *    位置见 game_world_hidden_cell）。门记录本身是【房间对】，
      *    所以两边看同一面墙，贴图一起换 —— 不会一边是入口、一边是普通门。  */
     if (d && d->hidden && d->room >= 0 &&
         game_room_hidden_is_open(game_room_id(), d->room))
         return ASSET_background_interact_hidden;
 
-    cur = room_special_door((int)s_rooms[s_room].type);
+    cur = room_special_door((int)s_rooms[cur_room].type);
     if (cur >= 0) return cur;
 
     target = game_room_door_target(tx, ty);
@@ -1497,6 +1597,17 @@ void game_room_request_full(int target, int entry_dir)
     game_room_request(target, entry_dir);
 }
 
+#if GAME_BOSS_DEBUG
+void game_room_debug_boss(void)
+{
+    if (s_boss_anchor < 0 || s_pending || s_rebuild_buf >= 0 || s_room == s_boss_anchor)
+        return;
+    s_debug_boss_entry = 1;
+    game_room_request_full(s_boss_anchor, -1);
+    bsp_printf("DEBUG: jump to boss room\r\n");
+}
+#endif
+
 void game_room_mark_used(int room)
 {
     if (room >= 0 && room < ROOM_COUNT) room_set(room, R_USED);
@@ -1558,7 +1669,7 @@ void game_room_new_run(void)
 
     room_layout_generate();
     s_room = s_start_room;
-    s_force_full = 1;                       /* 下一层的地图指针虽然相同，但必须整屏重铺 */
+    s_force_full = 1;                       /* 新一轮场景需要清理上一阶段的整屏残留 */
     s_rebuild_buf = -1;
     for (i = 0; i < ROOM_COUNT; ++i) {
         s_rooms[i].flags = 0;
@@ -1566,7 +1677,7 @@ void game_room_new_run(void)
     g.exit_active = 0;
     g.last_room = -1;
     g.last_door = -1;
-    g.exit_dirty = 2;                       /* 把旧 exit 擦掉（两块缓冲） */
+    g.exit_dirty = GAME_FB_COUNT;
     g.boss_wait_until = 0u;
     g.boss_drop_pending = 0;                /* 上一关没捡的 Boss 饰品不带进新一关 */
     g.item.active = 0;
@@ -1663,8 +1774,13 @@ void game_room_reset(void)
 
     room_layout_generate();
     s_room = s_start_room;
-    s_force_full = 1;                       /* 下一层的地图指针虽然相同，但必须整屏重铺 */
+    /* game_init()/game_restart() immediately initialize both framebuffers,
+     * so the first ordinary room transition can use the same-map path. */
+    s_force_full = 0;
     s_pending = 0;
+#if GAME_BOSS_DEBUG
+    s_debug_boss_entry = 0;
+#endif
     s_rebuild_buf = -1;
     s_lock = 0;
     s_entry_dir = -1;
@@ -1744,44 +1860,123 @@ int game_room_rebuild_pending(void)
     return s_rebuild_buf >= 0;
 }
 
-int game_room_finish_rebuild(void)
+#if GAME_PROFILE
+static int room_ticks_us(u32 ticks)
 {
-    static const u32 fb[2] = { FB_C, FB_D };
-    u32 cmd0;
-    int buf;
-
-    if (s_rebuild_buf < 0) return 1;
-    buf = (int)s_rebuild_buf;
-    cmd0 = gpu2d_getCmdDone();
-    gpu2d_exclusive_begin();
-    game_draw_floor(fb[buf]);
-    if (gpu2d_exclusive_end(cmd0 + game_floor_cmd_count()) != 0) return 0;
-    s_rebuild_buf = -1;
-    return 1;
+    u32 div = (u32)(BSP_CLINT_HZ / 1000000u);
+    return (int)(ticks / (div ? div : 1u));
 }
 
-#if GAME_PROFILE
-static int room_ticks_us(u32 ticks) { u32 div=(u32)(BSP_CLINT_HZ/1000000u); if(!div) div=1u; return (int)(ticks/div); }
+static void room_build_report(const char *stage)
+{
+    bsp_printf("ROOM %s: chunks=%d cmds=%d reused=%d max_cmds=%d max_work=%d us work=%d us elapsed=%d us\r\n",
+               stage, (int)s_rebuild_frames, (int)s_rebuild_cmds,
+               (int)game_floor_reused_cells(),
+               (int)s_rebuild_max_cmds, room_ticks_us(s_rebuild_max_ticks), room_ticks_us(s_rebuild_work_ticks),
+               room_ticks_us((u32)clint_getTime(BSP_CLINT) - s_rebuild_t0));
+}
 #endif
-/*  真正换房：状态 + 门/地图更新。  */
+
+int game_room_finish_rebuild(void)
+{
+    static const u32 fb[GAME_FB_COUNT] = { FB_C, FB_D
+#if GAME_TRIPLE_BUFFER
+        , FB_THIRD
+#endif
+    };
+    u32 window_t0;
+
+    if (s_rebuild_buf < 0) return 1;
+    window_t0 = game_ms();
+    for (;;) {
+        u32 cmd0 = gpu2d_getCmdDone(), cmds;
+        int buf = (int)s_rebuild_buf;
+        int row1 = s_rebuild_row + ROOM_BUILD_ROWS - 1;
+#if GAME_PROFILE
+        u32 work_t0 = (u32)clint_getTime(BSP_CLINT);
+#endif
+        if (row1 > s_rebuild_last) row1 = s_rebuild_last;
+
+        if (s_rebuild_phase == ROOM_BUILD_TILES)
+            cmds = game_draw_floor_rows(fb[buf], s_rebuild_row, row1);
+        else
+            cmds = game_draw_floor_finish(fb[buf]);
+
+        /* Each small batch still waits for completed writes. Consecutive
+         * batches share a work window; they no longer each consume a frame. */
+        if (gpu2d_waitCmdDone(cmd0 + cmds, 3000000u) != 0) {
+            bsp_printf("ROOM BUILD ERROR: GPU timeout\r\n");
+            return 0;
+        }
+#if GAME_PROFILE
+        {
+            u32 work = (u32)clint_getTime(BSP_CLINT) - work_t0;
+            ++s_rebuild_frames;
+            s_rebuild_cmds += cmds;
+            s_rebuild_work_ticks += work;
+            if (work > s_rebuild_max_ticks) s_rebuild_max_ticks = work;
+            if (cmds > s_rebuild_max_cmds) s_rebuild_max_cmds = cmds;
+        }
+#endif
+
+        if (s_rebuild_phase == ROOM_BUILD_FINISH) {
+#if GAME_BG_COPY
+            {
+                u32 bg0 = gpu2d_getCmdDone();
+                u32 bg_cmds = game_background_build(FB_BG);
+                u32 bg_target = bg0 + bg_cmds;
+                if (gpu2d_waitCmdDone(bg_target, 10000000u) != 0) {
+                    bsp_printf("ROOM BUILD ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
+                               bg0, bg_cmds, bg_target, gpu2d_getCmdDone());
+                    return 0;
+                }
+            }
+#endif
+            if (!game_present(fb[buf])) return 0;
+            g.front = buf;
+            s_rebuild_buf = -1;
+            /* Preserve each buffer's camera history. The inactive one still
+             * contains its old room and will be repaired before its next draw. */
+            g.hud_cam_x[buf] = g.cam_x;
+            g.hud_cam_y[buf] = g.cam_y;
+            game_flow_enter_room();
+            g.door_dirty = GAME_FB_COUNT;
+#if GAME_PROFILE
+            room_build_report("BUILD");
+#endif
+            return 1;
+        }
+
+        s_rebuild_row = row1 + 1;
+        if (s_rebuild_row > s_rebuild_last)
+            s_rebuild_phase = ROOM_BUILD_FINISH;
+        if ((u32)(game_ms() - window_t0) >= ROOM_BUILD_BUDGET_MS)
+            return game_wait_display();
+    }
+}
+
 int game_room_commit(void)
 {
-    static const u32 fb[2] = { FB_C, FB_D };
     int old_map_idx = game_world_map_index();   /* 同图判定：比池子下标，不比指针 */
+    int old_flip = game_room_flip();
     int target_map_key;
-    u32 cmd0;
     int same_layout;
 #if GAME_PROFILE
     u32 t0 = (u32)clint_getTime(BSP_CLINT);
-    u32 t_select, t_doors, t_draw, t_floor, t_present, t_flow;
+    u32 t_select, t_doors, t_flow;
 #endif
 
+    /* Damage must be captured before world selection, content resets, and
+     * clearing old_* records discard the only footprint of existing pixels. */
+    game_capture_floor_damage();
+    game_static_draw_reset();
     /*  死亡卡：记录“从哪间房来、上一间房往死亡房间开的门”。
      *  s_entry_dir 是新房间的入口方向，旧房间对应的出口方向是 ^2。  */
     g.last_room = game_room_id();
     g.last_door = (s_entry_dir < 0) ? -1 : ((s_entry_dir ^ 2) & 3);
 
     s_prev_layout = s_rooms[game_room_id()].layout;   /* 旧房间：它的道具要擦掉 */
+    s_prev_flip = (unsigned char)old_flip;
     s_prop_dirty  = 0u;                               /* 两块缓冲各标一次 */
 
     target_map_key = game_world_map_key_for_layout(s_rooms[s_target].layout);
@@ -1795,12 +1990,14 @@ int game_room_commit(void)
 #endif
     game_minimap_refresh();                 /* 进入新房间：刷新小地图 */
 
-    same_layout = (game_world_map_index() == old_map_idx);
+    same_layout = (game_world_map_index() == old_map_idx &&
+                   (!game_world_terrain() || old_flip == game_room_flip()));
     if (s_force_full) {
         /*  下一层：交互物 / exit / 旧精灵的 old_* 已被 reset，
          *  不能再走 same_layout 快速路径，否则旧像素没人擦。  */
         same_layout = 0;
         s_force_full = 0;
+        game_floor_reset();
     }
 
     doors_build();
@@ -1820,16 +2017,38 @@ int game_room_commit(void)
     if (s_entry_dir < 0) {
         g.x = (ARENA_X0 + ARENA_X1) / 2 - PW / 2;
         g.y = (ARENA_Y0 + ARENA_Y1) / 2 - PH / 2;
+#if GAME_BOSS_DEBUG
+        if (s_debug_boss_entry) g.y = ARENA_Y1 - PH - 64;
+#endif
     } else {
         place_at_door(s_entry_dir);
     }
+#if GAME_BOSS_DEBUG
+    s_debug_boss_entry = 0;
+#endif
 
     s_lock = 1;
     game_camera_snap();                 /* 换房后窗口立即对准新位置，不做过渡 */
 
     if (same_layout) {
-        s_prop_dirty = 2u;
-        g.door_dirty = 2;
+#if GAME_BG_COPY
+        /* The terrain is shared by normal rooms, but door ownership and
+         * special-door skins belong to the room graph. Rebuild the DDR
+         * background even when game_world_select() was skipped. */
+        {
+            u32 bg0 = gpu2d_getCmdDone();
+            u32 bg_cmds;
+            game_background_invalidate();
+            bg_cmds = game_background_build(FB_BG);
+            if (gpu2d_waitCmdDone(bg0 + bg_cmds, 10000000u) != 0) {
+                bsp_printf("ROOM BUILD ERROR: same-map background timeout base=%u cmds=%u done=%u\r\n",
+                           bg0, bg_cmds, gpu2d_getCmdDone());
+                return 0;
+            }
+        }
+#endif
+        s_prop_dirty = GAME_FB_COUNT;
+        g.door_dirty = GAME_FB_COUNT;
         game_flow_enter_room();
 #if GAME_PROFILE
         t_flow = (u32)clint_getTime(BSP_CLINT);
@@ -1842,45 +2061,30 @@ int game_room_commit(void)
 
     {
         int i;
-        for (i = 0; i < N_BULLETS; ++i) {
-            g.old_bullets[0][i].active = 0;
-            g.old_bullets[1][i].active = 0;
+        int b;
+        for (b = 0; b < GAME_FB_COUNT; ++b) {
+            for (i = 0; i < N_BULLETS; ++i) g.old_bullets[b][i].active = 0;
+            g.old_item[b].active = 0;
+            g.old_boss[b].active = 0;
+            g.old_player[b].active = 0;
         }
-        g.old_item[0].active = 0;   g.old_item[1].active = 0;
-        g.old_boss[0].active = 0;   g.old_boss[1].active = 0;
-        g.old_player[0].active = 0; g.old_player[1].active = 0;
     }
 
-    /*  先铺一块并上屏；翻转后另一块（新的后台）等下一帧由 finish_rebuild 补铺 */
-    s_rebuild_buf = (signed char)(g.front & 1);
-    cmd0 = gpu2d_getCmdDone();
-    gpu2d_exclusive_begin();
-    game_draw_floor(fb[g.front ^ 1]);
+    /* Commit only the data. Build in paced row batches while the old
+     * display base remains untouched until ROOM_BUILD_FINISH. */
+    s_rebuild_buf = (signed char)((g.front + 1) % GAME_FB_COUNT);
+    game_floor_prepare_begin(s_rebuild_buf == 0 ? FB_C :
+                             (s_rebuild_buf == 1 ? FB_D : FB_THIRD));
+    s_rebuild_phase = ROOM_BUILD_TILES;
+    game_floor_view_rows(&s_rebuild_row, &s_rebuild_last);
 #if GAME_PROFILE
-    t_draw = (u32)clint_getTime(BSP_CLINT);
-#endif
-    lineBuffer_setFullBase(game_view_fb(fb[g.front ^ 1]),
-                           game_view_fb(fb[g.front ^ 1]));
-    if (gpu2d_exclusive_end(cmd0 + game_floor_cmd_count()) != 0) return 0;
-#if GAME_PROFILE
-    t_floor = (u32)clint_getTime(BSP_CLINT);
-#endif
-    if (!game_present(fb[g.front ^ 1])) return 0;
-    g.front ^= 1;
-#if GAME_PROFILE
-    t_present = (u32)clint_getTime(BSP_CLINT);
-#endif
-    game_camera_synced();               /* 整屏已重铺，HUD 也在新位置画好了 */
-
-    g.door_dirty = 0;
-    game_flow_enter_room();
-#if GAME_PROFILE
-    t_flow = (u32)clint_getTime(BSP_CLINT);
-    bsp_printf("ROOM TIMING full: select=%d doors=%d draw=%d gpu=%d present=%d flow=%d total=%d us\r\n",
+    s_rebuild_t0 = t0;
+    s_rebuild_frames = s_rebuild_cmds = s_rebuild_work_ticks = 0u;
+    s_rebuild_max_ticks = s_rebuild_max_cmds = 0u;
+    bsp_printf("ROOM PREP: select=%d doors=%d total=%d us rows=%d\r\n",
                room_ticks_us(t_select - t0), room_ticks_us(t_doors - t_select),
-               room_ticks_us(t_draw - t_doors), room_ticks_us(t_floor - t_draw),
-               room_ticks_us(t_present - t_floor), room_ticks_us(t_flow - t_present),
-               room_ticks_us(t_flow - t0));
+               room_ticks_us((u32)clint_getTime(BSP_CLINT) - t0),
+               s_rebuild_last - s_rebuild_row + 1);
 #endif
     return 1;
 }

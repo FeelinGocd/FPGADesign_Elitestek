@@ -55,13 +55,32 @@ static int rect_hit(int ax, int ay, int aw, int ah,
            ay < by + bh && ay + ah > by;
 }
 
-/*  这只怪"脚下"那一格能不能站人（和玩家撞墙判定同一套：
- *  身体最下面一行、水平中心）。  */
-static int mob_foot_cell(int x, int y, int *tx, int *ty)
+/* 怪物和玩家统一使用精灵底部居中的 24×16 脚底占用矩形。 */
+static int mob_body_walkable(int x, int y)
 {
-    *tx = (x + MOB_W / 2) / TILE;
-    *ty = (y + MOB_H - 1) / TILE;
-    return game_room_cell_walkable(*tx, *ty);
+    int fx, fy, fw, fh;
+    game_creature_foot_rect(x, y, MOB_W, MOB_H, &fx, &fy, &fw, &fh);
+    return game_room_rect_walkable(fx, fy, fw, fh);
+}
+
+/* 逐像素检查怪物脚底矩形从旧位置到新位置的路径，避免跨墙/斜切墙角。 */
+static int mob_path_walkable(int old_x, int old_y, int new_x, int new_y)
+{
+    int dx = new_x - old_x;
+    int dy = new_y - old_y;
+    int span = (dx < 0 ? -dx : dx);
+    int ay = (dy < 0 ? -dy : dy);
+    int steps, i, x, y;
+
+    if (ay > span) span = ay;
+    steps = span;
+    if (steps < 1) steps = 1;
+    for (i = 1; i <= steps; ++i) {
+        x = old_x + (dx * i) / steps;
+        y = old_y + (dy * i) / steps;
+        if (!mob_body_walkable(x, y)) return 0;
+    }
+    return 1;
 }
 
 /*  随机挑一个【能站人】的格子当出生点（格左上角对齐，正好 32×32 一格）。
@@ -102,90 +121,55 @@ void game_mobs_reset(void)
         g.mobs[i].active = 0;
         g.mobs[i].hit_until = 0u;
     }
-    for (b = 0; b < 2; ++b)
+    for (b = 0; b < GAME_FB_COUNT; ++b)
         for (i = 0; i < N_MOBS; ++i) g.old_mob[b][i].active = 0;
     s_spawned = 0;
 }
 
-void game_mobs_spawn(int count)
+static void mob_init(mob_t *m, int x, int y, int type)
 {
-    int i, n = 0;
-
-    if (count <= 0) return;
-
-    for (i = 0; i < N_MOBS && n < count; ++i) {
-        mob_t *m = &g.mobs[i];
-        int sx = 0, sy = 0;
-
-        if (m->active) continue;
-        if (!mob_spawn_pos(&sx, &sy)) break;    /* 这间房挑不出能站的格子：不生成 */
-        m->active = 1;
-        m->type = MOB_SLIME;
-        m->hp = MOB_HP;
-        m->frame = 0;
-        m->x = (short)sx;
-        m->y = (short)sy;
-        m->move_next = game_ms() + 250u + (mob_rand() % 350u);
-        m->hop_until = 0u;
-        m->hit_until = 0u;
-        ++n;
-    }
-    s_spawned = 1;
-}
-
-void game_mobs_spawn_bug(int count)
-{
-    int i, n = 0;
-
-    if (count <= 0) return;
-
-    for (i = 0; i < N_MOBS && n < count; ++i) {
-        mob_t *m = &g.mobs[i];
-        int sx = 0, sy = 0;
-
-        if (m->active) continue;
-        if (!mob_spawn_pos(&sx, &sy)) break;    /* 同上 */
-        m->active = 1;
-        m->type = MOB_BUG;
-        m->hp = BUG_HP;
-        m->frame = 0;
-        m->x = (short)sx;
-        m->y = (short)sy;
+    m->active = 1;
+    m->type = (unsigned char)((type == MOB_BUG) ? MOB_BUG : MOB_SLIME);
+    m->hp = (m->type == MOB_BUG) ? BUG_HP : MOB_HP;
+    m->frame = 0;
+    m->x = (short)x;
+    m->y = (short)y;
+    if (m->type == MOB_BUG) {
         m->move_next = game_ms() + 100u + (mob_rand() % 200u);
         m->hop_until = game_ms() + BUG_FRAME_MS;
-        m->hit_until = 0u;
+    } else {
+        m->move_next = game_ms() + 250u + (mob_rand() % 350u);
+        m->hop_until = 0u;
+    }
+    m->hit_until = 0u;
+}
+
+static void mobs_spawn(int count, int type)
+{
+    int i, n = 0;
+    if (count <= 0) return;
+    for (i = 0; i < N_MOBS && n < count; ++i) {
+        int x, y;
+        if (g.mobs[i].active) continue;
+        if (!mob_spawn_pos(&x, &y)) break;
+        mob_init(&g.mobs[i], x, y, type);
         ++n;
     }
     s_spawned = 1;
 }
 
-/*  固定布局用：在像素坐标 (x,y) 放一只怪（type 用 OBJ_SLIME / OBJ_BUG 的编号）。
- *  和随机版共用同一套初始化，只是位置是设计好的（房间设计器里的对象层）。  */
+void game_mobs_spawn(int count)     { mobs_spawn(count, MOB_SLIME); }
+void game_mobs_spawn_bug(int count) { mobs_spawn(count, MOB_BUG); }
+
 int game_mobs_spawn_at(int x, int y, int type)
 {
     int i;
-
     if (x < ARENA_X0 || y < ARENA_Y0) return 0;
     if (x + MOB_W > ARENA_X1 || y + MOB_H > ARENA_Y1) return 0;
-
+    if (!mob_body_walkable(x, y)) return 0;
     for (i = 0; i < N_MOBS; ++i) {
-        mob_t *m = &g.mobs[i];
-
-        if (m->active) continue;
-        m->active = 1;
-        m->type = (unsigned char)((type == MOB_BUG) ? MOB_BUG : MOB_SLIME);
-        m->hp = (m->type == MOB_BUG) ? BUG_HP : MOB_HP;
-        m->frame = 0;
-        m->x = (short)x;
-        m->y = (short)y;
-        if (m->type == MOB_BUG) {
-            m->move_next = game_ms() + 100u + (mob_rand() % 200u);
-            m->hop_until = game_ms() + BUG_FRAME_MS;
-        } else {
-            m->move_next = game_ms() + 250u + (mob_rand() % 350u);
-            m->hop_until = 0u;
-        }
-        m->hit_until = 0u;
+        if (g.mobs[i].active) continue;
+        mob_init(&g.mobs[i], x, y, type);
         s_spawned = 1;
         return 1;
     }
@@ -231,7 +215,7 @@ void game_mobs_step(u32 now)
     for (i = 0; i < N_MOBS; ++i) {
         mob_t *m = &g.mobs[i];
         int px, py, mx, my, dx, dy;
-        int ox, oy, tx, ty;
+        int ox, oy;
 
         if (!m->active) continue;
         ox = m->x;                                  /* 这一步之前在哪（撞墙回退用） */
@@ -289,13 +273,14 @@ void game_mobs_step(u32 now)
             }
         }
 
-        /*  ★ 只认【能站人的格子】：怪不能钻进缺口/内墙（L 形房），也不能穿墙追人。
-         *    以前只夹竞技场矩形，L 房的怪会沿直线穿过缺口那面墙贴到玩家身上，
-         *    还隔着墙咬人（2026-10-24 抓到）。分轴回退 —— 贴着墙还能滑一步。  */
-        if (!mob_foot_cell(m->x, m->y, &tx, &ty)) {
-            if (mob_foot_cell(m->x, oy, &tx, &ty))      m->y = (short)oy;
-            else if (mob_foot_cell(ox, m->y, &tx, &ty)) m->x = (short)ox;
-            else { m->x = (short)ox; m->y = (short)oy; }
+        /* 只认脚底矩形：先走 X，再走 Y；两个轴分别扫掠，禁止斜切墙角。 */
+        {
+            int try_x = m->x;
+            int try_y = m->y;
+            if (!mob_path_walkable(ox, oy, try_x, oy)) try_x = ox;
+            if (!mob_path_walkable(try_x, oy, try_x, try_y)) try_y = oy;
+            m->x = (short)try_x;
+            m->y = (short)try_y;
         }
 
         /*  接触伤害：玩家【脚到眼睛】矩形 vs 小怪【大方块】  */
@@ -313,7 +298,7 @@ void game_mobs_step(u32 now)
 
         s_spawned = 0;
         game_coins_spawn(n);
-        g.door_dirty = 2;
+        g.door_dirty = GAME_FB_COUNT;
         bsp_printf("ROOM CLEAR: %d coins\r\n", n);
     }
 }

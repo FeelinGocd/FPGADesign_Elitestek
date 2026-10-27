@@ -15,10 +15,14 @@
 //==============================================================================
 #include "game.h"
 #include "CI_gpu2d.h"
+#if GAME_BOSS_SKILL_DIAG
+#include "bsp.h"
+#endif
 
 /*----------------------------------------------------------------------------*/
 /*  朝 angle 方向发一发（angle 是 1/64 圈的格号）  */
-static void shot_angle(const shot_t *s, const pattern_t *p, int angle, int speed)
+static void shot_angle(const shot_t *s, int angle, int speed,
+                       int motion, int mx, int my)
 {
     int a = angle & (ANGLE_STEPS - 1);
     /*  ★ 速度放大到 1/8 像素：整数速度时"接近水平"的方向只能取 0° 或 14°，
@@ -26,9 +30,8 @@ static void shot_angle(const shot_t *s, const pattern_t *p, int angle, int speed
     int vx8 = (g_sin_tab[(a + ANGLE_STEPS / 4) & 63] * speed * 8) >> 6;
     int vy8 = (g_sin_tab[a] * speed * 8) >> 6;
 
-    game_bullet_spawn8(s->mx - BW / 2, s->my - BH / 2, vx8, vy8,
-                       MOTION_LINE, s->type, s->enemy);
-    (void)p;
+    game_bullet_spawn8(mx - BW / 2, my - BH / 2, vx8, vy8,
+                       motion, s->type, s->enemy);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -67,8 +70,21 @@ static int eff_gap(const shot_t *s, const pattern_t *p)
 
 static int eff_rest(const shot_t *s, const pattern_t *p)
 {
+#if GAME_BOSS_PACING_TEST
+    if (s->set == g_boss_def.moves) return 2;
+#endif
     int v = (int)p->rest - (g.stage - 1) * 3 - s->frenzy * 14;
     return v < 16 ? 16 : v;
+}
+
+static int inter_volley_gap(const shot_t *s, const pattern_t *p)
+{
+#if GAME_BOSS_PACING_TEST
+    if (s->set == g_boss_def.moves) return 2;
+#else
+    (void)s;
+#endif
+    return p->motion == MOTION_PULSE ? (int)p->gap : INTER_VOLLEY_GAP;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -117,20 +133,43 @@ static void burst_next(shot_t *s)
     const pattern_t *p = cur_pattern(s);
     int a = s->burst_base + s->burst_idx * p->step;
 
-    shot_angle(s, p, a, p->speed);
-    if (p->twin)                                    /* 前后对射 */
-        shot_angle(s, p, a + ANGLE_STEPS / 2, p->speed2 ? p->speed2 : p->speed);
-
-    ++s->burst_idx;
-    --s->burst_left;
+    if (p->motion == MOTION_PULSE) {
+        int i, emit = p->count, mx = s->mx, my = s->my;
+        if (s->set == g_boss_def.moves) {
+            mx = g.boss_x + BOSS_W / 2;
+            my = g.boss_y + BOSS_H / 2;
+            if (s->move_idx == 0) {
+                int available = ENEMY_CAP - game_bullets_alive();
+                if (emit > available) emit = available;
+                if (emit < 0) emit = 0;
+            }
+        }
+        for (i = 0; i < emit; ++i)
+            shot_angle(s, s->burst_base +
+                       (s->move_idx == 0 ? i * ANGLE_STEPS / emit : i * p->step), p->speed,
+                       MOTION_PULSE, mx, my);
+#if GAME_BOSS_SKILL_DIAG
+        if (s->set == g_boss_def.moves && s->move_idx == 0 && s->rep_left == 0) {
+            game_dense_diag_start();
+        }
+#endif
+        s->burst_idx = p->count;
+        s->burst_left = 0;
+    } else {
+        shot_angle(s, a, p->speed, MOTION_LINE, s->mx, s->my);
+        if (p->twin)
+            shot_angle(s, a + ANGLE_STEPS / 2,
+                       p->speed2 ? p->speed2 : p->speed,
+                       MOTION_LINE, s->mx, s->my);
+        ++s->burst_idx;
+        --s->burst_left;
+    }
     s->burst_wait = eff_gap(s, p);
 }
 
 /*============================================================================*/
 void game_shot_init(shot_t *s, const move_set_t *set, int enemy, int type)
 {
-    int i;
-
     s->active = 0;
     s->enemy = enemy;
     s->type = type;
@@ -142,7 +181,6 @@ void game_shot_init(shot_t *s, const move_set_t *set, int enemy, int type)
     s->burst_left = 0; s->burst_wait = 0; s->burst_idx = 0; s->burst_base = 0;
     s->rep_left = 0; s->move_base = 0;
     s->tick = 0u;
-    (void)i;
 }
 
 void game_shot_stop(shot_t *s)
@@ -176,7 +214,8 @@ void game_shot_step(shot_t *s)
 
     /*  这一轮发完：同一招还有轮（repeat 没走完）⇒ 短间隔后接着转  */
     if (s->rep_left > 0) {
-        if (++s->tick >= INTER_VOLLEY_GAP) {
+        p = cur_pattern(s);
+        if (++s->tick >= (u32)inter_volley_gap(s, p)) {
             s->tick = 0u;
             start_volley(s);
         }
@@ -186,7 +225,7 @@ void game_shot_step(shot_t *s)
     /*  招式表说这一招要连播 ⇒ 接着转下一轮  */
     if (--s->move_times > 0) {
         p = cur_pattern(s);
-        if (++s->tick >= INTER_VOLLEY_GAP) {
+        if (++s->tick >= (u32)inter_volley_gap(s, p)) {
             s->tick = 0u;
             s->move_base = (s->move_base + p->spin * (p->repeat ? p->repeat : 1))
                          & (ANGLE_STEPS - 1);
@@ -202,7 +241,11 @@ void game_shot_step(shot_t *s)
         ++s->tick;
         return;
     }
+#if GAME_BOSS_PACING_TEST
+    if (s->set != g_boss_def.moves && game_enemy_bullets_alive() > WAVE_CLEAR_MAX) return;
+#else
     if (game_enemy_bullets_alive() > WAVE_CLEAR_MAX) return;
+#endif
 
     start_move(s, (s->move_idx + 1) % s->set->n_moves);
 }

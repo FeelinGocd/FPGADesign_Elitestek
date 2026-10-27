@@ -22,24 +22,23 @@
 
 /* 每方向一张序列表 + 每一拍要不要翻面，共用同一套"朝右"素材。 */
 /*  侧向跑现在是三帧（素材里多给了 walkRight_02_left，专门画了迈另一边腿的姿势）  */
-static const int side_seq[ANIM_FRAMES] = {
+static const unsigned short side_seq[ANIM_FRAMES] = {
     ASSET_bigfish_walkRight_00_standUp, ASSET_bigfish_walkRight_01_right,
     ASSET_bigfish_walkRight_02_left,    ASSET_bigfish_walkRight_01_right,
     ASSET_bigfish_walkRight_00_standUp
 };
-static const int down_seq[ANIM_FRAMES] = {
+static const unsigned short down_seq[ANIM_FRAMES] = {
     ASSET_bigfish_walkDown_00_standUp, ASSET_bigfish_walkDown_01_Right,
     ASSET_bigfish_walkDown_00_standUp, ASSET_bigfish_walkDown_01_Right,
     ASSET_bigfish_walkDown_00_standUp
 };
-static const int up_seq[ANIM_FRAMES] = {
+static const unsigned short up_seq[ANIM_FRAMES] = {
     ASSET_bigfish_walkUp_00_standUp, ASSET_bigfish_walkUp_01_right,
     ASSET_bigfish_walkUp_00_standUp, ASSET_bigfish_walkUp_01_right,
     ASSET_bigfish_walkUp_00_standUp
 };
 /* 第 4 拍翻一下，看着像脚换边 */
-static const u32 down_flip[ANIM_FRAMES] = { 0u, 0u, 0u, GPU2D_FLIP_X, 0u };
-static const u32 up_flip[ANIM_FRAMES]   = { 0u, 0u, 0u, GPU2D_FLIP_X, 0u };
+static const unsigned char vertical_flip[ANIM_FRAMES] = { 0u, 0u, 0u, GPU2D_FLIP_X, 0u };
 
 /*----------------------------------------------------------------------------*/
 /*----------------------------------------------------------------------------*/
@@ -118,18 +117,17 @@ void game_player_step(u32 keys, u32 now)
     }
 
     /*  ★ 统一规则：只有【地板 / 门洞】能走，墙和黑边都挡。
-     *    按【脚底那一格】逐格判定，分轴回退（可以贴着墙走）。
+     *    玩家移动占用脚底中心 24×16 矩形，分轴回退（可以贴着墙走）。
      *    普通房的矩形边界本来就和地板一致，所以行为不变；L 形房靠这条挡住缺口。  */
     {
-        int fx = (nx + PB_OFF_X + PB_W / 2) / TILE;
-        int fy = (ny + PB_OFF_Y + PB_H - 1) / TILE;   /* ★ 碰撞盒最下面那一行，不留 8 px */
-        int ox = (g.x + PB_OFF_X + PB_W / 2) / TILE;
-        int oy = (g.y + PB_OFF_Y + PB_H - 1) / TILE;
+        int fx, fy, fw, fh, ox, oy, ow, oh;
+        game_creature_foot_rect(nx, ny, PW, PH, &fx, &fy, &fw, &fh);
+        game_creature_foot_rect(g.x, g.y, PW, PH, &ox, &oy, &ow, &oh);
 
-        if (!game_room_cell_walkable(fx, fy)) {
-            if (game_room_cell_walkable(fx, oy)) {
+        if (!game_room_rect_walkable(fx, fy, fw, fh)) {
+            if (game_room_rect_walkable(fx, oy, fw, fh)) {
                 ny = g.y;
-            } else if (game_room_cell_walkable(ox, fy)) {
+            } else if (game_room_rect_walkable(ox, fy, fw, fh)) {
                 nx = g.x;
             } else {
                 nx = g.x;
@@ -140,10 +138,10 @@ void game_player_step(u32 keys, u32 now)
     }
 
     /*  ★ 可交互石头：石头在上挡脚底、石头在下挡最上一排（眼睛）；分轴处理，可以贴着石头滑动  */
-    if (game_stone_block(nx, ny)) {
-        if (!game_stone_block(nx, g.y)) {
+    if (game_stone_block_move(g.x, g.y, nx, ny)) {
+        if (!game_stone_block_move(g.x, g.y, nx, g.y)) {
             ny = g.y;
-        } else if (!game_stone_block(g.x, ny)) {
+        } else if (!game_stone_block_move(g.x, g.y, g.x, ny)) {
             nx = g.x;
         } else {
             nx = g.x;
@@ -231,8 +229,8 @@ void game_player_draw(u32 fb, u32 now, int buf)
     int ai;
     u32 flip;
 
-    if (g.dir == DOWN)    { ai = down_seq[step]; flip = down_flip[step]; }
-    else if (g.dir == UP) { ai = up_seq[step];   flip = up_flip[step]; }
+    if (g.dir == DOWN)    { ai = down_seq[step]; flip = vertical_flip[step]; }
+    else if (g.dir == UP) { ai = up_seq[step];   flip = vertical_flip[step]; }
     else {
         ai = side_seq[step];
         flip = (g.dir == LEFT) ? GPU2D_FLIP_X : 0u;

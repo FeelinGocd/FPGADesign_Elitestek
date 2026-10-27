@@ -141,11 +141,9 @@ static void item_add_slot(int type)
 {
     if (g.inv_n >= INV_MAX) return;
     g.inv[g.inv_n].type  = (unsigned char)type;
-    g.inv[g.inv_n].level = g_item_defs[type].level;
-    g.inv[g.inv_n].flags = g_item_defs[type].flags;
     ++g.inv_n;
     ++g.inv_rev;
-    item_rebuild_mask();
+    g.item_mask |= 1u << type;
 }
 
 /*  道具消失后，从剩余背包【整体重算】属性，而不是只减一项。
@@ -211,7 +209,7 @@ int game_item_try_death_save(u32 now)
     int i, death_room, target, entry;
 
     for (i = 0; i < g.inv_n; ++i) {
-        if (g.inv[i].flags & ITEM_FLAG_LIFE_PLUS) break;
+        if (g_item_defs[g.inv[i].type].flags & ITEM_FLAG_LIFE_PLUS) break;
     }
     if (i >= g.inv_n) return 0;
 
@@ -277,8 +275,7 @@ void game_item_spawn_random(int x, int y)
     g.item.active = 1;
     s_pickup_lock_until = 0u;
 
-    g.old_item[0].active = 0;       /* 新道具：不要把上一件的旧位置当脏区擦 */
-    g.old_item[1].active = 0;
+    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_item[b].active = 0;
 }
 
 /*  P 键：在玩家脚下生成一个道具；400 ms 内不拾取，避免刚生成就消失。  */
@@ -330,21 +327,30 @@ void game_item_try_pickup(u32 now)
 #define POOL_LABEL_X   (POOL_X + POOL_ICON - POOL_LABEL_W + 4)
 #define POOL_Y0        (POOL_LABEL_Y + 28)    /* 图标从标签下面开始 */
 
+/* Keep both buffers' old extents until each has erased a removed/expired icon. */
+static unsigned char s_pool_drawn_count[GAME_FB_COUNT];
+
 void game_item_pool_rect(int *x, int *y, int *w, int *h)
 {
+    int count = g.inv_n < POOL_MAX ? g.inv_n : POOL_MAX;
+    for (int b = 0; b < GAME_FB_COUNT; ++b)
+        if (count < (int)s_pool_drawn_count[b]) count = s_pool_drawn_count[b];
     *x = POOL_LABEL_X - 4;
     *y = POOL_LABEL_Y - 4;
     *w = (POOL_X + POOL_ICON + 4) - *x;
-    *h = POOL_Y0 - POOL_LABEL_Y + POOL_MAX * (POOL_ICON + POOL_GAP) + 10;
+    *h = count ? POOL_Y0 - *y + (count - 1) * (POOL_ICON + POOL_GAP)
+                 + POOL_ICON + 4 : 32;
 }
 
-static int s_pool_redraw[2];
-static unsigned s_pool_last[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+static int s_pool_redraw[GAME_FB_COUNT];
+static unsigned s_pool_last[GAME_FB_COUNT];
 
 void game_item_reset_cache(void)
 {
-    s_pool_last[0] = s_pool_last[1] = 0xFFFFFFFFu;
-    s_pool_redraw[0] = s_pool_redraw[1] = 1;
+    for (int b = 0; b < GAME_FB_COUNT; ++b) {
+        s_pool_last[b] = 0xFFFFFFFFu;
+        s_pool_redraw[b] = 1;
+    }
 }
 
 /*  整局重开：池子必须重画（否则重开后 ITEM 那一列永远是空的）  */
@@ -354,11 +360,11 @@ void game_item_invalidate(void)
 }
 
 /*  帧首：池子内容变了 → 标脏这一列（旧图标由脏区恢复擦掉）  */
-void game_item_prepare(unsigned char dirty[GRID_H][GRID_W], int buf)
+void game_item_prepare(dirty_map_t dirty, int buf)
 {
     int x, y, w, h;
 
-    if (buf < 0 || buf > 1) buf = 0;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
 
     /*  ★ 右侧道具池同样会被"按瓦片"的脏区恢复擦到：弹幕/角色/石头走到
      *    相机窗口右缘时，它们旧位置的脏瓦片会盖住池子。池子原本只在
@@ -385,9 +391,10 @@ void game_item_draw_pool(u32 fb, int buf, int full)
 {
     int i;
 
-    if (buf < 0 || buf > 1) buf = 0;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
     if (!full && !s_pool_redraw[buf]) return;
     s_pool_redraw[buf] = 0;
+    s_pool_drawn_count[buf] = (unsigned char)(g.inv_n < POOL_MAX ? g.inv_n : POOL_MAX);
 
     fb = game_view_fb(fb);
     game_hud_label_at(fb, POOL_LABEL_X, POOL_LABEL_Y, "ITEM");

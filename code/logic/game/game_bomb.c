@@ -101,8 +101,7 @@ static void bomb_air_burst(int cx, int cy, u32 now)
         p->rx     = 0;
         p->ry     = 0;
         p->until  = now + BOMB_AIR_MS;
-        g.old_bomb_air[0][i].active = 0;
-        g.old_bomb_air[1][i].active = 0;
+        for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_air[b][i].active = 0;
     }
 }
 
@@ -121,19 +120,18 @@ void game_bombs_reset(void)
         g.bombs[i].vy8 = 0;
         g.bombs[i].fuse_until = 0u;
         g.bombs[i].boom_until = 0u;
-        for (b = 0; b < 2; ++b) g.old_bomb[b][i].active = 0;
+        for (b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb[b][i].active = 0;
     }
     g.bomb_pickup.active = 0;
     g.bomb_pickup.room = -1;
-    g.old_bomb_pickup[0].active = 0;
-    g.old_bomb_pickup[1].active = 0;
+    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_pickup[b].active = 0;
     for (i = 0; i < N_BOMB_AIRS; ++i) {
         g.bomb_airs[i].active = 0;
         g.bomb_airs[i].room = -1;
         g.bomb_airs[i].vx8 = 0;
         g.bomb_airs[i].vy8 = 0;
         g.bomb_airs[i].until = 0u;
-        for (b = 0; b < 2; ++b) g.old_bomb_air[b][i].active = 0;
+        for (b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_air[b][i].active = 0;
     }
     g.bomb_count = 0;
 }
@@ -144,8 +142,7 @@ void game_bomb_spawn_pickup(int x, int y, int room)
     g.bomb_pickup.room = (signed char)room;
     g.bomb_pickup.x = (short)x;
     g.bomb_pickup.y = (short)y;
-    g.old_bomb_pickup[0].active = 0;
-    g.old_bomb_pickup[1].active = 0;
+    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_pickup[b].active = 0;
 }
 
 void game_bomb_pickup_try(u32 now)
@@ -192,8 +189,8 @@ int game_bomb_place(u32 now)
     b->fuse_until = now + BOMB_FUSE_MS;
     b->boom_until = 0u;
     --g.bomb_count;
-    g.old_bomb[0][i].active = 0;
-    g.old_bomb[1][i].active = 0;
+    for (int bidx = 0; bidx < GAME_FB_COUNT; ++bidx)
+        g.old_bomb[bidx][i].active = 0;
     bsp_printf("BOMB: placed, count=%d\r\n", g.bomb_count);
     return 1;
 }
@@ -453,11 +450,6 @@ static void bomb_draw_one(u32 fb, u32 now, int buf, int i)
                                  fb, (u32)b->x, (u32)b->y, BOMB_W, BOMB_H, 0u);
 }
 
-static void bomb_draw_entry(u32 fb, u32 now, int buf, int arg)
-{
-    bomb_draw_one(fb, now, buf, arg);
-}
-
 static void pickup_draw_one(u32 fb, u32 now, int buf, int arg)
 {
     const asset_desc_t *a;
@@ -473,11 +465,6 @@ static void pickup_draw_one(u32 fb, u32 now, int buf, int arg)
     a = &g_assets[ASSET_SpecialEffect_bomb];
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word,
         fb, (u32)p->x, (u32)p->y, BOMB_PICK_W, BOMB_PICK_H, 0u);
-}
-
-static void pickup_draw_entry(u32 fb, u32 now, int buf, int arg)
-{
-    pickup_draw_one(fb, now, buf, arg);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -501,12 +488,7 @@ static void air_draw_one(u32 fb, u32 now, int buf, int i)
         fb, (u32)p->x, (u32)p->y, BOMB_PICK_W, BOMB_PICK_H, 0u);
 }
 
-static void air_draw_entry(u32 fb, u32 now, int buf, int arg)
-{
-    air_draw_one(fb, now, buf, arg);
-}
-
-void game_bombs_prepare(unsigned char dirty[GRID_H][GRID_W], int buf)
+void game_bombs_prepare(dirty_map_t dirty, int buf)
 {
     int i;
 
@@ -530,12 +512,16 @@ void game_bombs_submit(void)
     int i;
 
     for (i = 0; i < N_BOMBS; ++i)
-        rl_push(ACTOR_Z(g.bombs[i].y + BOMB_H), bomb_draw_entry, i);
-    rl_push(ACTOR_Z(g.bomb_pickup.y + BOMB_H), pickup_draw_entry, 0);
+        rl_push(ACTOR_Z(g.bombs[i].y + BOMB_H), bomb_draw_one, i);
+    rl_push(ACTOR_Z(g.bomb_pickup.y + BOMB_H), pickup_draw_one, 0);
 
     /*  火花只在"还活着"或"上一帧还画着（要擦）"时入队，不白占渲染队列  */
     for (i = 0; i < N_BOMB_AIRS; ++i)
         if (g.bomb_airs[i].active ||
-            g.old_bomb_air[0][i].active || g.old_bomb_air[1][i].active)
-            rl_push(ACTOR_Z(g.bomb_airs[i].y + BOMB_PICK_H), air_draw_entry, i);
+            g.old_bomb_air[0][i].active || g.old_bomb_air[1][i].active
+#if GAME_TRIPLE_BUFFER
+            || g.old_bomb_air[2][i].active
+#endif
+           )
+            rl_push(ACTOR_Z(g.bomb_airs[i].y + BOMB_PICK_H), air_draw_one, i);
 }

@@ -25,7 +25,7 @@
 /* 一帧最多登记多少个元素：192 发子弹 + 56 金币 + 16 怪 + 石头/网/场景/HUD ≈ 350。
  * ★ 余量要留够：满员时 rl_push 丢后来的元素，虽然 HUD 现在最先入队，
  *   但子弹/金币被丢会造成实体闪烁。  */
-#define RL_MAX   400
+#define RL_MAX   512
 
 /* 画法：fb = 后台帧缓存, now = 毫秒时钟, buf = 0/1（双缓冲下标）, arg = 元素下标 */
 typedef void (*rl_draw_fn)(u32 fb, u32 now, int buf, int arg);
@@ -33,7 +33,7 @@ typedef void (*rl_draw_fn)(u32 fb, u32 now, int buf, int arg);
 /** @brief 开始一帧：清空队列（必须在所有 rl_push 之前调一次） */
 void rl_begin(void);
 
-/** @brief 登记一个元素。z 越大越靠上；同 z 时先 push 的在下面。
+/** @brief 登记一个元素。z 范围 -32768..32767；同 z 时先 push 的在下面。
  *  @return 1 = 收下, 0 = 队列满（这一帧这个元素不画，计数 +1） */
 int  rl_push(int z, rl_draw_fn fn, int arg);
 

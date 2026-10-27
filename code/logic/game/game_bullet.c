@@ -8,7 +8,7 @@
 //    · game_bullets_submit()   : 把每颗弹登记进渲染队列（z = 底边 y，和角色/Boss 同一把尺子）
 //  上一级是谁  : game/game_main.c（每帧）、game_player.c / game_boss.c（生成）
 //  接口契约    :
-//    · 固定 192 槽的池子，不开动态内存；其中 32 槽永远留给玩家（PLAYER_RESERVE）
+//    · 固定 N_BULLETS 槽的池子，不开动态内存；其中 PLAYER_RESERVE 槽留给玩家
 //    · ★ 判定只用【子弹中心点】× 【脚到眼睛的身体矩形】，不用整张贴图包围盒
 //    · 素材只有"朝右"一套，四个朝向靠 镜像 / ROT90 / ROT90+MY 拼出来
 //  为什么这么做:
@@ -19,13 +19,31 @@
 #include "game.h"
 #include "CI_gpu2d.h"
 
-/*  池子管理：不扫 192 槽。
+/*  池子管理：分配时不扫描整池。
  *    · s_alive / s_enemy_alive 是权威计数，生成/释放时维护；
  *    · s_free 是空闲槽栈，生成 O(1)，释放时压回去。  */
 static int s_alive;
 static int s_enemy_alive;
+#if GAME_BOSS_SKILL_DIAG
+static u32 s_enemy_spawn_rejects;
+u32 game_enemy_spawn_rejects(void) { return s_enemy_spawn_rejects; }
+#endif
 static int s_free_n;
-static unsigned char s_free[N_BULLETS];
+static unsigned short s_free[N_BULLETS];
+#if GAME_BULLET_DIRTY_BOUNDS
+/* Sprite kind (0=A, 1=B, 2=C) and axis (bit 2=90-degree rotation) for the
+ * pixels retained in each framebuffer. Stored at draw time so a reused slot
+ * cannot make the old footprint depend on its new bullet type or direction. */
+static unsigned char s_old_dirty_kind[GAME_FB_COUNT][N_BULLETS];
+static const unsigned char s_dirty_bounds[6][4] = {
+    {4, 4, 24, 25}, {3, 4, 26, 24}, /* A: horizontal / vertical */
+    {7, 8, 18, 21}, {7, 8, 18, 21}, /* B never rotates */
+    {1, 6, 30, 21}, {5, 1, 22, 30}  /* C: horizontal / vertical */
+};
+#endif
+static u32 s_draw_alpha;
+static u32 s_draw_tint_enemy;
+static u32 s_draw_tint_player;
 
 static int magic_owned(void);
 
@@ -43,12 +61,12 @@ static void bullet_release(int i)
     b->active = 0;
     --s_alive;
     if (b->enemy) --s_enemy_alive;
-    if (s_free_n < N_BULLETS) s_free[s_free_n++] = (unsigned char)i;
+    if (s_free_n < N_BULLETS) s_free[s_free_n++] = (unsigned short)i;
 }
 
 /* 朝向 → 翻转位（朝右是原图）。辣椒那张美术要求"不转"，单独一套。 */
-static const u32 dir_flip[4]       = { 0u, GPU2D_FLIP_X, GPU2D_ROT90, GPU2D_ROT90 | GPU2D_FLIP_Y };
-static const u32 dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
+static const unsigned char dir_flip[4]       = { 0u, GPU2D_FLIP_X, GPU2D_ROT90, GPU2D_ROT90 | GPU2D_FLIP_Y };
+static const unsigned char dir_flip_noRot[4] = { 0u, GPU2D_FLIP_X, 0u, 0u };
 
 /*----------------------------------------------------------------------------*/
 static int bullet_asset(const bullet_t *b)
@@ -225,17 +243,23 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
     int i;
     bullet_t *b;
 
-    /* 敌弹上限：既给玩家留槽（不哑火），也压住每帧命令数（一颗弹≈3 条命令）。
-       关卡越往后上限越高，但封顶 160 —— 再多帧率就压不住了。 */
+    /* 敌弹占用达到上限后保留 PLAYER_RESERVE 槽给玩家。 */
     if (enemy) {
-        int cap = ENEMY_CAP + (g.stage - 1) * 10;
-
-        if (cap > 160) cap = 160;
-        if (s_alive >= cap) return -1;
+        if (s_alive >= ENEMY_CAP) {
+#if GAME_BOSS_SKILL_DIAG
+            ++s_enemy_spawn_rejects;
+#endif
+            return -1;
+        }
     }
 
     i = bullet_alloc();
-    if (i < 0) return -1;
+    if (i < 0) {
+#if GAME_BOSS_SKILL_DIAG
+        if (enemy) ++s_enemy_spawn_rejects;
+#endif
+        return -1;
+    }
     b = &g.bullets[i];
     b->x = x;
     b->y = y;
@@ -359,6 +383,20 @@ static void bullet_move(bullet_t *b)
         b->y += (g_sin_tab[b->age] * b->vx) >> 6;
         break;
 
+    case MOTION_PULSE: {
+        /* One 64-step cycle: slow from full speed to half, then accelerate. */
+        static const unsigned char scale8[8] = { 8, 7, 6, 5, 4, 5, 6, 7 };
+        int scale = scale8[(b->age >> 3) & 7u];
+        b->rx += (b->vx8 * scale) / 8;
+        b->ry += (b->vy8 * scale) / 8;
+        b->x += b->rx >> 3;
+        b->y += b->ry >> 3;
+        b->rx -= (b->rx >> 3) * 8;
+        b->ry -= (b->ry >> 3) * 8;
+        ++b->age;
+        break;
+    }
+
     case MOTION_HOME:
         /* 追踪：每 8 帧重新对准玩家，但【只走上下左右】四个方向 */
         if ((b->age & 7) == 0) {
@@ -404,6 +442,7 @@ static void bullet_move(bullet_t *b)
 void game_bullets_step(u32 now)
 {
     int i;
+    int stone_collision = game_stone_has_blockers();
 
     for (i = 0; i < N_BULLETS; ++i) {
         bullet_t *b;
@@ -429,7 +468,7 @@ void game_bullets_step(u32 now)
         cy = b->y + BH / 2;
 
         /*  可交互石头：玩家弹 / Boss 弹撞上都直接消失；石头本身不可破坏  */
-        if (game_stone_hit_at(cx, cy)) {
+        if (stone_collision && game_stone_hit_at(cx, cy)) {
             bullet_release(i);
             continue;
         }
@@ -481,6 +520,34 @@ void game_bullets_sync(int buf)
         g.old_bullets[buf][i].active = g.bullets[i].active;
         g.old_bullets[buf][i].x = g.bullets[i].x;
         g.old_bullets[buf][i].y = g.bullets[i].y;
+#if GAME_BULLET_DIRTY_BOUNDS
+        if (g.bullets[i].active) {
+            const bullet_t *b = &g.bullets[i];
+            int ai = bullet_asset(b);
+            int ax = b->vx < 0 ? -b->vx : b->vx;
+            int ay = b->vy < 0 ? -b->vy : b->vy;
+            int kind = ai == ASSET_bullet_type_C_Uranus ? 2 :
+                       ai == ASSET_bullet_type_B_chili_NOTROT90 ? 1 : 0;
+            s_old_dirty_kind[buf][i] = (unsigned char)(kind * 2 + (ay > ax && kind != 1));
+        }
+#endif
+    }
+}
+
+void game_bullets_mark_old(dirty_map_t dirty, int buf)
+{
+    int i;
+    for (i = 0; i < N_BULLETS; ++i) {
+        const old_t *b = &g.old_bullets[buf][i];
+        if (!b->active) continue;
+#if GAME_BULLET_DIRTY_BOUNDS
+        {
+            const unsigned char *r = s_dirty_bounds[s_old_dirty_kind[buf][i]];
+            game_mark_dirty(dirty, b->x + r[0], b->y + r[1], r[2], r[3]);
+        }
+#else
+        game_mark_dirty(dirty, b->x, b->y, BW, BH);
+#endif
     }
 }
 
@@ -498,15 +565,57 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
      *     ★ bullet_type_A_enemy 已删除，敌方弹的素材就是 bullet_asset() 返回的
      *       A_base（ai），这里不再另外写死一个 ASSET_ 名字。  */
     if (b->enemy) {
+#if GAME_BOSS_BULLET_SWEEP && GAME_BOSS_SWEEP_OPAQUE == 1
+        CI_gpu2d_spriteFlipCK(g_assets[ai].base_word,
+                              g_assets[ai].stride_word,
+                              fb, (u32)b->x, (u32)b->y, BW, BH,
+                              bullet_flip(b, ai));
+#elif (GAME_BOSS_BULLET_SWEEP && GAME_BOSS_SWEEP_OPAQUE == 2) || GAME_BULLET_FAST_CKEY
+        CI_gpu2d_spriteTintCKRect(g_assets[ai].base_word,
+                                  g_assets[ai].stride_word,
+                                  fb, (u32)b->x, (u32)b->y, BW, BH,
+                                  0x00FF2020u, 170u, 1u,
+                                  bullet_flip(b, ai));
+#elif GAME_BULLET_TINT
+        u32 src = g_assets[ai].base_word;
+        u32 dx = (u32)b->x, dy = (u32)b->y;
+        u32 w = BW, h = BH;
+#if GAME_BULLET_ALPHA_CROP
+        /* A_base has alpha only in source [4,28) x [4,29).  Its four
+         * directions keep the visible region anchored at sprite (4,4),
+         * including the ROT90 paths.  Keep the 32x32 collision/dirty box. */
+        src += 4u * g_assets[ai].stride_word + 1u; /* 4 rows + 4 pixels */
+        dx += 4u;
+        dy += 4u;
+        w = 24u;
+        h = 25u;
+#endif
+        ++s_draw_tint_enemy;
         CI_gpu2d_spriteAlphaTintRect(
-            g_assets[ai].base_word,
+            src,
             g_assets[ai].stride_word,
-            fb, (u32)b->x, (u32)b->y, BW, BH,
+            fb, dx, dy, w, h,
             0x00FF2020u,   /* 柔和红：= 旧预染弹 bullet_type_A_enemy 的配色 */
             170u,          /* 浓度 170/255：保留 base 的明暗层次，不会糊成一片纯红 */
             1u,            /* 插值染色 */
             bullet_flip(b, ai));
+    #else
+        u32 src = g_assets[ai].base_word;
+        u32 dx = (u32)b->x, dy = (u32)b->y;
+        u32 w = BW, h = BH;
+#if GAME_BULLET_ALPHA_CROP
+        src += 4u * g_assets[ai].stride_word + 1u;
+        dx += 4u;
+        dy += 4u;
+        w = 24u;
+        h = 25u;
+#endif
+        ++s_draw_alpha;
+        CI_gpu2d_spriteAlphaRect(src, g_assets[ai].stride_word,
+            fb, dx, dy, w, h, bullet_flip(b, ai));
+#endif
     } else if (magic_owned()) {
+        ++s_draw_tint_player;
         /*  MagicCard：所有玩家弹幕统一淡紫色。  */
         CI_gpu2d_spriteAlphaTintRect(
             g_assets[ai].base_word,
@@ -517,6 +626,7 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
             1u,
             bullet_flip(b, ai));
     } else {
+        ++s_draw_alpha;
         CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
             fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
     }
@@ -546,12 +656,34 @@ int game_bullets_alive(void)
     return s_alive;
 }
 
+void game_bullet_draw_stats(u32 *alpha, u32 *tint_enemy, u32 *tint_player)
+{
+    if (alpha) *alpha = s_draw_alpha;
+    if (tint_enemy) *tint_enemy = s_draw_tint_enemy;
+    if (tint_player) *tint_player = s_draw_tint_player;
+}
+
 /*----------------------------------------------------------------------------*/
 /*  只数敌方弹 —— "上一招清完了没有"要用它（玩家自己的弹一直在飞）  */
 int game_enemy_bullets_alive(void)
 {
     return s_enemy_alive;
 }
+
+#if GAME_BOSS_SKILL_DIAG
+int game_enemy_bullets_visible(void)
+{
+    int i, n = 0;
+    for (i = 0; i < N_BULLETS; ++i) {
+        const bullet_t *b = &g.bullets[i];
+        if (!b->active || !b->enemy) continue;
+        if (b->x < g.cam_x || b->x + BW > g.cam_x + SCR_W ||
+            b->y < g.cam_y || b->y + BH > g.cam_y + SCR_H) continue;
+        ++n;
+    }
+    return n;
+}
+#endif
 
 /*----------------------------------------------------------------------------*/
 void game_bullets_clear(void)
@@ -563,7 +695,7 @@ void game_bullets_clear(void)
     s_alive = 0;
     s_enemy_alive = 0;
     s_free_n = 0;
-    for (i = 0; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned char)i;
+    for (i = 0; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -606,5 +738,70 @@ void game_bullets_perf_fill(int count)
 
     /* active 是 0..n-1，空闲槽从 n 开始 */
     s_free_n = 0;
-    for (i = n; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned char)i;
+    for (i = n; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
 }
+
+#if GAME_BOSS_BULLET_SWEEP
+/* Sweep all physical slots, including the 32 normally reserved for player
+ * shots. Keep every bullet visible and moving for a constant render load. */
+void game_bullets_stress_fill(int count)
+{
+    int i;
+    if (count < 0) count = 0;
+    if (count > N_BULLETS) count = N_BULLETS;
+    game_bullets_clear();
+    for (i = 0; i < count; ++i) {
+        bullet_t *b = &g.bullets[i];
+        b->x = g.cam_x + 48 + (i % 16) * 72;
+        b->y = g.cam_y + 72 + (i / 16) * 36;
+        b->vx = (i & 1) ? 2 : -2;
+        b->vy = (i & 2) ? 1 : -1;
+        b->mode = MOTION_LINE;
+        b->type = BULLET_A;
+        b->enemy = 1;
+        b->use8 = 0;
+        b->age = 0;
+        b->life = 0;
+        b->range = 0;
+        b->active = 1;
+    }
+    s_alive = count;
+    s_enemy_alive = count;
+    s_free_n = 0;
+    for (i = count; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
+}
+
+void game_bullets_stress_step(void)
+{
+    int i;
+    int x0 = g.cam_x + 24, x1 = g.cam_x + SCR_W - BW - 24;
+    int y0 = g.cam_y + 56, y1 = g.cam_y + SCR_H - BH - 24;
+    for (i = 0; i < N_BULLETS; ++i) {
+        bullet_t *b = &g.bullets[i];
+        if (!b->active) continue;
+        b->x += b->vx;
+        b->y += b->vy;
+        if (b->x < x0) { b->x = x0; if (b->vx < 0) b->vx = -b->vx; }
+        if (b->x > x1) { b->x = x1; if (b->vx > 0) b->vx = -b->vx; }
+        if (b->y < y0) { b->y = y0; if (b->vy < 0) b->vy = -b->vy; }
+        if (b->y > y1) { b->y = y1; if (b->vy > 0) b->vy = -b->vy; }
+    }
+}
+
+int game_bullets_stress_visible(void)
+{
+    int i, visible = 0;
+    for (i = 0; i < N_BULLETS; ++i) {
+        const bullet_t *b = &g.bullets[i];
+        if (!b->active) continue;
+        /* Require the whole sprite inside both the camera and world, not
+         * merely an intersection as game_visible_world() does. */
+        if (b->x < g.cam_x || b->x + BW > g.cam_x + SCR_W ||
+            b->y < g.cam_y || b->y + BH > g.cam_y + SCR_H) continue;
+        if (b->x < 0 || b->y < 0 ||
+            b->x + BW > game_world_w() || b->y + BH > game_world_h()) continue;
+        ++visible;
+    }
+    return visible;
+}
+#endif
