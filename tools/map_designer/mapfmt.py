@@ -67,11 +67,13 @@ CANVAS_W = 1280                 # 720p 参考框（只是参考，不参与校�
 CANVAS_H = 720
 BAND = 2                        # 墙带厚度（格）
 
-ALLOWED = frozenset(".BWDHKCXYZS")
-#  JSON 存档的数字笔刷编号：0..7 = 面板顺序，8..10 = 角块翻转 X/Y/Z
+#  ★ 小写 = 隐藏房皮肤：w 隐藏房墙 / c,x,y,z 隐藏房角块（和 C/X/Y/Z 一一对应）
+ALLOWED = frozenset(".BWDHKCXYZS" + "wcxyz")
+#  JSON 存档的数字笔刷编号：0..7 = 面板顺序，8..10 = 角块翻转 X/Y/Z，11..15 = 隐藏房皮肤
 TILE_INDEX = {
     ".": 0, "B": 1, "W": 2, "D": 3, "C": 4, "H": 5, "K": 6, "S": 7,
     "X": 8, "Y": 9, "Z": 10,
+    "w": 11, "c": 12, "x": 13, "y": 14, "z": 15,
 }
 TILE_CHAR = {value: key for key, value in TILE_INDEX.items()}
 DOOR_CHARS = frozenset("DH")      # D = 普通门，H = 隐藏门（炸弹炸开才通）
@@ -115,11 +117,12 @@ OBJECT_LIMITS = {"mob": 16, "web": 40, "blocker": 112}
 #  找不到的角色会在页面上显示成占位色块，并在 /api/assets 的 missing 里列出来。
 #  ★ 放在 mapfmt 里是为了能热重载：改这张表不用重启 serve.py。
 ASSET_ROLES = (
-    ("wood", "木地板", ("minecraft_wood",)),
-    ("bedrock", "基岩地板", ("minecraft_bedrock",)),
-    ("stone_floor", "石头地板", ("minecraft_stone",)),
-    ("wall", "木墙", ("minecraft_wood",)),
-    ("corner", "角块", ("background_corner",)),
+    ("wood", "木地板", ("background_floor_wood",)),
+    ("hidden_floor", "隐藏房地板", ("background_floor_hidden",)),
+    ("wall", "木墙", ("background_wall_wood",)),
+    ("hidden_wall", "隐藏房墙", ("background_wall_hidden",)),
+    ("corner", "角块", ("background_corner_wood",)),
+    ("hidden_corner", "隐藏房角块", ("background_corner_hidden",)),
     ("door", "门", ("background_door_normal", "background_door")),
     ("slime", "史莱姆", ("mobs_slime",)),
     ("bug", "甲虫", ("mobs_bug",)),
@@ -128,20 +131,19 @@ ASSET_ROLES = (
     ("crate", "板条箱", ("background_interact_crate",)),
     ("box", "木箱", ("background_interact_box_close", "background_interact_box")),
     ("exit", "出口", ("background_interact_eixt", "background_interact_exit")),
-    #  文件名实际是 hide**Enterance**（拼写不同），两种都认
-    ("hide", "隐藏入口", ("background_interact_hideentrance", "background_interact_hideenterance")),
+    ("hide", "隐藏入口", ("background_interact_hidden",)),
 )
 
 #  地图模板：只是"起手骨架"，按【形状】分 —— 设计器不认识 start / item / boss 这些
 #  玩法概念，那些是固件 g_kinds[] 的事。所有房间共用同一个 map 池，一张图就是一张图。
-#    · template_1x1：40×23 现场生成（地板默认 S 石头；纯 B 版才是固件 1×1 框架）
+#    · template_1x1：40×23 现场生成（地板默认 B 木地板，和固件 1×1 框架一致）
 #    · template_L / template_2x2：整份地图存成 JSON（templates/ 下，和房间同一套格式），
 #      想加一种形状 = 丢一个 JSON 进去、在这里登记一行。
 TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "template_1x1": {"label": "1×1（40×23）", "cols": 40, "rows": 23, "arena": (9, 4, 31, 16),
-                     "corner": 1, "band_rot": (0, 1, 2, 3), "floor": "S"},
-    "template_L":   {"label": "L 形（45×35）", "file": "templates/template_L.json"},
-    "template_2x2": {"label": "2×2（45×35）", "file": "templates/template_2x2.json"},
+    "template_1x1": {"label": "1×1（40×23）", "file": "maps/1x1.json"},
+    "template_L":   {"label": "L 形·左下空缺（45×35）", "file": "maps/L.json"},
+    "template_2x2": {"label": "2×2（45×35）", "file": "maps/2x2.json"},
+    "template_hidden": {"label": "隐藏房（40×23）", "file": "maps/hidden.json"},
 }
 
 #  老名字（脚本/旧习惯）→ 新模板名
@@ -210,6 +212,7 @@ class RoomMap:
     rot: List[List[int]]
     name: str = DEFAULT_NAME
     objects: List[MapObject] = field(default_factory=list)
+    layout_id: Optional[int] = None      # 房型内部的稳定设计编号；不是 C 数组下标
 
     @property
     def cols(self) -> int:
@@ -801,18 +804,18 @@ def frame_tile(frame: Dict[str, Any], x: int, y: int) -> str:
             continue
         dx, dy, px, py = _door_cells(frame, side)
         if (x, y) == (dx, dy):
-            return "D"
-        if (x, y) == (px, py):
+            return frame.get("door_ch") or "D"
+        if (x, y) == (px, py) and (frame.get("door_ch") or "D") != "H":
             return "."
     if ax0 <= x <= ax1 and ay0 <= y <= ay1:
-        return "B"
+        return frame.get("floor_ch") or "B"
     if not (ax0 - 2 <= x <= ax1 + 2 and ay0 - 2 <= y <= ay1 + 2):
         return "."
     if frame.get("corner"):
         ch = _corner_char(frame, x, y)
         if ch:
             return ch
-    return "W"
+    return frame.get("wall_ch") or "W"
 
 
 def frame_rot(frame: Dict[str, Any], x: int, y: int) -> int:
@@ -828,7 +831,7 @@ def frame_rot(frame: Dict[str, Any], x: int, y: int) -> int:
         dx, dy, px, py = _door_cells(frame, side)
         if (x, y) == (dx, dy):
             return side
-        if (x, y) == (px, py):
+        if (x, y) == (px, py) and (frame.get("door_ch") or "D") != "H":
             return 0
     if ax0 <= x <= ax1 and ay0 <= y <= ay1:
         return 0
@@ -856,36 +859,48 @@ def frame_rot(frame: Dict[str, Any], x: int, y: int) -> int:
 
 
 def _door_cells(frame: Dict[str, Any], side: int) -> Tuple[int, int, int, int]:
+    """门的 (门格, 第二格)。
+
+    ★ 普通门 'D' 占两格；隐藏门 'H' 只占【靠竞技场那一格】（1 格），
+      外侧那格是隐藏房墙 —— 所以 H 的门格总是在内圈，第二格是外圈（不画门洞）。
+    """
     ax0, ay0, ax1, ay1 = frame["arena"]
     doors = frame["doors"]
+    one = (frame.get("door_ch") == "H")
     if side == 0:
-        return (doors[0], ay0 - 2, doors[0], ay0 - 1)
+        dy = ay0 - 1 if one else ay0 - 2
+        py = ay0 - 2 if one else ay0 - 1
+        return (doors[0], dy, doors[0], py)
     if side == 1:
         return (ax1 + 1, doors[1], ax1 + 2, doors[1])
     if side == 2:
         return (doors[2], ay1 + 1, doors[2], ay1 + 2)
-    return (ax0 - 2, doors[3], ax0 - 1, doors[3])
+    dx = ax0 - 1 if one else ax0 - 2
+    px = ax0 - 2 if one else ax0 - 1
+    return (dx, doors[3], px, doors[3])
 
 
 def _corner_char(frame: Dict[str, Any], x: int, y: int) -> Optional[str]:
     ax0, ay0, ax1, ay1 = frame["arena"]
     ox0, oy0, ox1, oy1 = ax0 - 2, ay0 - 2, ax1 + 2, ay1 + 2
     ix0, iy0, ix1, iy1 = ax0 - 1, ay0 - 1, ax1 + 1, ay1 + 1
+    ch = None
     if y == oy0:
-        return "X" if x == ox0 else ("C" if x == ox1 else None)
-    if y == oy1:
-        return "Z" if x == ox0 else ("Y" if x == ox1 else None)
-    if y == iy0:
-        return "X" if x == ix0 else ("C" if x == ix1 else None)
-    if y == iy1:
-        return "Z" if x == ix0 else ("Y" if x == ix1 else None)
-    return None
+        ch = "X" if x == ox0 else ("C" if x == ox1 else None)
+    elif y == oy1:
+        ch = "Z" if x == ox0 else ("Y" if x == ox1 else None)
+    elif y == iy0:
+        ch = "X" if x == ix0 else ("C" if x == ix1 else None)
+    elif y == iy1:
+        ch = "Z" if x == ix0 else ("Y" if x == ix1 else None)
+    return ch.lower() if ch and frame.get("corner_ch") == "c" else ch
 
 
 #  地板/门的"等价字符"：几何一样，只是换了皮肤（见 game_frame.h 的 floor_ch/door_ch）。
 #  ★ 判框架时先把它们折回默认字符，再逐格比；比完把实际字符记进 frame["floor_ch"]/["door_ch"]。
 _FLOOR_EQUIV = {"K": "B", "S": "B"}
-_DOOR_EQUIV = {"H": "D"}
+_WALL_EQUIV = {"w": "W"}
+_CORNER_EQUIV = {"c": "C", "x": "X", "y": "Y", "z": "Z"}
 
 
 def detect_frame(room: RoomMap) -> Optional[Dict[str, Any]]:
@@ -903,7 +918,9 @@ def detect_frame(room: RoomMap) -> Optional[Dict[str, Any]]:
     cols, height = room.cols, room.height
 
     floor_ch = ""
+    wall_ch = ""
     door_ch = ""
+    corner_ch = ""
     norm_rows: List[List[str]] = []
     for row in room.rows:
         nr: List[str] = []
@@ -911,18 +928,26 @@ def detect_frame(room: RoomMap) -> Optional[Dict[str, Any]]:
             if ch in _FLOOR_EQUIV:
                 floor_ch = ch
                 nr.append(_FLOOR_EQUIV[ch])
-            elif ch in _DOOR_EQUIV:
-                door_ch = ch
-                nr.append(_DOOR_EQUIV[ch])
+            elif ch == "H":
+                door_ch = ch          # 隐藏门只占 1 格，几何和普通门不同，不做字符归一
+                nr.append(ch)
+            elif ch in _WALL_EQUIV:
+                wall_ch = ch
+                nr.append(_WALL_EQUIV[ch])
+            elif ch in _CORNER_EQUIV:
+                corner_ch = "c"          # 只记家族；具体翻转由字符本身（c/x/y/z）决定
+                nr.append(_CORNER_EQUIV[ch])
             else:
                 nr.append(ch)
         norm_rows.append(nr)
-    room = RoomMap(rows=norm_rows, rot=room.rot, name=room.name, objects=room.objects)
+    # Keep the original skin when comparing against frame_tile(). Normalized
+    # characters are only used to infer the common geometry below.
+    normalized = RoomMap(rows=norm_rows, rot=room.rot, name=room.name, objects=room.objects)
 
     doors = [FRAME_DOOR_NONE] * 4
     for y in range(height):
         for x in range(cols):
-            if room.rows[y][x] != "D":
+            if room.rows[y][x] not in DOOR_CHARS:
                 continue
             sides = wall_sides(room, x, y)
             if len(sides) != 1:
@@ -930,12 +955,12 @@ def detect_frame(room: RoomMap) -> Optional[Dict[str, Any]]:
             side = {"N": 0, "E": 1, "S": 2, "W": 3}[sides[0]]
             doors[side] = x if side in (0, 2) else y
 
-    corner = 1 if any(ch in "CXYZ" for row in room.rows for ch in row) else 0
+    corner = 1 if any(ch in "CXYZ" for row in normalized.rows for ch in row) else 0
     band_rot = [0, 0, 0, 0]
     found = [False, False, False, False]
     for y in range(height):
         for x in range(cols):
-            if room.rows[y][x] != "W":
+            if normalized.rows[y][x] != "W":
                 continue
             sides = wall_sides(room, x, y)
             if len(sides) != 1:
@@ -954,7 +979,9 @@ def detect_frame(room: RoomMap) -> Optional[Dict[str, Any]]:
         "band_rot": band_rot,
         "corner": corner,
         "floor_ch": floor_ch,
+        "wall_ch": wall_ch,
         "door_ch": door_ch,
+        "corner_ch": corner_ch,
     }
     for y in range(height):
         for x in range(cols):
@@ -991,14 +1018,21 @@ def frame_c(frame: Dict[str, Any], name: str = "") -> str:
     band = ", ".join(str(v) for v in frame["band_rot"])
     world_w, world_h = frame_world(frame)
     comment = "  /* %s */" % name if name else ""
+    skins = []
+    for key in ("floor_ch", "wall_ch", "door_ch", "corner_ch"):
+        ch = frame.get(key) or ""
+        skins.append("'%s'" % ch if ch else "0")
+    skin = ""
+    if any(frame.get(key) for key in ("floor_ch", "wall_ch", "door_ch", "corner_ch")):
+        skin = ", " + ", ".join(skins)
     return (
         "    { 0, 0,\n"
-        "      { %d, %d, %d, %d, %d, %d, { %s }, { %s }, %d },\n"
+        "      { %d, %d, %d, %d, %d, %d, { %s }, { %s }, %d%s },\n"
         "      %d, %d },%s"
         % (
             frame["cols"], frame["rows"],
             frame["arena"][0], frame["arena"][1], frame["arena"][2], frame["arena"][3],
-            doors, band, frame["corner"],
+            doors, band, frame["corner"], skin,
             frame.get("world_w", world_w),
             frame.get("world_h", world_h),
             comment,
@@ -1019,6 +1053,67 @@ LAYOUT_OBJ_KINDS = {
     "crate": "OBJ_CRATE",
 }
 LAYOUT_MAX_OBJS = 200          # room_layout_t.n_objs 是 unsigned char，留余量
+POOL_MAP_IDS = ("1x1", "L", "2x2", "hidden")
+NORMAL_MAP_IDS = ("1x1", "L", "2x2")
+POOL_MAP_DIR = TEMPLATE_ROOT / "maps"
+
+
+def pool_map(map_id: str) -> RoomMap:
+    """固定空间由地图池持有；布局文件只引用 ID，L 永远是左下空缺。"""
+    if map_id not in POOL_MAP_IDS:
+        raise MapError("未知地图池房型 %r（可用：%s）" % (map_id, "、".join(POOL_MAP_IDS)))
+    room = parse_json((POOL_MAP_DIR / (map_id + ".json")).read_text(encoding="utf-8"))
+    room.objects = []
+    return room
+
+
+def geometry_key(room: RoomMap) -> Tuple:
+    return (tuple("".join(row) for row in room.rows),
+            tuple(tuple(row) for row in room.rot))
+
+
+def pool_map_id(room: RoomMap) -> str:
+    key = geometry_key(room)
+    for map_id in POOL_MAP_IDS:
+        if key == geometry_key(pool_map(map_id)):
+            return map_id
+    raise MapError("房间空间与固定地图池不一致；请载入地图池模板后只编辑对象。L 型只接受左下空缺")
+
+
+def pool_layout_name(map_id: str, layout_id: int) -> str:
+    if map_id not in NORMAL_MAP_IDS:
+        raise MapError("本轮只支持普通房型：1x1、L、2x2；特殊房暂不参与")
+    if type(layout_id) is not int or not 0 <= layout_id <= 999:
+        raise MapError("布局编号必须是 0..999 的整数")
+    if layout_id == 0 and map_id != "1x1":
+        raise MapError("只有 1x1 可以使用保留起点编号 000")
+    return "%s_%03d.json" % (map_id, layout_id)
+
+
+def serialize_pool_layout(room: RoomMap) -> str:
+    """可被设计器回读的紧凑布局：不重复存墙、地板、门和旋转表。"""
+    map_id = pool_map_id(room)
+    issues = errors_of(validate(room))
+    if issues:
+        raise MapError("布局没通过校验：%s" % "；".join(i.message for i in issues[:3]))
+    unsupported = sorted({o.kind for o in room.objects if o.kind not in LAYOUT_OBJ_KINDS})
+    if unsupported:
+        raise MapError("布局池尚不支持这些对象，不能静默丢弃：%s" % "、".join(unsupported))
+    if len(room.objects) > LAYOUT_MAX_OBJS:
+        raise MapError("布局对象超过上限 %d" % LAYOUT_MAX_OBJS)
+    if room.layout_id == 0 and room.objects:
+        raise MapError("1x1_000 是起点空布局，不能包含对象")
+    data = {
+        "format": "map_designer_layout", "version": 1, "name": room.name,
+        "map": map_id,
+        "objects": [{"kind": o.kind, "x": o.x, "y": o.y, "arg": o.arg}
+                    for o in sorted(room.objects, key=lambda o: (o.y, o.x, o.kind))],
+    }
+    if room.layout_id is not None:
+        canonical = pool_layout_name(map_id, room.layout_id)
+        data["layout_id"] = room.layout_id
+        data["name"] = Path(canonical).stem
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
 def layout_symbol(name: str) -> str:
@@ -1098,6 +1193,7 @@ def parse_world_frames(world_src: str) -> List[Dict[str, Any]]:
             "floor_ch": _skin(0),
             "wall_ch":  _skin(1),
             "door_ch":  _skin(2),
+            "corner_ch": _skin(3),
             "world_w": _c_int(match.group(11)) or cols * TILE,
             "world_h": _c_int(match.group(12)) or rows * TILE,
         })
@@ -1118,7 +1214,9 @@ def layout_map_index(room: RoomMap, frames: Optional[Sequence[Dict[str, Any]]] =
     #  ★ 尺寸相同还不够：地板/门的"皮肤"也要一致（隐藏房和普通房都是 40×23，
     #    但一个用 K/H、一个用 B/D，必须落到 g_maps[] 里不同的两行）。
     want_floor = det.get("floor_ch") or "B"
+    want_wall = det.get("wall_ch") or "W"
     want_door = det.get("door_ch") or "D"
+    want_corner = det.get("corner_ch") or "C"
 
     table = list(frames) if frames else [
         {"cols": DEFAULT_COLS, "rows": DEFAULT_ROWS},
@@ -1129,17 +1227,22 @@ def layout_map_index(room: RoomMap, frames: Optional[Sequence[Dict[str, Any]]] =
             continue
         if (frame.get("floor_ch") or "B") != want_floor:
             continue
+        if (frame.get("wall_ch") or "W") != want_wall:
+            continue
         if (frame.get("door_ch") or "D") != want_door:
             continue
+        if (frame.get("corner_ch") or "C") != want_corner:
+            continue
         return index
-    sizes = "、".join("%d×%d%s%s" % (f["cols"], f["rows"],
-                                     " 地板" + f["floor_ch"] if f.get("floor_ch") else "",
-                                     " 门" + f["door_ch"] if f.get("door_ch") else "")
+    sizes = "、".join("%d×%d%s%s%s" % (f["cols"], f["rows"],
+                                       " 地板" + f["floor_ch"] if f.get("floor_ch") else "",
+                                       " 墙" + f["wall_ch"] if f.get("wall_ch") else "",
+                                       " 门" + f["door_ch"] if f.get("door_ch") else "")
                       for f in table)
     raise MapError(
-        "画布 %d×%d（地板 %s / 门 %s）在固件框架表里没有对应项（现有：%s）。"
+        "画布 %d×%d（地板 %s / 墙 %s / 门 %s / 角块 %s）在固件框架表里没有对应项（现有：%s）。"
         "先在 game_world.c 的 g_maps[] 加一行这个尺寸+皮肤的框架"
-        % (room.cols, room.height, want_floor, want_door, sizes)
+        % (room.cols, room.height, want_floor, want_wall, want_door, want_corner, sizes)
     )
 
 
@@ -1184,7 +1287,17 @@ def emit_layout_data(
             )
 
         terrain: Optional[Dict[str, Any]] = None
-        if detect_frame(room) is None:
+        # The fixed map pool is authoritative.  A standard 2x2/hidden map may
+        # contain skin details that detect_frame() cannot recognize, but it
+        # still must reference g_maps[] instead of duplicating a tile matrix.
+        try:
+            fixed_id = pool_map_id(room)
+        except MapError:
+            fixed_id = None
+        fixed_map_index = {"1x1": 0, "2x2": 1, "hidden": 2}.get(fixed_id)
+        if fixed_map_index is not None:
+            map_idx = fixed_map_index
+        elif detect_frame(room) is None:
             ax0, ay0, ax1, ay1 = arena_rect(room)
             world_w = room.cols * TILE
             world_h = room.height * TILE
@@ -1199,7 +1312,7 @@ def emit_layout_data(
                 "rot": [[int(v) & 3 for v in row] for row in room.rot],
             }
             map_idx = 0
-            warnings.append("布局 %r 是异形房：会一并导出逐格地形表" % name)
+            warnings.append("布局 %r 使用异形逐格地形表" % name)
         else:
             map_idx = layout_map_index(room, frames)
 
@@ -1207,12 +1320,24 @@ def emit_layout_data(
 
     if not rows:
         raise MapError("一张布局都没有")
+    if len(rows) > 127:
+        raise MapError("布局超过 127 张（运行时布局编号使用 signed char）")
+
+    # 同一固定空间只存一份逐格地形；对象方案共享地图身份。
+    terrain_owners = {}
+    terrain_refs = {}
+    for index, (name, sym, room, map_idx, objs, terrain) in enumerate(rows):
+        if terrain:
+            owner, map_id = terrain_owners.setdefault(geometry_key(room), (sym, index))
+            terrain_refs[sym] = owner
+            rows[index] = (name, sym, room, map_id, objs, terrain)
 
     digest = hashlib.sha256()
     for name, sym, room, map_idx, objs, terrain in rows:
-        digest.update(("%s|%d|%d|%d|" % (name, room.cols, room.height, 1 if terrain else 0)).encode("utf-8"))
+        digest.update(("%s|%d|%d|%d|%d|" % (name, room.cols, room.height, 1 if terrain else 0, map_idx)).encode("utf-8"))
+        digest.update(("id=%d|" % (room.layout_id or 0)).encode("utf-8"))
         for obj in objs:
-            digest.update(("%s,%d,%d;" % (obj.kind, obj.x, obj.y)).encode("utf-8"))
+            digest.update(("%s,%d,%d,%d;" % (obj.kind, obj.x, obj.y, obj.arg)).encode("utf-8"))
         if terrain:
             digest.update("".join(terrain["tiles"]).encode("utf-8"))
             digest.update(str(terrain["rot"]).encode("utf-8"))
@@ -1224,7 +1349,7 @@ def emit_layout_data(
     header.append(" * sha256:%s" % sha)
     header.append(" *")
     for name, sym, room, map_idx, objs, terrain in rows:
-        kind = "异形(自带地形)" if terrain else ("map=%d" % map_idx)
+        kind = ("共享地形=%d" % map_idx) if terrain else ("map=%d" % map_idx)
         header.append(" *  %-20s %d×%d  %-14s %d 个对象"
                       % (name, room.cols, room.height, kind, len(objs)))
     header.append(" */")
@@ -1237,12 +1362,17 @@ def emit_layout_data(
         header.append("#define LAY_%-24s %d" % (sym, index))
     header.append("")
     header.append("#define LAYOUT_COUNT %d" % len(rows))
+    header.append("#define LAYOUT_SHARED_MAPS 1")
     header.append("")
     header.append("extern const room_layout_t g_layouts[LAYOUT_COUNT];")
+    header.append("extern const unsigned short g_layout_ids[LAYOUT_COUNT]; /* 0 = 保留布局/旧参考布局 */")
     for name, sym, room, map_idx, objs, terrain in rows:
         header.append("extern const obj_place_t L_%s[];" % sym)
         if terrain:
-            header.append("extern const layout_terrain_t T_%s;" % sym)
+            if terrain_refs[sym] == sym:
+                header.append("extern const layout_terrain_t T_%s;" % sym)
+            else:
+                header.append("#define T_%s T_%s" % (sym, terrain_refs[sym]))
     header.append("")
     header.append("#endif /* GAME_LAYOUT_DATA_H */")
 
@@ -1252,24 +1382,32 @@ def emit_layout_data(
     source.append('#include "game_layout_data.h"')
     source.append("")
     source.append("#define O(x, y, k) { (unsigned char)(x), (unsigned char)(y), (unsigned char)(k), 0 }")
+    source.append("#define OP(x, y, k, p) { (unsigned char)(x), (unsigned char)(y), (unsigned char)(k), (unsigned char)(p) }")
     source.append("")
 
     for name, sym, room, map_idx, objs, terrain in rows:
-        if terrain:
+        if terrain and terrain_refs[sym] == sym:
             source.append("/* %s：%d×%d 异形地形 */" % (name, room.cols, room.height))
-            source.append("static const char LT_%s[LAYOUT_MAX_ROWS][LAYOUT_MAX_COLS + 1] = {" % sym)
+            source.append("static const char LT_%s[%d][LAYOUT_MAX_COLS + 1] = {" % (sym, room.height))
             for line in terrain["tiles"]:
                 source.append('    "%s",' % line)
             source.append("};")
-            source.append("static const unsigned char RT_%s[LAYOUT_MAX_ROWS][LAYOUT_MAX_COLS] = {" % sym)
+            source.append("/* Four rotations per byte; low two bits are the leftmost cell. */")
+            source.append("static const unsigned char RT_%s[%d][LAYOUT_ROT_COLS] = {" % (sym, room.height))
             for line in terrain["rot"]:
-                source.append("    { %s }," % ", ".join(str(v) for v in line))
+                packed = [sum(v << (2 * k) for k, v in enumerate(line[x:x+4]))
+                          for x in range(0, room.cols, 4)]
+                source.append("    { %s }," % ", ".join(str(v) for v in packed))
             source.append("};")
             source.append("const layout_terrain_t T_%s = {" % sym)
-            source.append("    LT_%s, RT_%s, %d, %d, %d, %d, %d, %d, %d, %d" % (
+            occupied = [(x, y) for y, row in enumerate(room.rows)
+                        for x, ch in enumerate(row) if ch != "."]
+            mirror_x = min(x for x, y in occupied) + max(x for x, y in occupied)
+            mirror_y = min(y for x, y in occupied) + max(y for x, y in occupied)
+            source.append("    LT_%s, RT_%s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d" % (
                 sym, sym, terrain["cols"], terrain["rows"],
                 terrain["arena"][0], terrain["arena"][1], terrain["arena"][2], terrain["arena"][3],
-                terrain["world"][0], terrain["world"][1]))
+                terrain["world"][0], terrain["world"][1], mirror_x, mirror_y))
             source.append("};")
             source.append("")
 
@@ -1281,6 +1419,8 @@ def emit_layout_data(
             line = "   "
             for obj in objs:
                 piece = " O(%d,%d,%s)," % (obj.x, obj.y, LAYOUT_OBJ_KINDS[obj.kind])
+                if obj.arg:
+                    piece = " OP(%d,%d,%s,%d)," % (obj.x, obj.y, LAYOUT_OBJ_KINDS[obj.kind], obj.arg)
                 if len(line) + len(piece) > 96:
                     source.append(line)
                     line = "   "
@@ -1292,9 +1432,11 @@ def emit_layout_data(
 
     source.append("const room_layout_t g_layouts[LAYOUT_COUNT] = {")
     for name, sym, room, map_idx, objs, terrain in rows:
-        tail = "&T_%s" % sym if terrain else "0"
+        tail = "&T_%s" % terrain_refs[sym] if terrain else "0"
         source.append('    { "%s", L_%s, %d, %d, %s },' % (name, sym, len(objs), map_idx, tail))
     source.append("};")
+    source.append("const unsigned short g_layout_ids[LAYOUT_COUNT] = { %s };" %
+                  ", ".join(str(room.layout_id or 0) for name, sym, room, map_idx, objs, terrain in rows))
     source.append("")
     return "\n".join(header) + "\n", "\n".join(source) + "\n", warnings
 
@@ -1357,7 +1499,7 @@ def validate(room: RoomMap) -> List[Issue]:
     door_halves = set()
     for y in range(height):
         for x in range(cols):
-            if room.rows[y][x] in DOOR_CHARS:
+            if room.rows[y][x] in DOOR_CHARS and room.rows[y][x] != "H":
                 door_halves.add(door_pair(x, y, room.rot[y][x] & 3))
 
     for y in range(height):
@@ -1411,6 +1553,17 @@ def validate(room: RoomMap) -> List[Issue]:
                     x, y,
                 )
 
+            if room.rows[y][x] == "H":
+                # A single-cell entrance must touch floor on its inward side.
+                # Leaving H in the outer D anchor would hide it behind a wall.
+                inward_x = x + (1 if angle == 3 else -1 if angle == 1 else 0)
+                inward_y = y + (1 if angle == 0 else -1 if angle == 2 else 0)
+                if (not (0 <= inward_x < cols and 0 <= inward_y < height)
+                        or room.rows[inward_y][inward_x] not in FLOOR_CHARS):
+                    add("error", "隐藏门 (%d,%d) 只占一格，必须紧贴内侧地板" % (x, y), x, y)
+                doors.append((x, y, angle))
+                continue
+
             px, py = door_pair(x, y, angle)
             if not (0 <= px < cols and 0 <= py < height):
                 add("error", "门 (%d,%d) 的另一格越界" % (x, y), x, y)
@@ -1457,7 +1610,7 @@ def validate(room: RoomMap) -> List[Issue]:
             ch = room.rows[ty_][tx_]
             if ch == ".":
                 continue
-            if ch not in ("B", "K"):
+            if ch not in FLOOR_CHARS:
                 blocked = (tx_, ty_)
             break
         if blocked is not None:
@@ -1498,7 +1651,7 @@ def validate(room: RoomMap) -> List[Issue]:
         if room.rows[obj.y][obj.x] not in FLOOR_CHARS:
             add(
                 "error",
-                "%s (%d,%d) 必须放在基岩地板 B 上，当前是 %r"
+                "%s (%d,%d) 必须放在地板 B/K/S 上，当前是 %r"
                 % (info["label"], obj.x, obj.y, room.rows[obj.y][obj.x]),
                 obj.x, obj.y,
             )
@@ -1534,7 +1687,7 @@ def errors_of(issues: Iterable[Issue]) -> List[Issue]:
 
 def stats(room: RoomMap) -> Dict[str, Any]:
     cols, height = room.cols, room.height
-    counts = {char: 0 for char in ".BWDHKCXYZS"}
+    counts = {char: 0 for char in TILE_INDEX}
     doors: List[Dict[str, Any]] = []
     for y in range(height):
         for x in range(cols):
@@ -1599,10 +1752,10 @@ def emit_c(room: RoomMap, source: str = "tools/map_designer/output/room_map.txt"
     lines.append(
         " *  统计   : 门 %d · 墙 %d · 地板 %d · 角块 %d"
         % (
-            counts["D"],
-            counts["W"],
+            counts["D"] + counts["H"],
+            counts["W"] + counts["w"],
             counts["B"] + counts["K"] + counts["S"],
-            counts["C"] + counts["X"] + counts["Y"] + counts["Z"],
+            sum(counts[ch] for ch in "CXYZcxyz"),
         )
     )
     lines.append(" *  门     : %s" % doors)
@@ -1850,6 +2003,22 @@ def parse_json(text: str, name: str = DEFAULT_NAME) -> RoomMap:
         raise MapError("JSON 解析失败：%s" % exc) from None
     if not isinstance(data, dict):
         raise MapError("JSON 顶层必须是对象")
+
+    if data.get("format") == "map_designer_layout":
+        if data.get("version") != 1:
+            raise MapError("不支持的布局池文件版本")
+        base = pool_map(data.get("map"))
+        expanded = json.loads(serialize_json(base))
+        expanded["name"] = data.get("name", name)
+        expanded["objects"] = data.get("objects", [])
+        room = parse_json(json.dumps(expanded), name)
+        if "layout_id" in data:
+            canonical = pool_layout_name(data.get("map"), data["layout_id"])
+            if data.get("name", Path(canonical).stem) != Path(canonical).stem:
+                raise MapError("布局名称必须与房型和编号一致：%s" % canonical)
+            room.layout_id = data["layout_id"]
+            room.name = Path(canonical).stem
+        return room
 
     tiles = data.get("tiles", data.get("map"))
     if not isinstance(tiles, list) or not tiles:

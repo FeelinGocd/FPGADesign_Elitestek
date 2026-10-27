@@ -2,25 +2,27 @@
 //  lineBuffer.v —— 显示通道(加速器外挂的"控制屏幕"外设)
 //------------------------------------------------------------------------------
 //  里面是什么
-//      bufferAPBHandler : 把 APB 寄存器的值翻译成有效信号(翻页/选地址/帧率)
+//      AXI4_Master      : 对 DDR 发起读命令(AXI4 主口 -> Axi_Mux S1)
 //      bufferControler  : 按 {段0,段1} 基址把一行从 DDR 搬进来
-//                         (全屏 241 拍, 分屏 2x120 拍)
+//                         (全屏取 241 拍 = 240 + 1, 分屏 2x120 拍)
 //      lineAligner      : 行首非 16B 对齐时丢掉前 skip 个字节, 241 拍 -> 240 拍
-//      async_PingPongBuffer : 双 bank, 跨 100MHz <-> 148.5MHz
+//      async_PingPongBuffer : 双 bank, 跨 100MHz <-> 74.25MHz
 //      bufferUnpacker   : 16 字节/拍 -> 3 字节/像素
-//      HDMI_Top         : 真 1080p60 时序 + TMDS
-//      AXI4_Master      : 对 DDR 发起读命令
+//      HDMI_Top         : 720p60 时序(pixel_timing 里 define 选) + TMDS
+//      asyn_rst_syn     : 像素域复位同步(异步断言 / 同步释放)
 //      frame_start 跨域桥: 读域 HDMI_frame_start_o -> toggle -> 写域 2FF+seen
+//   ★ "寄存器 -> 有效信号"(翻页/选地址/帧率)的翻译【不在本模块】:
+//     由 GPU_2D 里的 GPU2D_APBHandler 做完, 这里只收 enable / mode / addr 三根线
 //
 //  两级时钟
-//      clk(100MHz)        : APB 寄存器值 / handler / controller / aligner / PingPong 写侧 / AXI
-//      clk_HDMI_x1(148.5M): PingPong 读侧 / unpacker / HDMI / frame_start 的产生
-//      ★ aligner 只在写域: 74.25/148.5MHz 那条像素通路一个字节都不动
+//      clk(100MHz)          : 寄存器值 / controller / aligner / PingPong 写侧 / AXI
+//      clk_HDMI_x1(74.25MHz): PingPong 读侧 / unpacker / HDMI / frame_start 的产生
+//      ★ aligner 只在写域: 74.25MHz 那条像素通路一个字节都不动
 //
 //  和外面怎么连
-//      进: APB 寄存器层的值(enable / split_pending / DONE / 三个 64 位基址)
-//      出: handler 回给寄存器层的(done_clr / 帧率值) + 给加速器的 lineBuffer_frame_start
-//      端口名和 APB 侧保持一致, 顶层一一对接
+//      进: 已经翻译好的 enable / mode / {段0,段1} 基址（寄存器在 GPU2D_APBHandler 那边）
+//      出: 帧边界单拍 lineBuffer_frame_start（回 GPU2D_APBHandler 翻页/计帧率）
+//      端口名和 GPU2D_APBHandler 那侧保持一致, 顶层一一对接
 //==============================================================================
 module lineBuffer #(
     parameter AXI_ADDR_WIDTH    = 32,
@@ -31,6 +33,7 @@ module lineBuffer #(
     parameter AXI_ID            = {AXI_ID_WIDTH{1'b0}},
     parameter LINE_BYTES        = 3840,
     parameter ROW_STRIDE_BYTES  = 5760,
+    //   ★ 帧尾停手行数；顶层实际传 720
     parameter FRAME_LINES       = 1080
 )(
     input  wire                         clk,

@@ -16,7 +16,9 @@
 //        本文件 = 总线解析层,只做 APB 时序解析 + 寄存器
 //        消抖逻辑在顶层例化的 key 模块里,key_state / key_edge 由它提供
 //
-//  中断:key_irq 就是 key_edge 的按下沿脉冲,直连 SoC 的 userInterruptA-> PLIC 中断号 16
+//  中断:key_irq = |(key_edge & irq_en)，按下沿脉冲
+//        ★ 目前【没接】: APB0_Interconnect 不引出它(软件轮询按键)；
+//          SoC 的 userInterruptA(PLIC 16) 已专供显示帧边界 IRQ_frame
 //        外设侧不设"粘住"的标志寄存器
 //
 //  一点差异要知道 

@@ -27,12 +27,17 @@
   var LEGACY_TYPE_WORDS = ["start", "empty", "item", "shop", "boss"];
   var CORNER_CODES = ["C", "X", "Y", "Z"];
   var CORNER_NAMES = ["C · 原样", "X · 水平翻", "Y · 垂直翻", "Z · 双向翻"];
+  var HIDDEN_CORNER_CODES = ["c", "x", "y", "z"];
+  var HIDDEN_CORNER_NAMES = ["c · 原样", "x · 水平翻", "y · 垂直翻", "z · 双向翻"];
+  function isCornerBrush(code) { return code === "C" || code === "c"; }
+  function cornerCodesFor(code) { return code === "c" ? HIDDEN_CORNER_CODES : CORNER_CODES; }
+  function cornerNamesFor(code) { return code === "c" ? HIDDEN_CORNER_NAMES : CORNER_NAMES; }
   var DIRS = ["N", "E", "S", "W"];
-  var CODES = [".", "B", "W", "D", "C", "X", "Y", "Z", "H", "K", "S"];
+  var CODES = [".", "B", "W", "D", "C", "X", "Y", "Z", "H", "K", "S", "w", "c", "x", "y", "z"];
   var DOOR_CODES = { D: "door", H: "hide" };     /* 码 → 素材 id（H = 隐藏门） */
   function isDoorCode(code) { return Object.prototype.hasOwnProperty.call(DOOR_CODES, code); }
   var MAP_HEADER = "# MAP_DESIGNER v3";
-  var PAGE_VERSION = "2026-10-24j";   /* 改前端就改一下，出问题时看状态栏 */
+  var PAGE_VERSION = "2026-10-25f";   /* 普通房型、稳定编号与地图/布局两种模式 */
 
   var TILES = [
     { id: "empty", code: ".", name: "空白", color: "#090e14" },
@@ -41,9 +46,10 @@
     { id: "door", code: "D", name: "门（2 格）", image: "" },
     { id: "corner", code: "C", name: "角块", image: "" },
     /*  ★ 新笔刷一律加在末尾：前面的顺序是页面/肌肉记忆的一部分，插队会让"门"变成别的 */
-    { id: "hide", code: "H", name: "隐藏门（炸开才通）", image: "" },
-    { id: "bedrock", code: "K", name: "基岩地板（隐藏房）", image: "" },
-    { id: "stone_floor", code: "S", name: "石头地板", image: "", color: "#7f7f7f" }
+    { id: "hide", code: "H", name: "隐藏门（1 格）", image: "" },
+    { id: "hidden_floor", code: "K", name: "隐藏房地板", image: "" },
+    { id: "hidden_wall", code: "w", name: "隐藏房墙", image: "" },
+    { id: "hidden_corner", code: "c", name: "隐藏房角块", image: "" }
   ];
 
   /* id 必须和 mapfmt.py / game.h 的 MAP_OBJ_* 一致。 */
@@ -94,11 +100,14 @@
   var zoomSlider = $("zoomSlider");
   var zoomReadout = $("zoomReadout");
   var canvasWrap = $("canvasWrap");
-  var layerTileEl = $("layerTile");
-  var layerObjectEl = $("layerObject");
+  var mapStage = $("mapStage");
   var images = {};
 
   var S = {
+    mode: "map",
+    shape: "1x1",
+    layoutId: null,
+    candidateId: 1,
     cols: DEFAULT_COLS,
     rows: DEFAULT_ROWS,
     map: grid(".", DEFAULT_COLS, DEFAULT_ROWS),
@@ -163,7 +172,7 @@
     var x0 = S.cols, y0 = S.rows, x1 = -1, y1 = -1;
     for (var y = 0; y < S.rows; y++) {
       for (var x = 0; x < S.cols; x++) {
-        if (S.map[y][x] !== "B") continue;
+        if ("BKS".indexOf(S.map[y][x]) < 0) continue;
         if (x < x0) x0 = x;
         if (y < y0) y0 = y;
         if (x > x1) x1 = x;
@@ -177,13 +186,14 @@
   /* 四扇门的建议槽位：各边墙带正中（和 mapfmt.door_slots 一致） */
   function doorSlots() {
     var a = arenaRect();
+    var one = S.brush === "H";
     var cx = Math.floor((a.x0 + a.x1) / 2);
     var cy = Math.floor((a.y0 + a.y1) / 2);
     return [
-      [cx, a.y0 - 2, 0],
+      [cx, a.y0 - (one ? 1 : 2), 0],
       [a.x1 + 1, cy, 1],
       [cx, a.y1 + 1, 2],
-      [a.x0 - 2, cy, 3]
+      [a.x0 - (one ? 1 : 2), cy, 3]
     ];
   }
 
@@ -208,20 +218,25 @@
   function doorPair(x, y, angle) { return (angle & 1) ? [x + 1, y] : [x, y + 1]; }
 
   function tileOf(code) {
+    if (code === "S") code = "B";   /* 石头地板 S 已废弃（旧图按木地板显示） */
     for (var i = 0; i < TILES.length; i++) if (TILES[i].code === code) return TILES[i];
     if (CORNER_CODES.indexOf(code) >= 0) {
       /*  X/Y/Z 共用角块那张图 —— 按 id 找，别按下标（表里插一个笔刷就会错位）  */
       for (var j = 0; j < TILES.length; j++) if (TILES[j].id === "corner") return TILES[j];
+    }
+    if (HIDDEN_CORNER_CODES.indexOf(code) >= 0) {
+      for (var j2 = 0; j2 < TILES.length; j2++) if (TILES[j2].id === "hidden_corner") return TILES[j2];
     }
     return TILES[0];
   }
 
   function objectDef(kind) { return OBJECT_BY_ID[kind] || null; }
 
-  function currentCode() { return S.brush === "C" ? CORNER_CODES[S.corner] : S.brush; }
+  function currentCode() { return isCornerBrush(S.brush) ? cornerCodesFor(S.brush)[S.corner] : S.brush; }
 
   function cloneState() {
     return {
+      mode: S.mode, shape: S.shape, layoutId: S.layoutId, candidateId: S.candidateId,
       cols: S.cols,
       rows: S.rows,
       map: cloneGrid(S.map),
@@ -277,7 +292,7 @@
         "<strong>画布</strong> " + S.cols + " × " + S.rows + " 格 = " + (S.cols * TILE) + " × " + (S.rows * TILE) + " px<br>" +
         "<strong>竞技场</strong> " + a.x0 + "," + a.y0 + " → " + a.x1 + "," + a.y1 +
         (a.empty ? "（还没有地板 B，竞技场是从 B 的包围盒推的）" : "") + "<br>" +
-        "<strong>墙带</strong> 2 格厚，门洞 2 格<br>" +
+        "<strong>墙带</strong> 2 格厚；普通门 2 格，隐藏入口 1 格<br>" +
         "<strong>门槽位</strong> " + doorSlots().map(function (slot) {
           return DIRS[slot[2]] + "(" + slot[0] + "," + slot[1] + ")";
         }).join(" ") + "<br>" +
@@ -288,6 +303,7 @@
   /* 换尺寸：保留左上角重叠的部分（变小时裁掉，变大时补空白），整个操作一步撤销。
      想从干净骨架开始就用「小房间 / 大房间」模板。 */
   function resizeCanvas(cols, rows) {
+    if (S.mode === "layout") { setStatus("布局模式锁定房间空间，请切换地图模式", false); return; }
     cols = Math.round(Number(cols));
     rows = Math.round(Number(rows));
     if (!isFinite(cols) || !isFinite(rows)) { setStatus("尺寸要是整数", false); return; }
@@ -351,7 +367,8 @@
     return lines.join("\n") + "\n";
   }
 
-  var TILE_INDEX = { ".": 0, "B": 1, "W": 2, "D": 3, "C": 4, "H": 5, "K": 6, "S": 7, "X": 8, "Y": 9, "Z": 10 };
+  var TILE_INDEX = { ".": 0, "B": 1, "W": 2, "D": 3, "C": 4, "H": 5, "K": 6, "S": 7,
+    "X": 8, "Y": 9, "Z": 10, "w": 11, "c": 12, "x": 13, "y": 14, "z": 15 };
   var TILE_CHAR = {};
   Object.keys(TILE_INDEX).forEach(function (ch) { TILE_CHAR[TILE_INDEX[ch]] = ch; });
 
@@ -423,6 +440,9 @@
       data = JSON.parse(text);
     } catch (e) {
       throw new Error("JSON 解析失败：" + e.message);
+    }
+    if (data && data.format === "map_designer_layout") {
+      throw new Error("布局池文件需要通过 serve.py 打开，以读取对应的固定房型");
     }
     if (!data || !Array.isArray(data.tiles) || !data.tiles.length) throw new Error("JSON 缺少 tiles 数组");
     var height = data.tiles.length;
@@ -590,11 +610,16 @@
   }
 
   function restoreState(snap) {
+    S.mode = snap.mode || "map";
+    S.shape = snap.shape || "1x1";
+    S.layoutId = hasLayoutId(snap.layoutId) ? snap.layoutId : null;
+    S.candidateId = hasLayoutId(snap.candidateId) ? snap.candidateId : 1;
     S.cols = snap.cols || (snap.map.length ? snap.map[0].length : DEFAULT_COLS);
     S.rows = snap.rows || snap.map.length || DEFAULT_ROWS;
     S.map = cloneGrid(snap.map);
     S.rot = cloneGrid(snap.rot);
     S.objects = cloneObjects(snap.objects);
+    updateWorkspaceControls();
     syncCanvas();
     updateSizeUi();
     changed();
@@ -623,6 +648,7 @@
   /* ---------------------------------------------------------------- 编辑 */
 
   function putCell(x, y, code) {
+    if (S.mode === "layout") return;
     if (!inBounds(x, y)) return;
     if (isDoorCode(code)) { placeDoor(x, y, code); return; }
     removeDoorAt(x, y);
@@ -631,14 +657,20 @@
   }
 
   function placeDoor(x, y, code) {
+    if (S.mode === "layout") return;
     var angle = S.angle & 3;
     code = code || "D";
     var p = doorPair(x, y, angle);
-    if (!inBounds(p[0], p[1])) {
-      setStatus("门需要两格，这个位置放不下（" + DIRS[angle] + " 方向）", false);
+    if (code === "D" && !inBounds(p[0], p[1])) {
+      setStatus("普通门需要两格，这个位置放不下（" + DIRS[angle] + " 方向）", false);
       return;
     }
     removeDoorAt(x, y);
+    if (code === "H") {          /* 隐藏门只占 1 格，背后是隐藏房墙 */
+      S.map[y][x] = code;
+      S.rot[y][x] = angle;
+      return;
+    }
     removeDoorAt(p[0], p[1]);
     S.map[y][x] = code;
     S.rot[y][x] = angle;
@@ -647,18 +679,21 @@
   }
 
   function removeDoorAt(x, y) {
+    if (S.mode === "layout") return;
     if (!inBounds(x, y)) return;
     if (isDoorCode(S.map[y][x])) {
+      var code = S.map[y][x];
       var p = doorPair(x, y, S.rot[y][x]);
       S.map[y][x] = ".";
       S.rot[y][x] = 0;
-      if (inBounds(p[0], p[1])) { S.map[p[1]][p[0]] = "."; S.rot[p[1]][p[0]] = 0; }
+      /*  隐藏门只占 1 格：不要顺手把旁边一格也擦了  */
+      if (code === "D" && inBounds(p[0], p[1])) { S.map[p[1]][p[0]] = "."; S.rot[p[1]][p[0]] = 0; }
       return;
     }
     var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     for (var i = 0; i < dirs.length; i++) {
       var nx = x + dirs[i][0], ny = y + dirs[i][1];
-      if (!inBounds(nx, ny) || !isDoorCode(S.map[ny][nx])) continue;
+      if (!inBounds(nx, ny) || S.map[ny][nx] !== "D") continue;   /* H 没有第二格 */
       var q = doorPair(nx, ny, S.rot[ny][nx]);
       if (q[0] === x && q[1] === y) { S.map[ny][nx] = "."; S.rot[ny][nx] = 0; }
     }
@@ -679,6 +714,7 @@
   }
 
   function addObject(kind, x, y) {
+    if (S.mode === "layout" && (kind === "exit" || "B".indexOf(S.map[y] && S.map[y][x]) < 0)) return;
     if (!inBounds(x, y) || !OBJECT_BY_ID[kind]) return;
     removeObjectKindAt(x, y, kind);
     S.objects.push({ kind: kind, x: x, y: y, arg: 0 });
@@ -687,6 +723,8 @@
 
   function paintAt(p) {
     if (S.loading) return;
+    if (S.mode === "layout" && S.layer !== "object") return;
+    if (S.mode === "map" && S.layer === "object") return;
     if (S.layer === "object") {
       if (S.erase) removeObjectsAt(p.x, p.y);
       else addObject(S.objBrush, p.x, p.y);
@@ -725,33 +763,34 @@
     target.fillStyle = t.color || "#172535";
     target.fillRect(px, py, TILE, TILE);
     if (!t.image || !images[t.id]) return;
-    var fx = code === "X" || code === "Z";
-    var fy = code === "Y" || code === "Z";
+    var fx = code === "X" || code === "Z" || code === "x" || code === "z";
+    var fy = code === "Y" || code === "Z" || code === "y" || code === "z";
     drawTileImage(target, images[t.id], px, py, TILE, drawAngle(S.rot[y][x]), fx, fy);
   }
 
   function paintDoor(target, x, y) {
+    var code = S.map[y][x];
+    var one = code === "H";
     var angle = S.rot[y][x] & 3;
     var horiz = (angle & 1) !== 0;
     var px = x * TILE, py = y * TILE;
-    var fw = horiz ? 2 * TILE : TILE;
-    var fh = horiz ? TILE : 2 * TILE;
+    var fw = one ? TILE : (horiz ? 2 * TILE : TILE);
+    var fh = one ? TILE : (horiz ? TILE : 2 * TILE);
     var spriteAngle = drawAngle(angle);
 
-    if (images.wall) {
-      for (var i = 0; i < 2; i++) {
+    var wall = one ? images.hidden_wall : images.wall;
+    if (wall) {
+      for (var i = 0; i < (one ? 1 : 2); i++) {
         var wx = px + (horiz ? i * TILE : 0);
         var wy = py + (horiz ? 0 : i * TILE);
-        drawTileImage(target, images.wall, wx, wy, TILE, spriteAngle, false, false);
+        drawTileImage(target, wall, wx, wy, TILE, spriteAngle, false, false);
       }
     }
-    var code = S.map[y][x];
     var img = images[DOOR_CODES[code] || "door"];
-    if (!img) img = images.door;
     if (!img) return;
 
-    var dw = img.naturalWidth || 40;
-    var dh = img.naturalHeight || 64;
+    var dw = img.naturalWidth || (one ? TILE : 40);
+    var dh = img.naturalHeight || (one ? TILE : 64);
     var ow = horiz ? dh : dw;
     var oh = horiz ? dw : dh;
     var ox = px + (fw - ow) / 2;
@@ -835,7 +874,10 @@
     for (var i = 0; i < slots.length; i++) {
       var slot = slots[i];
       var horiz = (slot[2] & 1) !== 0;
-      target.strokeRect(slot[0] * TILE + 0.5, slot[1] * TILE + 0.5, horiz ? 2 * TILE - 1 : TILE - 1, horiz ? TILE - 1 : 2 * TILE - 1);
+      var one = S.brush === "H";
+      target.strokeRect(slot[0] * TILE + 0.5, slot[1] * TILE + 0.5,
+                       one ? TILE - 1 : (horiz ? 2 * TILE - 1 : TILE - 1),
+                       one ? TILE - 1 : (horiz ? TILE - 1 : 2 * TILE - 1));
     }
     target.setLineDash([]);
 
@@ -940,8 +982,8 @@
     var code = currentCode();
     var t = tileOf(code);
     var angle = drawAngle(S.angle);
-    var fx = code === "X" || code === "Z";
-    var fy = code === "Y" || code === "Z";
+    var fx = code === "X" || code === "Z" || code === "x" || code === "z";
+    var fy = code === "Y" || code === "Z" || code === "y" || code === "z";
 
     if (code === ".") {
       pctx.fillStyle = t.color;
@@ -968,7 +1010,7 @@
 
     var text = t.name + "\n字符：" + code;
     if (isDoorCode(code)) text += "\n方向：" + DIRS[S.angle & 3] + "（" + (S.angle & 3) * 90 + "°）" + (code === "H" ? "\n隐藏门：炸弹炸开才通" : "");
-    else if (t.id === "corner") text += "\n翻转：" + CORNER_NAMES[S.corner] + "\n旋转：" + (S.angle & 3) * 90 + "°";
+    else if (isCornerBrush(S.brush)) text += "\n翻转：" + cornerNamesFor(S.brush)[S.corner] + "\n旋转：" + (S.angle & 3) * 90 + "°";
     else if (code !== ".") text += "\n旋转：" + (S.angle & 3) * 90 + "°";
     $("previewText").textContent = text;
   }
@@ -994,7 +1036,8 @@
       html += '<div class="count"><span>● ' + def.name + "</span><b>" + objectCounts[def.id] + "</b></div>";
     }
     countsEl.innerHTML = html;
-    mapTextEl.value = serializeJson();
+    try { mapTextEl.value = serializeExportJson(); }
+    catch (e) { mapTextEl.value = e.message; }
     drawPreview();
   }
 
@@ -1070,11 +1113,13 @@
       objects[oi].classList.toggle("selected", S.layer === "object" && objects[oi].getAttribute("data-object") === S.objBrush);
     }
     var cbtns = cornerRow.querySelectorAll("button");
-    for (var c = 0; c < cbtns.length; c++) cbtns[c].classList.toggle("on", S.brush === "C" && c === S.corner);
+    var fam = cornerCodesFor(S.brush);
+    for (var c = 0; c < cbtns.length; c++) {
+      if (isCornerBrush(S.brush)) cbtns[c].textContent = fam[c];
+      cbtns[c].classList.toggle("on", isCornerBrush(S.brush) && c === S.corner);
+    }
     var abtns = angleRow.querySelectorAll("button");
     for (var a = 0; a < abtns.length; a++) abtns[a].classList.toggle("on", a === (S.angle & 3));
-    if (layerTileEl) layerTileEl.classList.toggle("on", S.layer === "tile");
-    if (layerObjectEl) layerObjectEl.classList.toggle("on", S.layer === "object");
   }
 
   function updateLayerHint() {
@@ -1086,6 +1131,8 @@
   }
 
   function selectLayer(layer) {
+    if (S.mode === "layout") layer = "object";
+    if (S.mode === "map") layer = "tile";
     S.layer = layer === "object" ? "object" : "tile";
     updateSelection();
     updateLayerHint();
@@ -1095,6 +1142,7 @@
   }
 
   function selectBrush(code) {
+    if (S.mode === "layout") return;
     S.layer = "tile";
     S.brush = code;
     updateSelection();
@@ -1104,6 +1152,7 @@
   }
 
   function selectObject(kind) {
+    if (S.mode === "map" || (S.mode === "layout" && kind === "exit")) return;
     if (!OBJECT_BY_ID[kind]) return;
     S.layer = "object";
     S.objBrush = kind;
@@ -1133,19 +1182,22 @@
       selectObject(OBJECT_DEFS[(index + 1) % OBJECT_DEFS.length].id);
       return;
     }
-    if (S.brush === "C") setCorner(S.corner + 1);
+    if (isCornerBrush(S.brush)) setCorner(S.corner + 1);
     else setAngle(S.angle + 1);
   }
 
   function updateAngleHint() {
+    angleRow.hidden = S.layer === "object";
+    cornerRow.hidden = S.layer !== "tile" || !isCornerBrush(S.brush);
     var hint = $("angleHint");
     if (S.layer === "object") {
       hint.textContent = "对象层不使用旋转；坐标按整格保存（×32 px）。";
     } else if (isDoorCode(S.brush)) {
-      hint.textContent = (S.brush === "H" ? "隐藏门" : "门") +
-        "：角度就是方向 0=N 1=E 2=S 3=W；只占一格，另一格会自动清空。";
-    } else if (S.brush === "C") {
-      hint.textContent = "角块先翻转再旋转；旋转值会写进 rot 表，和 C 侧的 corner_transform 一致。";
+      hint.textContent = S.brush === "H"
+        ? "隐藏门：只占 1 格（靠房间那侧），背后是隐藏房墙；角度就是方向 0=N 1=E 2=S 3=W。"
+        : "普通门：方向 0=N 1=E 2=S 3=W；占两格，第二格自动清空。";
+    } else if (isCornerBrush(S.brush)) {
+      hint.textContent = "角块先翻转再旋转；旋转值会写进 rot 表，和 C 侧的 corner_char 家族一致。";
     } else {
       hint.textContent = "墙和地板按这个角度旋转；门的旋转值是方向，不是贴图角度。";
     }
@@ -1161,8 +1213,11 @@
     if (!isFinite(next)) return;
     next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next));
     var previous = S.zoom;
-    var contentX = 0;
-    var contentY = 0;
+    var view = canvasWrap.getBoundingClientRect();
+    var padX = canvasWrap.clientWidth;
+    var padY = canvasWrap.clientHeight;
+    var contentX = W / 2;
+    var contentY = H / 2;
     var oldRect = null;
 
     if (anchor && previous > 0) {
@@ -1174,14 +1229,19 @@
     S.zoom = next;
     canvas.style.width = (W * S.zoom) + "px";
     canvas.style.height = (H * S.zoom) + "px";
+    /* Scrollable gutters on all sides keep the pointer anchor reachable even
+       below viewport size; centered flex overflow only scrolls one way. */
+    mapStage.style.width = (W * next + padX * 2) + "px";
+    mapStage.style.height = (H * next + padY * 2) + "px";
+    canvas.style.left = padX + "px";
+    canvas.style.top = padY + "px";
     zoomSlider.value = String(Math.round(S.zoom * 100));
     zoomReadout.textContent = (Math.round(S.zoom * 1000) / 10) + "%";
 
-    if (anchor && oldRect) {
-      var newRect = canvas.getBoundingClientRect();
-      canvasWrap.scrollLeft += (newRect.left + contentX * next) - anchor.x;
-      canvasWrap.scrollTop += (newRect.top + contentY * next) - anchor.y;
-    }
+    var screenX = anchor ? anchor.x - view.left : padX / 2;
+    var screenY = anchor ? anchor.y - view.top : padY / 2;
+    canvasWrap.scrollLeft = padX + contentX * next - screenX;
+    canvasWrap.scrollTop = padY + contentY * next - screenY;
 
     if (manual) S.autoFit = false;
   }
@@ -1192,6 +1252,17 @@
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2
     });
+  }
+
+  function onWheel(event) {
+    event.preventDefault();
+    var delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX || 0)
+      ? event.deltaY : event.deltaX;
+    if (!delta) return;
+    if (event.deltaMode === 1) delta *= 16;
+    if (event.deltaMode === 2) delta *= canvasWrap.clientHeight;
+    var factor = Math.max(0.5, Math.min(2, Math.exp(-delta * 0.0015)));
+    setZoom(S.zoom * factor, true, { x: event.clientX, y: event.clientY });
   }
 
   function fit() {
@@ -1302,37 +1373,144 @@
     window.setTimeout(scheduleDraw, 1450);
   }
 
-  async function save() {
-    if (!S.served) { setStatus("保存需要 serve.py 打开页面（当前是 file://，可用「下载 .json」兜底）", false); return; }
-    if (S.loading) { setStatus("正在读取 output/room_map.json，请稍后再保存", "busy"); return; }
-    S.file = fileNameEl.value.trim() || "room_map.json";
-    setStatus("保存中…", "busy");
-    var response, json;
+  function numberedFile(shape, id) {
+    return shape + "_" + String(id).padStart(3, "0") + ".json";
+  }
+
+  function hasLayoutId(value) {
+    return value !== null && value !== undefined && value !== "";
+  }
+
+  function updateWorkspaceControls() {
+    var layout = S.mode === "layout";
+    $("editMode").value = S.mode;
+    $("poolShape").value = S.shape;
+    $("layoutControls").hidden = !layout;
+    $("btnExportMap").hidden = layout;
+    $("legacyFileSection").hidden = true;
+    ["templateSection", "sizeSection"].forEach(function (id) { $(id).hidden = layout; });
+    var activeId = hasLayoutId(S.layoutId) ? S.layoutId : S.candidateId;
+    $("layoutNumber").value = hasLayoutId(activeId) ? activeId : "";
+    $("layoutFileHint").textContent = hasLayoutId(activeId)
+      ? "output/layouts/" + numberedFile(S.shape, activeId) : "编号已用完";
+    $("btnSaveLayout").disabled = !hasLayoutId(activeId);
+    $("workspaceHint").textContent = layout
+      ? "地形已锁定，仅摆放普通对象。L 型统一左下空缺；特殊房暂不参与。"
+      : "仅编辑地形。导出到 output/maps/，不会替换布局所用的正式固定空间。";
+    if (paletteEl.parentElement) paletteEl.parentElement.hidden = layout;
+    if (objectPaletteEl.parentElement) objectPaletteEl.parentElement.hidden = !layout;
+    S.layer = layout ? "object" : "tile";
+    if (S.objBrush === "exit") S.objBrush = "slime";
+  }
+
+  async function refreshLayoutCatalog() {
+    var shape = S.shape;
+    var result = await readJson(await apiGet("/api/layout_catalog?map=" + encodeURIComponent(shape)));
+    if (!result.ok) throw new Error(result.error || "布局列表读取失败");
+    if (shape !== S.shape) return result;
+    var list = $("layoutList");
+    list.innerHTML = "";
+    result.layouts.forEach(function (entry) {
+      var option = document.createElement("option");
+      option.value = entry.id;
+      option.textContent = entry.file;
+      list.appendChild(option);
+    });
+    if (!result.layouts.length) {
+      var empty = document.createElement("option");
+      empty.value = ""; empty.textContent = "暂无布局，点击新建"; list.appendChild(empty);
+    }
+    if (hasLayoutId(S.layoutId)) list.value = String(S.layoutId);
+    S.candidateId = result.next_id;
+    updateWorkspaceControls();
+    return result;
+  }
+
+  var workspaceEpoch = 0;
+  async function loadWorkspace(mode, shape) {
+    var epoch = ++workspaceEpoch;
+    S.loading = true;
     try {
-      response = await apiPost("/api/save?name=" + encodeURIComponent(S.file), serialize());
-      json = await readJson(response);
+      var template = {"1x1": "template_1x1", "L": "template_L", "2x2": "template_2x2"}[shape];
+      if (!template) throw new Error("本轮只支持普通房型 1x1、L、2x2");
+      var result = await readJson(await apiGet("/api/template?size=" + template));
+      if (epoch !== workspaceEpoch) return;
+      if (!result.ok) throw new Error(result.error || "固定房型读取失败");
+      S.mode = mode; S.shape = shape; S.layoutId = null;
+      applyState(result.rows, result.rot, []);
+      S.history = []; S.future = [];
+      await refreshLayoutCatalog();
+      if (epoch !== workspaceEpoch) return;
+      S.savedText = serialize();
+      updateWorkspaceControls();
+      updateSelection(); updateLayerHint(); updateAngleHint();
+      changed();
+      setStatus(mode === "layout" ? "已新建 " + shape + " 布局，保存时分配房型内编号" : "地图模式：" + shape + "，导出不改变正式空间");
     } catch (e) {
-      setStatus("保存失败：" + e.message + "（连不上 serve.py？页面 " + PAGE_VERSION + "）", false);
-      return;
+      if (epoch === workspaceEpoch) { updateWorkspaceControls(); setStatus(e.message, false); }
+    } finally {
+      if (epoch === workspaceEpoch) S.loading = false;
     }
-    if (!json.ok) {
-      if (json.issues) renderIssues(json.issues);
-      setStatus("保存失败：" + (json.error || "未知错误"), false);
-      return;
+  }
+
+  function switchWorkspace(mode, shape) {
+    if (S.dirty && !window.confirm("当前修改尚未保存，放弃修改并载入所选房型？")) {
+      updateWorkspaceControls(); return;
     }
-    S.savedText = json.text;
-    S.file = json.file || S.file;
-    fileNameEl.value = S.file;
-    markDirty();
-    saveDraftNow(false);
-    if (json.issues) renderIssues(json.issues);
-    var message = "已保存 output/" + S.file;
-    if (json.error_count) {
-      message += "（有 " + json.error_count + " 个错误，进代码前要修掉）";
-    }
-    await refreshList();
-    refreshInfo();
-    setStatus(message);
+    loadWorkspace(mode, shape);
+  }
+
+  async function loadNumberedLayout() {
+    var rawId = $("layoutList").value;
+    if (rawId === "") return;
+    var id = Number(rawId);
+    if (!Number.isInteger(id) || id < 0) return;
+    if (S.dirty && !window.confirm("放弃当前未保存修改并读取布局？")) return;
+    try {
+      var result = await readJson(await apiGet("/api/load_layout?map=" + encodeURIComponent(S.shape) + "&id=" + id));
+      if (!result.ok) throw new Error(result.error || "读取布局失败");
+      if (await importRaw(JSON.stringify(result.layout), result.layout.name, true)) {
+        S.layoutId = id;
+        S.history = []; S.future = [];
+        updateWorkspaceControls();
+        setStatus("已读取 " + numberedFile(S.shape, id));
+      }
+    } catch (e) { setStatus(e.message, false); }
+  }
+
+  async function saveNumberedLayout() {
+    if (S.loading) return;
+    if (!S.served) { setStatus("布局保存需要通过 serve.py 打开", false); return; }
+    try {
+      var epoch = workspaceEpoch, snapshot = serialize(), shape = S.shape;
+      var id = hasLayoutId(S.layoutId) ? S.layoutId : S.candidateId;
+      if (!hasLayoutId(id)) throw new Error("本房型编号已用完");
+      var result = await readJson(await apiPost("/api/save_layout?map=" + encodeURIComponent(shape) +
+        "&id=" + id + "&create=" + (hasLayoutId(S.layoutId) ? "0" : "1"), snapshot));
+      if (!result.ok) throw new Error(result.error || "保存失败");
+      if (epoch !== workspaceEpoch) return;
+      S.layoutId = result.layout_id;
+      S.savedText = snapshot;
+      await refreshLayoutCatalog();
+      markDirty(); saveDraftNow(S.dirty);
+      setStatus("已保存 output/layouts/" + result.file + "；应用布局生成后进入运行工程");
+    } catch (e) { setStatus(e.message, false); }
+  }
+
+  async function exportMap() {
+    if (S.loading) return;
+    try {
+      var epoch = workspaceEpoch, snapshot = serialize();
+      var result = await readJson(await apiPost("/api/save_map?map=" + encodeURIComponent(S.shape), snapshot));
+      if (!result.ok) throw new Error(result.error || "地图导出失败");
+      if (epoch !== workspaceEpoch) return;
+      S.savedText = snapshot; markDirty(); saveDraftNow(S.dirty);
+      setStatus("已导出 output/maps/" + result.file + "，正式固定空间保持原版本");
+    } catch (e) { setStatus(e.message, false); }
+  }
+
+  async function save() {
+    return S.mode === "layout" ? saveNumberedLayout() : exportMap();
   }
 
   async function emitC(quiet) {
@@ -1482,6 +1660,7 @@
         rot: json.rot,
         objects: json.objects || [],
         issues: json.issues || [],
+        mapId: json.map, layoutId: json.layout_id,
         format: json.format
       };
     } else {
@@ -1504,7 +1683,22 @@
       }
     }
     if (record !== false) pushHistory();
+    var isLayout = /"format"\s*:\s*"map_designer_layout"/.test(text);
+    var normal = ["1x1", "L", "2x2"].indexOf(data.mapId) >= 0;
+    if (isLayout && !normal) { setStatus("本轮不编辑特殊房布局", false); return false; }
+    if (isLayout) S.mode = "layout";
+    else if (!normal) S.mode = "map";
+    if (normal) S.shape = data.mapId;
+    S.layoutId = null;
+    if (hasLayoutId(data.layoutId)) S.candidateId = data.layoutId;
     applyState(data.rows, data.rot, data.objects);
+    if (S.served && S.mode === "layout") {
+      try { await refreshLayoutCatalog(); }
+      catch (e) { setStatus(e.message, false); }
+      if (hasLayoutId(data.layoutId)) S.candidateId = data.layoutId;
+    }
+    updateWorkspaceControls();
+    updateSelection(); updateLayerHint(); updateAngleHint();
     if (fromDisk) { S.savedText = serialize(); }
     renderIssues(data.issues);
     refreshInfo();
@@ -1593,20 +1787,28 @@
     return (S.file || "room_map.json").replace(/\.(txt|json)$/i, "");
   }
 
-  function downloadTxt() {
-    var name = baseName() + ".txt";
-    downloadBlob(serialize(), name, "text/plain;charset=utf-8");
-    setStatus("已下载 " + name);
+  function serializeExportJson() {
+    if (S.mode === "map") {
+      var map = JSON.parse(serializeJson());
+      map.name = S.shape; map.objects = [];
+      delete map.sha256;
+      return JSON.stringify(map, null, 2) + "\n";
+    }
+    var id = hasLayoutId(S.layoutId) ? S.layoutId : S.candidateId;
+    if (!hasLayoutId(id)) throw new Error("本房型编号已用完");
+    return JSON.stringify({format: "map_designer_layout", version: 1,
+      name: numberedFile(S.shape, id).replace(/\.json$/, ""), map: S.shape,
+      layout_id: id, objects: cloneObjects(S.objects)}, null, 2) + "\n";
   }
 
   function downloadJson() {
-    var name = baseName() + ".json";
-    downloadBlob(serializeJson(), name, "application/json;charset=utf-8");
+    var name = S.mode === "layout" ? numberedFile(S.shape, hasLayoutId(S.layoutId) ? S.layoutId : S.candidateId) : S.shape + ".json";
+    downloadBlob(serializeExportJson(), name, "application/json;charset=utf-8");
     setStatus("已下载 " + name);
   }
 
   function copyText() {
-    var text = serializeJson();
+    var text = serializeExportJson();
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () { setStatus("已复制 JSON"); },
         function () { mapTextEl.select(); setStatus("浏览器不让写剪贴板，已选中文本框，Ctrl+C 复制", false); });
@@ -1635,7 +1837,8 @@
         map: S.map,
         rot: S.rot,
         objects: S.objects,
-        dirty: !!dirty
+        dirty: !!dirty,
+        mode: S.mode, shape: S.shape, layoutId: S.layoutId, candidateId: S.candidateId
       }));
     } catch (e) { /* 隐私模式 / 配额满，忽略 */ }
   }
@@ -1676,7 +1879,8 @@
         cleanObjects.push({ kind: obj.kind, x: obj.x | 0, y: obj.y | 0, arg: obj.arg | 0 });
       }
       var dirty = Array.isArray(data) ? true : data.dirty !== false;
-      return { rows: rows, rot: rotGrid, objects: cleanObjects, dirty: dirty };
+      return { rows: rows, rot: rotGrid, objects: cleanObjects, dirty: dirty,
+        mode: data.mode, shape: data.shape, layoutId: data.layoutId, candidateId: data.candidateId };
     } catch (e) {
       return null;
     }
@@ -1834,7 +2038,10 @@
       button.type = "button";
       button.textContent = code;
       button.title = CORNER_NAMES[index];
-      button.addEventListener("click", function () { selectBrush("C"); setCorner(index); });
+      button.addEventListener("click", function () {
+        selectBrush(isCornerBrush(S.brush) ? S.brush : "C");
+        setCorner(index);
+      });
       cornerRow.appendChild(button);
     });
   }
@@ -1860,16 +2067,10 @@
     canvas.addEventListener("contextmenu", function (event) { event.preventDefault(); });
     window.addEventListener("mouseup", onUp);
 
-    canvasWrap.addEventListener("wheel", function (event) {
-      event.preventDefault();
-      var factor = Math.exp(-event.deltaY * 0.0015);
-      factor = Math.max(0.5, Math.min(2, factor));
-      setZoom(S.zoom * factor, true, { x: event.clientX, y: event.clientY });
-    }, { passive: false });
+    canvasWrap.addEventListener("wheel", onWheel, { passive: false });
 
     $("btnFit").addEventListener("click", fit);
     $("btn100").addEventListener("click", function () { zoomAtCenter(1); });
-    $("btn150").addEventListener("click", function () { zoomAtCenter(1.5); });
     zoomSlider.addEventListener("input", function () {
       var rect = canvasWrap.getBoundingClientRect();
       setZoom(Number(zoomSlider.value) / 100, true, {
@@ -1878,8 +2079,6 @@
       });
     });
 
-    layerTileEl.addEventListener("click", function () { selectLayer("tile"); });
-    layerObjectEl.addEventListener("click", function () { selectLayer("object"); });
     $("fwView").addEventListener("change", function () {
       S.fwView = this.checked;
       drawPreview();
@@ -1887,10 +2086,9 @@
     });
 
     $("btnClear").addEventListener("click", function () {
-      if (!window.confirm("清空整张地图和对象层？")) return;
+      if (!window.confirm(S.mode === "layout" ? "清空当前布局的对象？" : "清空整张地图和对象层？")) return;
       pushHistory();
-      S.map = grid(".");
-      S.rot = grid(0);
+      if (S.mode !== "layout") { S.map = grid("."); S.rot = grid(0); }
       S.objects = [];
       changed();
       setStatus("已清空（可以 Ctrl+Z 撤销）");
@@ -1923,12 +2121,16 @@
 
     $("btnValidate").addEventListener("click", runValidate);
     $("btnSave").addEventListener("click", save);
+    $("btnSaveLayout").addEventListener("click", saveNumberedLayout);
+    $("btnExportMap").addEventListener("click", exportMap);
+    $("btnNewLayout").addEventListener("click", function () { switchWorkspace("layout", S.shape); });
+    $("btnLoadLayout").addEventListener("click", loadNumberedLayout);
+    $("editMode").addEventListener("change", function () { switchWorkspace(this.value, S.shape); });
+    $("poolShape").addEventListener("change", function () { switchWorkspace(S.mode, this.value); });
     $("btnLoad").addEventListener("click", function () { loadName(fileNameEl.value.trim() || "room_map.json"); });
-    $("btnRefresh").addEventListener("click", refreshList);
     $("btnDelete").addEventListener("click", deleteFile);
     $("btnEmitC").addEventListener("click", function () { emitC(false); });
     $("btnDownloadC").addEventListener("click", downloadC);
-    $("btnDownloadTxt").addEventListener("click", downloadTxt);
     $("btnDownloadJson").addEventListener("click", downloadJson);
     $("btnCopy").addEventListener("click", copyText);
     $("btnPng").addEventListener("click", exportPng);
@@ -1980,7 +2182,7 @@
     if (key === "o") selectLayer(S.layer === "tile" ? "object" : "tile");
     else if (key === "b") selectBrush("B");
     else if (key === "k") selectBrush("K");
-    else if (key === "s") selectBrush("S");
+    else if (key === "s") { /* 旧石头地板，已废弃 */ }
     else if (key === "w") selectBrush("W");
     else if (key === "d") selectBrush("D");
     else if (key === "h") selectBrush("H");
@@ -2018,17 +2220,23 @@
     var draft = loadDraft();
     var useDraft = !!(draft && (!S.served || draft.dirty));
     if (useDraft) {
+      S.mode = draft.mode === "layout" ? "layout" : "map";
+      S.shape = ["1x1", "L", "2x2"].indexOf(draft.shape) >= 0 ? draft.shape : "1x1";
+      S.layoutId = hasLayoutId(draft.layoutId) ? draft.layoutId : null;
+      S.candidateId = hasLayoutId(draft.candidateId) ? draft.candidateId : 1;
       applyState(draft.rows, draft.rot, draft.objects);
       S.history.length = 0;
       S.future.length = 0;
       S.savedText = "";
       setStatus("已恢复本地草稿（有未保存修改）；要读磁盘上的文件请点「读取」。");
     }
+    updateWorkspaceControls();
 
     /* 素材列表 → 笔刷 → 图片，全部来自 res/pic（不再写死文件名） */
     loadAssets().then(function () {
       buildPalette();
       buildObjectPalette();
+      updateWorkspaceControls();
       updateSelection();
       return loadImages();
     }).then(function () {
@@ -2053,9 +2261,8 @@
       refreshList();
       refreshTemplates();
       if (!useDraft) {
-        S.loading = true;
-        loadName("room_map.json", true, false).finally(function () { S.loading = false; });
-      }
+        loadWorkspace("layout", "1x1");
+      } else refreshLayoutCatalog().catch(function (e) { setStatus(e.message, false); });
       scheduleValidate();
     } else {
       setStatus("file:// 模式：只能编辑和导入导出文本；保存 / 生成 C / 自动校验请用 serve.py 打开。", false);

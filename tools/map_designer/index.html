@@ -10,187 +10,152 @@
 <div class="app">
   <header>
     <h1>MAP DESIGNER · 房间设计器</h1>
-    <span id="subTitle" class="sub">40 × 23 · 1280 × 736 px · 32 px/格 · 地形 + 对象</span>
+    <span id="subTitle" class="sub">32 px/格 · 地形 + 对象</span>
     <span id="dirty" class="dirty" title="有未保存的修改"></span>
     <span class="spacer"></span>
     <span id="cursor">—</span>
     <div class="toolbar">
-      <button id="btnFit" type="button">适应窗口</button>
-      <button id="btn100" type="button">100%</button>
-      <button id="btn150" type="button">150%</button>
-      <input id="zoomSlider" type="range" min="10" max="800" step="1" value="100" title="自由缩放 10%–800%（滚轮以光标为中心）">
+      <button id="btnUndo" type="button" title="Ctrl+Z">撤销</button>
+      <button id="btnRedo" type="button" title="Ctrl+Y">重做</button>
+      <button id="btnFit" type="button" title="F">适应</button>
+      <button id="btn100" type="button" title="Ctrl+0">100%</button>
+      <input id="zoomSlider" type="range" min="10" max="800" step="1" value="100" title="滚轮以光标为中心缩放 10%–800%">
       <span id="zoomReadout" class="sub">100%</span>
     </div>
   </header>
-
   <aside class="panel left">
-    <div class="section">
-      <h2>编辑图层</h2>
-      <div id="layerRow" class="layer-row">
-        <button id="layerTile" type="button" class="on">地形</button>
-        <button id="layerObject" type="button">对象</button>
-      </div>
-      <div id="layerHint" class="hint">地形层：画地板、墙、门、角块。切到对象层后，左键放对象、右键擦对象。</div>
+    <div class="scroll">
+      <section class="section">
+        <h2>当前贴图</h2>
+        <div class="preview">
+          <canvas id="preview" width="96" height="96"></canvas>
+          <div id="previewText"></div>
+        </div>
+        <div id="layerHint" class="hint">选择贴图即可切换地形或对象层。</div>
+        <div id="angleRow" class="row4 mt" aria-label="旋转与门方向"></div>
+        <div id="cornerRow" class="row4 mt" aria-label="角块翻转"></div>
+        <div id="angleHint" class="hint"></div>
+      </section>
+      <section class="section">
+        <h2>校验建议 <span id="issueBadge" class="count-badge"></span></h2>
+        <div id="issues" class="issues"></div>
+        <div id="issueSummary" class="summary">尚未校验</div>
+        <button id="btnValidate" class="small mt" type="button">重新校验</button>
+      </section>
+      <details class="section" open>
+        <summary>地形贴图</summary>
+        <div id="palette" class="palette"></div>
+      </details>
+      <details class="section" open>
+        <summary>对象贴图</summary>
+        <div id="objectPalette" class="palette"></div>
+      </details>
+      <details class="section">
+        <summary>地图状态</summary>
+        <div class="info" id="constraintInfo"></div>
+        <div id="counts" class="counts mt"></div>
+      </details>
+      <details class="section">
+        <summary>预览设置与操作提示</summary>
+        <label class="check"><input id="refFrame" type="checkbox" checked>显示 720p 参考框</label>
+        <label class="check"><input id="fwView" type="checkbox">固件旋转视角</label>
+        <button id="btnAssets" class="small mt" type="button">重载贴图</button>
+        <div class="hint">左键绘制，右键擦除；R 旋转，O 切换图层；数字键选择贴图。滚轮围绕光标缩放，F 适应窗口。</div>
+      </details>
     </div>
-    <div class="section">
-      <h2>地形笔刷</h2>
-      <div id="palette" class="palette"></div>
-      <div class="row mt">
-        <button id="btnAssets" type="button">重载素材</button>
-      </div>
-      <div class="hint">图片全部来自 res/pic（启动自动扫描）；换了图 / 挪了目录点一下重载。</div>
-    </div>
-    <div class="section">
-      <h2>对象笔刷</h2>
-      <div id="objectPalette" class="palette"></div>
-      <div class="hint">小怪：slime / bug；交互物：web / stone / box / crate / exit。</div>
-    </div>
-    <div class="section">
-      <h2>角落翻转</h2>
-      <div id="cornerRow" class="row4"></div>
-      <div class="hint">C 原样 / X 水平 / Y 垂直 / Z 双向，对应 RTL 的 FLIP_X / FLIP_Y。</div>
-    </div>
-    <div class="section">
-      <h2>旋转 / 门方向</h2>
-      <div id="angleRow" class="row4"></div>
-      <div id="angleHint" class="hint">墙和地板按这个角度旋转；门的方向是 N/E/S/W。</div>
-      <label class="check"><input id="fwView" type="checkbox">固件视角（tile_rot 里 1↔3 互换）</label>
-    </div>
-    <div class="section">
-      <h2>当前预览</h2>
-      <div class="preview">
-        <canvas id="preview" width="96" height="96"></canvas>
-        <div id="previewText"></div>
-      </div>
-    </div>
-    <div class="section">
-      <h2>操作</h2>
-      <div class="keys">
-        <kbd>左键</kbd><span>绘制 / 放对象</span>
-        <kbd>右键</kbd><span>擦除 / 删对象</span>
-        <kbd>R</kbd><span>循环旋转 / 角块翻转</span>
-        <kbd>O</kbd><span>切换地形 / 对象层</span>
-        <kbd>0 – 7</kbd><span>地形笔刷按顺序选（0 空，1 木地板，…，7 石头）</span>
-        <kbd>0 – 6</kbd><span>对象层按顺序选对象</span>
-        <kbd>Ctrl+Z</kbd><span>撤销（Ctrl+Y 重做）</span>
-        <kbd>Ctrl+S</kbd><span>保存到 output</span>
-        <kbd>F</kbd><span>适应窗口（Ctrl+0 回到 100%）</span>
-        <kbd>尺寸</kbd><span>右栏「画布尺寸」改宽高（会清空）</span>
-      </div>
-    </div>
-    <div class="section">
-      <h2>地图操作</h2>
-      <div class="row">
-        <button id="btnClear" type="button">清空</button>
-        <button id="btnUndo" type="button">撤销</button>
-        <button id="btnRedo" type="button">重做</button>
-      </div>
-    </div>
+    <div id="status" class="status" role="status">正在连接本地服务…</div>
   </aside>
-
   <main class="canvas-wrap" id="canvasWrap">
-    <canvas id="map" width="1280" height="720"></canvas>
+    <div id="mapStage"><canvas id="map" width="1280" height="736"></canvas></div>
   </main>
-
   <aside class="panel right">
     <div class="scroll">
-    <div class="section">
-      <h2>模板</h2>
-      <select id="templateList" title="内置模板 + 自定义模板"></select>
-      <div class="row mt">
-        <button id="btnTplLoad" class="primary" type="button">载入</button>
-        <button id="btnTplDelete" type="button">删除</button>
-      </div>
-      <input id="templateName" class="mt" placeholder="文件名：my_template" spellcheck="false" autocomplete="off">
-      <input id="templateLabel" class="mt" placeholder="显示名：我的 L 房（可空）" spellcheck="false" autocomplete="off">
-      <div class="row mt">
-        <button id="btnTplSave" type="button">当前图存为模板</button>
-      </div>
-      <div class="hint">内置 1×1 / L / 2×2 不可删；自定义模板写到 <b>templates/custom/</b>，地形、旋转、对象一起保存。</div>
+      <section class="section">
+        <h2>普通房布局池</h2>
+        <label class="field-label" for="editMode">编辑模式</label>
+        <select id="editMode"><option value="layout">布局模式 · 只摆对象</option><option value="map">地图模式 · 编辑空间</option></select>
+        <label class="field-label mt" for="poolShape">房型</label>
+        <select id="poolShape"><option value="1x1">1×1</option><option value="L">L · 左下空缺</option><option value="2x2">2×2</option></select>
+        <div id="layoutControls">
+          <label class="field-label mt" for="layoutList">已有布局</label>
+          <select id="layoutList"></select>
+          <div class="row mt"><button id="btnLoadLayout" type="button">读取布局</button><button id="btnNewLayout" type="button">新建布局</button></div>
+          <label class="field-label mt" for="layoutNumber">布局编号（房型内自动递增）</label>
+          <input id="layoutNumber" type="number" min="1" max="999" readonly>
+          <div id="layoutFileHint" class="hint"></div>
+          <button id="btnSaveLayout" class="primary mt" type="button">保存布局</button>
+        </div>
+        <button id="btnExportMap" class="primary mt" type="button" hidden>导出地图</button>
+        <div id="workspaceHint" class="hint">布局模式锁定地形；隐藏房、商店、道具房和 Boss 房暂不参与。</div>
+      </section>
+      <section class="section" id="legacyFileSection">
+        <h2>地图文件</h2>
+        <select id="fileList" title="output 中已有的地图"></select>
+        <input id="fileName" class="mt" value="room_map.json" aria-label="地图文件名" spellcheck="false" autocomplete="off">
+        <div class="row mt">
+          <button id="btnLoad" type="button">读取</button>
+          <button id="btnSave" class="primary" type="button">保存</button>
+          <button id="btnDelete" type="button">删除</button>
+        </div>
+        <div class="hint">保存到 output/&lt;文件名&gt;.json。Ctrl+S 快速保存。</div>
+      </section>
+      <section class="section" id="templateSection">
+        <h2>模板</h2>
+        <select id="templateList" title="内置与自定义模板"></select>
+        <div class="row mt">
+          <button id="btnTplLoad" type="button">载入模板</button>
+          <button id="btnTplDelete" type="button">删除模板</button>
+        </div>
+        <details class="mt">
+          <summary>将当前地图存为模板</summary>
+          <input id="templateName" class="mt" placeholder="文件名：my_template" aria-label="模板文件名" spellcheck="false" autocomplete="off">
+          <input id="templateLabel" class="mt" placeholder="显示名（可空）" aria-label="模板显示名" autocomplete="off">
+          <button id="btnTplSave" class="mt" type="button">保存模板</button>
+          <div class="hint">保存到 templates/custom/；内置模板不可删除。</div>
+        </details>
+      </section>
+      <section class="section">
+        <h2>导入</h2>
+        <label class="filebtn">选择地图文件<input id="filePicker" type="file" accept=".json,.txt,.c,application/json,text/plain"></label>
+        <details class="mt">
+          <summary>粘贴文本导入</summary>
+          <textarea id="importText" class="mt" aria-label="导入地图文本" spellcheck="false" placeholder="粘贴 JSON、旧版地图文本或导出的 C 数据"></textarea>
+          <button id="btnImportText" class="mt" type="button">导入文本</button>
+        </details>
+      </section>
+      <section class="section">
+        <h2>导出</h2>
+        <div class="row">
+          <button id="btnDownloadJson" type="button">下载 JSON</button>
+          <button id="btnPng" type="button">下载 PNG</button>
+        </div>
+        <details class="mt">
+          <summary>JSON 预览</summary>
+          <textarea id="mapText" class="mt" aria-label="当前地图 JSON" readonly spellcheck="false"></textarea>
+          <button id="btnCopy" class="mt" type="button">复制 JSON</button>
+        </details>
+        <details class="mt">
+          <summary>C 数据导出</summary>
+          <input id="cFileName" class="mt" value="game_world_map.c" aria-label="C 导出文件名" spellcheck="false" autocomplete="off">
+          <div class="row mt">
+            <button id="btnEmitC" type="button">生成到 output</button>
+            <button id="btnDownloadC" type="button">下载 C</button>
+          </div>
+          <div class="hint">单图数据导出。更新 project 布局使用 serve.py --emit-layouts --apply。</div>
+        </details>
+      </section>
+      <details class="section" id="sizeSection">
+        <summary>画布尺寸</summary>
+        <div class="size-row mt">
+          <input id="sizeCols" type="number" min="8" max="45" step="1" value="40" aria-label="列数">
+          <span class="sub">×</span>
+          <input id="sizeRows" type="number" min="8" max="35" step="1" value="23" aria-label="行数">
+          <button id="btnSize" type="button">应用</button>
+        </div>
+        <div id="sizeHint" class="hint"></div>
+        <button id="btnClear" class="small mt" type="button">清空地图</button>
+      </details>
     </div>
-
-    <div class="section">
-      <h2>画布尺寸</h2>
-      <div class="size-row">
-        <input id="sizeCols" type="number" min="8" max="45" step="1" value="40" title="列数（宽）">
-        <span class="sub">×</span>
-        <input id="sizeRows" type="number" min="8" max="35" step="1" value="23" title="行数（高）">
-        <button id="btnSize" type="button">应用</button>
-      </div>
-      <div id="sizeHint" class="hint">40 × 23 格 = 1280 × 736 px</div>
-      <label class="check"><input id="refFrame" type="checkbox" checked>画 720p 参考框（只是参考，不参与校验）</label>
-    </div>
-
-    <div class="section">
-      <h2>房间约束</h2>
-      <div class="info" id="constraintInfo">
-        <strong>画布</strong> 40 × 23 格 = 1280 × 736 px<br>
-        <strong>竞技场</strong> 9,4 → 31,16<br>
-        <strong>墙带</strong> 2 格厚，门洞 2 格<br>
-        <strong>门槽位</strong> N(20,2) E(32,10) S(20,17) W(7,10)<br>
-        <strong>字符</strong> <code>.</code> 空 <code>B</code> 木地板 <code>K</code> 基岩 <code>S</code> 石头 <code>W</code> 墙 <code>D</code> 门 <code>C/X/Y/Z</code> 角块
-      </div>
-      <div class="hint">竞技场 = 地板 B/K/S 的包围盒，墙带 = 包围盒外扩 2 格。所有房间共用同一个 map 池，图不绑定房间类型。</div>
-    </div>
-
-    <div class="section">
-      <h2>当前统计</h2>
-      <div id="counts" class="counts"></div>
-    </div>
-
-    <div class="section">
-      <h2>校验 <span id="issueBadge" class="count-badge"></span></h2>
-      <div id="issues" class="issues"></div>
-      <div id="issueSummary" class="summary">尚未校验</div>
-      <div class="row mt">
-        <button id="btnValidate" type="button">重新校验</button>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2>保存到 output</h2>
-      <input id="fileName" value="room_map.json" spellcheck="false" autocomplete="off">
-      <div class="row mt">
-        <button id="btnSave" class="primary" type="button">保存</button>
-        <button id="btnLoad" type="button">读取</button>
-      </div>
-      <select id="fileList" class="mt" title="output 里已有的文件"></select>
-      <div class="row mt">
-        <button id="btnRefresh" type="button">刷新列表</button>
-        <button id="btnDelete" type="button">删除</button>
-      </div>
-      <div class="hint">保存只写 <b>output/&lt;name&gt;.json</b>（唯一存档）；老 .txt 仍可导入，但不会再生成。生成 C 必须手动点，见下面「生成 C」。</div>
-    </div>
-
-    <div class="section">
-      <h2>生成 C</h2>
-      <input id="cFileName" value="game_world_map.c" spellcheck="false" autocomplete="off">
-      <div class="row mt">
-        <button id="btnEmitC" class="primary" type="button">生成</button>
-        <button id="btnDownloadC" type="button">下载 .c</button>
-      </div>
-      <div class="hint">C 是<b>手动</b>导出（默认不生成），写到 tools/map_designer/output/，不会改 code/。日常存档只需要那份 .json。</div>
-    </div>
-
-    <div class="section">
-      <h2>JSON 存档 / 导入</h2>
-      <div class="hint">上面的文本框是当前 JSON（数字笔刷）；保存写的也是这个格式。</div>
-      <textarea id="mapText" readonly spellcheck="false"></textarea>
-      <div class="row mt">
-        <button id="btnCopy" type="button">复制 JSON</button>
-        <button id="btnDownloadTxt" type="button">下载 .txt（旧版）</button>
-        <button id="btnDownloadJson" type="button">下载 .json</button>
-        <button id="btnPng" type="button">PNG</button>
-      </div>
-      <textarea id="importText" class="mt" spellcheck="false" placeholder="粘贴地图（40×23 或 45×35 都行，行数×列数从内容读），或贴一段 C（含 room_map_shared / room_objects）"></textarea>
-      <div class="row mt">
-        <button id="btnImportText" type="button">导入文本</button>
-        <label class="filebtn">导入文件<input id="filePicker" type="file" accept=".txt,.c,text/plain"></label>
-      </div>
-    </div>
-
-    </div>
-    <div id="status" class="status">通过 serve.py 打开页面才能保存 / 生成 C / 自动校验。</div>
   </aside>
 </div>
 <script src="app.js" defer></script>

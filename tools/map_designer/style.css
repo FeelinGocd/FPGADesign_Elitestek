@@ -1,6 +1,6 @@
 /* ==========================================================================
    DEBUG 房间编辑器 —— 样式
-   布局：左侧素材 / 中间画布 / 右侧校验 + 文件 + 导入导出
+   布局：左侧贴图/状态/校验 / 中间画布 / 右侧文件/模板/导入导出
    ========================================================================== */
 :root {
   --bg: #0c1118;
@@ -17,6 +17,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
   overflow: hidden;
@@ -83,6 +84,7 @@ header .toolbar { display: flex; align-items: center; gap: 6px; }
   background: var(--panel);
 }
 .panel.left { border-right: 1px solid var(--line); }
+.panel.left,
 .panel.right {
   border-left: 1px solid var(--line);
   display: flex;
@@ -90,7 +92,7 @@ header .toolbar { display: flex; align-items: center; gap: 6px; }
   padding: 0;
   overflow: hidden;
 }
-.panel.right .scroll {
+.panel .scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -113,6 +115,16 @@ header .toolbar { display: flex; align-items: center; gap: 6px; }
   letter-spacing: 0;
   text-transform: none;
 }
+details > summary {
+  cursor: pointer;
+  color: #b8c7d9;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 0;
+}
+details[open] > summary { margin-bottom: 8px; }
+details > summary:hover { color: var(--blue); }
+.filebtn { width: 100%; }
 
 .palette { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .tile {
@@ -188,19 +200,24 @@ kbd {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 24px;
+  position: relative;
+  padding: 0;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
   background: radial-gradient(circle at center, #182535, #0b1118 72%);
 }
+#mapStage {
+  position: relative;
+}
 #map {
+  position: absolute;
   display: block;
   flex: 0 0 auto;
   max-width: none;
   max-height: none;
   background: #090e14;
-  border: 1px solid #5b7189;
+  border: 0;
+  outline: 1px solid #5b7189;
   box-shadow: 0 10px 38px #0009;
   image-rendering: pixelated;
   cursor: crosshair;
@@ -344,6 +361,7 @@ textarea {
   .app { grid-template-columns: 236px minmax(420px, 1fr) 280px; }
 }
 @media (max-width: 980px) {
-  .app { grid-template-columns: minmax(420px, 1fr) 280px; }
-  .panel.left { display: none; }
+  .app { grid-template-columns: 216px minmax(240px, 1fr) 260px; }
+  header .sub { display: none; }
+  #cursor { display: none; }
 }

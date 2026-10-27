@@ -1,8 +1,38 @@
 # MAP DESIGNER 交接文档
 
 目录：tools/map_designer/
-页面版本：2026-10-24j
-日期：2026-10-24
+页面版本：2026-10-25d
+日期：2026-10-25
+
+## 当前接手状态（优先于下文历史记录）
+
+- 最新范围（页面 2026-10-25f）：仅普通 1×1、L、2×2；特殊房暂不编辑。
+  地图/布局两种模式分开，布局锁定地形；编号方案存 `output/layouts/<房型>_001.json`，
+  地图导出存 `output/maps/<房型>.json`，不自动替换正式 maps/。
+- `1x1_000.json` 是起点专用空布局；普通房只从正编号方案确定性选择，旧非空参考布局不会再作为起点。
+- 编号由服务端在各房型内递增分配，文件名与 map/layout_id/name 必须一致。
+  生成的 g_layout_ids 保存稳定设计编号，与 C 数组下标分离；有编号方案时跳过旧参考方案。
+  起始/隐藏/Boss 使用原指定布局，道具房/商店走原内容逻辑，防止混入普通方案。
+- 普通 2×2 暂只支持设计/导出；当前生成器的 2×2 是 Boss 专用，本轮未新增普通大房拓扑。
+  新增编号接口需重启 serve.py。完整流程与测试命令见 README 顶部。
+
+- 布局池适配（页面 2026-10-25e）：`maps/` 持有固定空间，内置模板直接读取；L 设计只用左下空缺。
+  「保存为布局池方案」生成 `map_designer_layout` v1，只记录 map 与 objects；旧完整 JSON 兼容读取。
+- 四份正式 output 已转为紧凑方案，原地形完整移入 maps/，没有改变房间空间与现有对象。
+  批量应用会拒绝不匹配固定地图池的地形；多对象方案共享逐格地图，不再重复导出地形表。
+- 运行时按固定空间自动选方案：普通/L/隐藏/Boss 接入，起点固定，道具房/商店保持现有专用逻辑。
+  L 对象生成、绘制、碰撞、炸碎擦除及换房旧覆盖标记已接入镜像，破坏键仍使用原坐标。
+  上板前由用户重新编译固件；不需要为纯对象布局更新素材或 FPGA bit 流。
+
+- 正式贴图已接通设计器 → JSON → project C 工程。旧 Minecraft 图片已停用，旧 S 存档仍可解析，编辑器按木地板显示。
+- 普通门 D 占两格，第二格是空白；隐藏入口 H 只占靠地板的一格，外侧保留隐藏房墙。预览、旋转、校验、生成和运行时触发位置均按此区分。
+- 隐藏房使用 K/w/c/x/y/z；标准隐藏房导出到 map=2 参数框架，修改过地形或角块的房间按原图导出地形表。对象仍是独立 objects 层。
+- 左侧为贴图、预览、状态和校验建议；右侧为文件、模板与导入导出。移除重复图层按钮、150% 快捷按钮和旧 TXT 导出，旧格式导入仍保留。
+- 三套内置模板使用 B 木地板。正式素材是 background_floor_wood/hidden、background_wall_wood/hidden、background_corner_wood/hidden，以及 background_interact_hidden。
+- 布局生成默认只写 project；code 是归档，只有显式 --target archive/all 才会写。
+- 滚轮在画布任意位置以光标为中心双向缩放，范围 10%–800%，支持横向滚轮与触控板。
+- 验证：Python 74 项（1 项跳过）、Node 编辑器回归、Chrome 九位置双向缩放、C 门与镜像检查均通过，尚需上板验证。测试使用独立框架数据，不依赖用户正在编辑的 output 地图。
+- 下文 2026-10-24 的 S/Minecraft 素材、两份同步导出等内容是历史状态，以此节及 README 为准。
 
 ## 1. 当前状态
 
@@ -263,7 +293,7 @@ mapfmt.validate() 负责，页面只显示结果。
     # 预览布局数据（不写文件）
     uv run tools/map_designer/serve.py --emit-layouts
 
-    # 真正写布局数据（注意：会写工程树 + code/）
+    # 真正写布局数据（默认仅 project 工程树）
     uv run tools/map_designer/serve.py --emit-layouts --apply
 
     # 检查布局生成物是否过期
@@ -272,9 +302,8 @@ mapfmt.validate() 负责，页面只显示结果。
 --emit-layouts --apply 会写：
 
     project/GamingPlayUnit/.../game/game_layout_data.c/.h
-    code/logic/game/game_layout_data.c/.h
 
-这是工具里唯一会写 code/ 的命令，执行前要确认。
+只有显式指定 --target archive/all 才会写 code/。
 
 ## 10. C / 布局导出与固件现状
 

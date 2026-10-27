@@ -51,10 +51,10 @@ static const world_map_t g_maps[] = {
     { 0, 0,
       { BOSS_MAP_COLS, BOSS_MAP_ROWS, 8, 7, 36, 27, { 22, 17, 22, 17 }, { 0, 0, 0, 0 }, 0 },
       BOSS_MAP_COLS * TILE, BOSS_MAP_ROWS * TILE },
-    /* 2 · 隐藏房：几何和 0 号**完全一样**，只是地板换基岩、门换隐藏门
+    /* 2 · 隐藏房：几何和 0 号**完全一样**，地板/墙/角块/门全换隐藏房皮肤
      *   ★ 这就是"只存贴图种类"：0 字节地形表，几何永远和普通房一致。  */
     { 0, 0,
-      { MAP_COLS, MAP_ROWS, 9, 4, 31, 16, { 20, 10, 20, 10 }, { 0, 1, 2, 3 }, 1, 'K', 0, 'H' },
+      { MAP_COLS, MAP_ROWS, 9, 4, 31, 16, { 20, 10, 20, 10 }, { 0, 1, 2, 3 }, 1, 'K', 'w', 'H', 'c' },
       SCR_W, SCR_H },
 };
 
@@ -330,16 +330,18 @@ int game_tile_asset(int tx, int ty)
 
     switch (c) {
     /*  ★ 2026-10-25：木地板/木墙/墙角换成新画的 `background_*` 三件套
-     *    （`minecraft_wood` 只剩玻璃/备用之类的地方在用）。规则不变：
+     *    （旧的 minecraft_* 已全部删掉）。规则不变：
      *    地板铺满、墙按木纹角度旋转、墙角走 C/X/Y/Z 翻转。  */
     case 'B': return ASSET_background_floor_wood; /* 普通房地板 = 木地板 */
-    case 'K': return ASSET_minecraft_bedrock;     /* 隐藏房地板 = 基岩 */
+    case 'K': return ASSET_background_floor_hidden; /* 隐藏房地板 */
     case 'W': return ASSET_background_wall_wood;
+    case 'w': return ASSET_background_wall_hidden;  /* 隐藏房墙 */
     case 'D': return ASSET_background_door_normal;
-    /*  隐藏门 'H'：未炸开前和木墙一模一样（玩家看不出、也走不过去）。
-     *  真正的开门逻辑（炸弹冲击波 → 记已开 → 换贴图/放行）下一步接。 */
-    case 'H': return ASSET_background_wall_wood;
+    /*  隐藏门 'H'：未炸开前和隐藏房墙一模一样（玩家看不出、也走不过去）。
+     *  真正的开门逻辑（炸弹冲击波 → 记已开 → 换贴图/放行）见 game_room_door_asset_at。 */
+    case 'H': return ASSET_background_wall_hidden;
     case 'C': case 'X': case 'Y': case 'Z': return ASSET_background_corner_wood;
+    case 'c': case 'x': case 'y': case 'z': return ASSET_background_corner_hidden;
     default:  return -1;
     }
 }
@@ -407,11 +409,13 @@ static int is_door(int tx, int ty)
  *  所以"门洞第二格"必须按当前房间的镜像算，不能写死 +1。  */
 static int door_pair_sx(int tx, int ty)
 {
+    if (game_world_tile_at(tx, ty) == 'H') return 0;   /* 隐藏门只占 1 格 */
     return (game_world_dir_at(tx, ty) & 1) ? ((s_flip & 1u) ? -1 : 1) : 0;
 }
 
 static int door_pair_sy(int tx, int ty)
 {
+    if (game_world_tile_at(tx, ty) == 'H') return 0;
     return (game_world_dir_at(tx, ty) & 1) ? 0 : ((s_flip & 2u) ? -1 : 1);
 }
 
@@ -431,7 +435,7 @@ static int door_inner_cell(int tx, int ty, int *dtx, int *dty)
         {
             char nc = game_world_tile_at(dx, dy);
 
-            if (nc != 'D' && nc != 'H') continue;      /* 'H' 和 'D' 一样占两格 */
+            if (nc != 'D') continue;                   /* 只有普通门占两格；隐藏门 1 格，没有门洞 */
         }
         if (dx + door_pair_sx(dx, dy) != tx) continue;
         if (dy + door_pair_sy(dx, dy) != ty) continue;
@@ -477,7 +481,8 @@ static void blit_cell(u32 fb, int tx, int ty)
     }
     if (c == 'D' || c == 'H') {                       /* 'H' = 隐藏门（未炸开时当墙） */
         if (game_room_door_visible(tx, ty)) return;    /* 可见：第二趟画门 */
-        ai = ASSET_background_wall_wood;               /* 不可见：当墙画 */
+        /* 不可见：当墙画。隐藏门背后是【隐藏房墙】，普通门背后是木墙。  */
+        ai = (c == 'H') ? ASSET_background_wall_hidden : ASSET_background_wall_wood;
         c = 'W';
     }
 
@@ -512,18 +517,12 @@ static void door_rect(int tx, int ty, int *ox, int *oy, int *ow, int *oh)
     if (ow) *ow = (r & 1) ? dh : dw;      /* 输出尺寸（横向门宽高互换） */
     if (oh) *oh = (r & 1) ? dw : dh;
 
-    /*  ★ 隐藏入口只有 32×32（一格），而墙厚两格 ⇒ 贴【靠地板】那一格。
-     *    门洞两格里，朝房间里再走一步能踩进竞技场的那格，就是靠地板的那格
-     *    （判据见 game_room_door_hide_cell()，四个方向各不一样，不能写死正负）。
+    /*  ★ 隐藏门只占 1 格：直接贴在这一格，背后铺的是隐藏房墙（见 blit_door）。
      *    ★ 比例 40×64 的门不能用这个分支：它们是"贴满门洞、左右探进墙里 4 px"。  */
-    if (ai == ASSET_background_interact_hideEnterance) {
-        int hx = 0, hy = 0;
-
-        if (game_room_door_hide_cell(tx, ty, &hx, &hy)) {
-            *ox = hx * TILE;
-            *oy = hy * TILE;
-            return;
-        }
+    if (ai == ASSET_background_interact_hidden) {
+        *ox = tx * TILE;
+        *oy = ty * TILE;
+        return;
     }
 
     /*  ★ 按【门格】算，不要按竞技场边缘算：L 形房的内凹门不在外边缘上，
@@ -540,26 +539,30 @@ static void door_rect(int tx, int ty, int *ox, int *oy, int *ow, int *oh)
 
 /*  画一扇门。
  *
- *  ★ 门洞本身还是墙上的 1×2 格（竖直门 32×64；横向门 64×32），但【贴图可以比门洞大】：
- *    现在三种门都是 40×64 —— 左右各探进墙里 4 px，正好把 2 格厚的墙填满，
- *    不用再补以前那 10 px。用哪张门贴图由 game_room_door_asset() 按房间类型决定。
- *    ★ 两格墙贴图先铺满门洞（透明边后面是墙，不是黑洞），门再盖上去。
+ *  ★ 普通门（normal / accessory / boss）门洞 1×2 格、贴图 40×64（左右各探进墙 4 px）；
+ *    隐藏门只有 1 格（32×32），背后铺【隐藏房墙】，不占第二格、也没有门洞。
+ *    用哪张门贴图由 game_room_door_asset() 按房间类型决定。
+ *    ★ 墙贴图先铺满（透明边后面是墙，不是黑洞），门再盖上去。
  */
 static void blit_door(u32 fb, int tx, int ty)
 {
     int ai = game_room_door_asset_at(tx, ty);
+    int one = (ai == ASSET_background_interact_hidden);   /* 隐藏门只有 1 格 */
     const asset_desc_t *door = &g_assets[ai];
-    const asset_desc_t *wall = &g_assets[ASSET_background_wall_wood];
+    const asset_desc_t *wall = &g_assets[one ? ASSET_background_wall_hidden
+                                             : ASSET_background_wall_wood];
     u32 rot = tile_rot(tx, ty);                     /* ★ 和这一格墙完全同一个角度 */
     u32 drot = rot_flag_of(game_world_dir_at(tx, ty));  /* 门本身按【朝向】画（镜像后才是同一条门） */
     int x, y;
 
-    /* ① 门洞的两格先铺成墙（和门同一个旋转，接缝才对得上）  */
+    /* ① 先铺墙：隐藏门只铺自己这一格（1 格，背后就是隐藏房墙）；
+     *    普通门铺满两格门洞（和门同一个旋转，接缝才对得上）。  */
     CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
         (u32)(tx * TILE), (u32)(ty * TILE), TILE, TILE, rot);
-    CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
-        (u32)((tx + door_pair_sx(tx, ty)) * TILE),
-        (u32)((ty + door_pair_sy(tx, ty)) * TILE), TILE, TILE, rot);
+    if (!one)
+        CI_gpu2d_spriteFlip(wall->base_word, wall->stride_word, fb,
+            (u32)((tx + door_pair_sx(tx, ty)) * TILE),
+            (u32)((ty + door_pair_sy(tx, ty)) * TILE), TILE, TILE, rot);
 
     /* ② 门按贴图尺寸摆：竖直门贴地板的上/下边，横向门贴地板的左/右边  */
     door_rect(tx, ty, &x, &y, 0, 0);
@@ -671,7 +674,7 @@ static void door_clean_rect(int tx, int ty, int *ox, int *oy, int *ow, int *oh)
 {
     int ai = game_room_door_asset_at(tx, ty);
 
-    if (ai != ASSET_background_interact_hideEnterance) {
+    if (ai != ASSET_background_interact_hidden) {
         door_rect(tx, ty, ox, oy, ow, oh);
         return;
     }

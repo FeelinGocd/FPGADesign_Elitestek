@@ -1,5 +1,73 @@
 # MAP DESIGNER · 房间设计器（tools/map_designer）
 
+## 普通房布局池工作流（页面 2026-10-25f）
+
+房间空间固定，由 `maps/1x1.json`、`maps/L.json`、`maps/2x2.json` 和
+`maps/hidden.json` 持有。它们从本次适配前的正式地图提取，保留原来的地形、门与角块。
+**L 型设计只用左下空缺，不另画其它朝向。** 内置模板直接读取这些固定空间。
+
+本轮只设计普通房型 **1×1、L、2×2**。隐藏房、商店、道具房与 Boss 房暂不编辑，
+也不从普通布局池选取对象方案。`maps/hidden.json` 和旧特殊房数据仅为现有游戏兼容保留。
+
+1. 默认进入 **布局模式**，选择房型，点 **新建布局**。
+2. 地形、门和画布尺寸已锁定，只放普通怪物、网、石头、木箱、板条箱；对象只能放在地板上。
+3. 点 **保存布局**，按房型自动编号，保存为 `output/layouts/1x1_001.json`、`L_001.json`、`2x2_001.json`。
+   每种房型独立从 001 递增。读取已有方案后保存为更新；新建不会覆盖已有编号。
+   `1x1_000.json` 是保留的起点空布局，不能放对象，也不会被普通房间抽选。
+4. 在仓库根目录执行 `python tools/map_designer/serve.py --emit-layouts --apply`。
+   默认只更新 `project` 的生成数据；`--emit-layouts --check` 可检查是否同步。
+5. 用户重新编译、下载固件。初始房固定使用空的 `1x1_000`；普通 1×1 和 L 房按空间选择正编号方案；同一间房在本层保持选择。
+   有编号方案时不再抽中旧参考空布局；没有编号方案时回退到原有布局。
+   起始房、隐藏房和 Boss 房保留原指定方案，道具房/商店仍走原专用逻辑。
+
+**2×2 本轮支持设计和导出。当前关卡的 2×2 仍是 Boss 专用，本次没有增加普通 2×2 的拓扑生成。**
+普通 2×2 方案不会被 Boss 房误选，之后接入普通大房生成时再使用。
+
+文件按职责分开：
+
+| 位置 | 用途 |
+|---|---|
+| `maps/1x1.json`、`maps/L.json`、`maps/2x2.json` | 正式固定空间，布局引用的依据 |
+| `output/maps/<房型>.json` | **地图模式**导出的纯空间文件；不含对象，不自动替换正式空间 |
+| `output/layouts/<房型>_<编号>.json` | **布局模式**导出的正式对象方案，批量生成器自动读取 |
+| `output/` 根目录旧 JSON | 兼容原有参考布局，保留已有内容 |
+
+地图模式用于独立编辑/导出空间，布局模式重新加载正式固定空间。改地图草稿不会让已有布局的墙、门
+或坐标悄悄变化；正式房型变更需作为地图池变更单独处理。
+
+方案示例（格子坐标以 0 开始，使用模板原坐标，不裁剪、不居中、不翻转）：
+
+```json
+{
+  "format": "map_designer_layout",
+  "version": 1,
+  "name": "L_001",
+  "map": "L",
+  "layout_id": 1,
+  "objects": [{"kind": "slime", "x": 25, "y": 9, "arg": 0}]
+}
+```
+
+读取方案时由服务端补回固定空间，所以请通过 `serve.py` 打开设计器。
+运行时如果地图拓扑采用 L 型其它朝向，地形、对象生成、绘制、碰撞与擦除统一镜像；
+破坏状态仍用设计原坐标记录。多套 L 对象方案共享同一份 C 地形表与地形缓存身份。
+每方案最多 200 个对象，总布局最多 127 张；实际怪物数量仍受游戏对象容量约束。
+
+`layout_id` 是稳定设计编号，不是生成 C 的数组下标。服务端检查文件名、房型引用与编号一致，
+编号限 001..999，总运行布局仍最多 127 张（含旧参考布局）。
+**下载 JSON / 复制 JSON / Ctrl+S** 都遵循当前模式：布局输出对象方案，地图输出空间。
+旧完整 JSON 可导入，但参与布局生成时地形和旋转必须匹配固定地图池。
+不要为替换房内对象修改 `maps/`。以下自由画布及旧完整地图内容属于兼容参考，以本节工作流为准。
+
+更新后需要重启 `serve.py` 并刷新页面，以加载新的编号接口。验证命令：
+
+```powershell
+python -m unittest discover -s tools/map_designer -p 'test_*.py'
+node tools/map_designer/test_editor.js
+# 可选：本机已安装 Chrome/Edge 和 websocket-client 时，运行隔离目录的真实浏览器检查
+python tools/map_designer/check_workflow_browser.py
+```
+
 给 FPGA 游戏 demo 用的固定房间设计器：**画布尺寸自由**，32 px/格，默认
 **40 × 23（1280 × 736）**，上限 **45 × 35（1440 × 1120，Boss 房）**，下限 8 × 8。
 除了地形，还能放**怪物出生点**和**交互方块**，保存成 JSON，再按需生成固件用的 C 数据文件。
@@ -9,14 +77,15 @@
       │                        │
       │                   ──可选生成 C──▶  output/game_world_map.c
       │                        │
-      └──── 导入 ◀─────────────┘        需要时再拷进 code/ → Efinity 工程
+      └──── 导入 ◀─────────────┘        --emit-layouts --apply → project 工程
 ~~~
 
 服务端负责**格式解析、校验、C 生成**（`mapfmt.py`），前端只负责画和发请求，
 所以命令行、CI、浏览器三处用的是同一套规则。
 
-> 本工具只改 `tools/map_designer/`。生成的 C 什么时候拷进 `code/` 由你决定，
-> 工具本身不会动固件源码。
+> 页面保存和单图导出只写 `tools/map_designer/output/`。
+> `--emit-layouts --apply` 默认更新 `project/` 的布局数据；`code/` 是归档，
+> 只有显式指定 `--target archive` 或 `--target all` 才会写入。
 
 ## 快速开始
 
@@ -51,18 +120,16 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 
 * **导入**：选 `.txt` / `.json` / `.c` 文件（也可以直接贴到文本框）。C 文件只认
   导出的 `game_world_map.c`（工程里的地形现在是生成的，没有表可导）。
-* **导出**：`下载 .txt`、`下载 .json`、`下载 .c`；PNG 按钮导出当前画布，方便写汇报。
+* **导出**：下载 JSON、下载 PNG；展开 C 数据导出可生成或下载 C。旧 TXT 仍支持导入。
 * 日常存档推荐 `.json`：字段固定、好解析，也方便以后换固件 / 换工具。
 
 ## 图层
 
 页面左侧有两个图层：
 
-1. **地形层**：`.` 空 / `B` 木地板 / `K` 基岩地板 / `S` 石头地板 / `W` 木墙 /
-   `D` 门 / `H` 隐藏门 / `C X Y Z` 角块。操作和旧版编辑器一样。
-   `S` 是石头**地形**，对象层里的 `stone` 是可交互石头，两者不是同一个东西。
-   编辑器 / JSON / C 数据已经支持 `S`；固件侧还需要在 `game_tile_asset()` 里把
-   `S` 指到石头贴图，并在 `game_room.c` 的地板判断里加上 `S`，这一步本次没改 `code/`。
+1. **地形层**：`.` 空 / `B` 木地板 / `K` 隐藏房地板 / `W` 木墙 / `w` 隐藏房墙 /
+   `D` 门 / `H` 隐藏门（1 格）/ `C X Y Z` 角块 / `c x y z` 隐藏房角块。操作和旧版编辑器一样。
+   旧的 `S` 石头地板已废弃（素材删了）：老存档仍能解析，编辑器里按木地板显示。
 2. **对象层**：左键放对象，右键擦掉这一格的所有对象。对象按整格保存，
    坐标为 `x,y`（32 px 格），不是像素。
 
@@ -90,7 +157,7 @@ http://127.0.0.1:8766/tools/map_designer/index.html
   整个操作算一步，`Ctrl+Z` 可撤销；
 * 想要干净的起手骨架就在右栏「模板」下拉框里选 **1×1 / L / 2×2**：直接画好地板、
   2 格墙带、四扇门（方向、门洞都正确），在上面接着改就行；
-  **三套内置模板的地板已经统一成石头 `S`**（不是木地板 `B`）；
+  **三套内置模板使用正式木地板 `B`**；
 * 也可以把当前图存成**自定义模板**：填文件名和显示名，点「当前图存为模板」；
   地形、旋转、对象会一起存到 `templates/custom/custom_<文件名>.json`，之后从下拉框直接载入，
   同名可覆盖，内置模板不可删除；自定义模板只是起手骨架，不会自动进 `output/`，
@@ -102,7 +169,7 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 
 ## 房间框架（固件侧是"参数"，不是表）
 
-固件现在只认两种框架：**1×1（40×23）** 和 **2×2（45×35）**。设计器的模板按**形状**分三档：`template_1x1` / `template_L` / `template_2x2`（后两个的数据在 `templates/*.json`）。
+固件的矩形框架包括**普通 1×1（40×23）**、**隐藏房 1×1（40×23）**和 **2×2（45×35）**。设计器的模板按**形状**分三档：`template_1x1` / `template_L` / `template_2x2`（数据在 `templates/*.json`）。
 墙 / 地板 / 角块 / 门都由 `game/game_frame.c` 按参数生成，不再整张表存：
 
 ~~~c
@@ -114,8 +181,8 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 
 所以：
 
-* 现在三套模板都用石头地板 `S`，**不再是标准矩形框架**；它们导出布局时会自动带逐格地形表。
-* `--emit-frame` 只对纯 `B` 木地板的标准框架有效；模板要出帧参数，先把 `S` 换回 `B`。
+* 三套模板的地板统一用 `B` 木地板，和固件 1×1 框架一致。
+* `--emit-frame` 只对标准矩形房（40×23）有效；L / 2×2 仍按异形地形表导出。
 * 纯 `B` 的标准房画完点 **`--emit-frame`** 可以拿到要贴进 `g_maps[]` 的那一行：
 
 ~~~powershell
@@ -124,7 +191,7 @@ uv run tools/map_designer/serve.py --emit-frame --map tools/map_designer/output/
 
 * 加了墙 / 挖了角、改得不是标准矩形 → 会判为"异形房"（L 形也支持）：
   `--emit-frame` 不适用，但 `--emit-layouts` 会自动多带一张逐格地形表；
-* 两张框架原来占 **6370 B**，现在 **56 B**，省下来的 RAM 可以直接用来堆布局。
+* 标准矩形框架只存参数；隐藏房保留独立的地板、墙、角块皮肤及单格入口，不额外生成逐格地形表。
 
 ## 布局数据：零配置生成
 
@@ -132,7 +199,7 @@ uv run tools/map_designer/serve.py --emit-frame --map tools/map_designer/output/
 
 ~~~powershell
 uv run tools/map_designer/serve.py --emit-layouts              # 预览，不写文件
-uv run tools/map_designer/serve.py --emit-layouts --apply      # 生成（工程树 + code/ 各一份）
+uv run tools/map_designer/serve.py --emit-layouts --apply      # 生成到 project 工程树
 uv run tools/map_designer/serve.py --emit-layouts --check      # 只查生成物是否过期
 ~~~
 
@@ -143,16 +210,20 @@ uv run tools/map_designer/serve.py --emit-layouts --check      # 只查生成物
 | `game/game_layout_data.c` | `L_<名字>[]` 对象数组 + `g_layouts[]`（名字 / 个数 / 地图下标） |
 | `game/game_layout_data.h` | `LAY_<名字>` 下标宏 + `LAYOUT_COUNT` |
 
+异形地形的 C 表仅分配实际行数，旋转值四格打包为一字节；
+JSON 存档仍使用原来的逐格 0..3。固件统一从 game_world_rot_at 解码，
+隐藏入口位置、角块和对象层不受存储格式影响。
+
 手写的只剩 `game_layout.c` 里的 `g_kinds[]`：**哪种房间用哪些布局**、门贴图、小地图颜色。
 
 加一张图：设计器存成 `layout_xxx.json` → `--emit-layouts --apply` → 想让普通房抽到它，
 就在 `g_kinds[ROOM_EMPTY]` 的布局池里加一个 `LAY_xxx`。
 
-生成前会整体校验：有坐标越界 / 不在 `B` 上 / 重名 / 对象超过 200 个 → **整批拒绝生成**；
+生成前会整体校验：有坐标越界 / 不在地板 `B/K/S` 上 / 重名 / 对象超过 200 个 → **整批拒绝生成**；
 `exit` 这种固件没有的对象会跳过并提示。
 
-**地图下标不是写死的**：工具读 `game_world.c` 的 `g_maps[]`，按"画布尺寸"匹配。
-现在有两张框架（1×1 = 40×23、2×2 = 45×35）；以后加 1×2：
+**地图下标不是写死的**：工具读 `game_world.c` 的 `g_maps[]`，按尺寸和皮肤匹配；
+因此普通房和隐藏房尺寸相同也能分别映射。以后加 1×2：
 
 1. `g_maps[]` 里加一行（尺寸 / 竞技场 / 四门 / 木纹 / 世界像素尺寸）；
 2. 设计器用同样尺寸画，存成 `layout_map1x2.json`；
@@ -179,9 +250,10 @@ uv run tools/map_designer/serve.py --emit-layouts --check      # 只查生成物
 ## 素材（自动从 res/pic 读）
 
 页面启动时拉 `/api/assets`：服务端扫一遍 `res/pic/`（跳过 `_` 和 `.` 开头的目录），
-按文件名匹配到各笔刷 —— 木地板 `minecraft_wood`、基岩 `minecraft_bedrock`、
-石头地板 `minecraft_stone`、墙 `minecraft_wood`、角块 `background_corner`、
-门 `background_door_normal`、怪 `mobs_slime` / `mobs_bug`、
+按文件名匹配到各笔刷 —— 木地板 `background_floor_wood`、隐藏房地板 `background_floor_hidden`、
+墙 `background_wall_wood`、隐藏房墙 `background_wall_hidden`、角块 `background_corner_wood`、
+隐藏房角块 `background_corner_hidden`、门 `background_door_normal`、隐藏门 `background_interact_hidden`、
+怪 `mobs_slime` / `mobs_bug`、
 交互物 `background_interact_web|stone|crate|box_close|eixt`。
 
 所以**换图 / 挪目录都不用改代码**：把文件放回 `res/pic` 下、名字里带上面那些片段即可；
@@ -195,12 +267,13 @@ uv run tools/map_designer/serve.py --emit-layouts --check      # 只查生成物
 
 会检查：
 
-* 尺寸在 8×8 ~ 45×35 之间；各行字符数必须一致，字符只能是 `. B W D H K S C X Y Z`；
+* 尺寸在 8×8 ~ 45×35 之间；各行字符数必须一致，字符只能是 `. B W D H K S C X Y Z w c x y z`；
 * **矩形房**：门必须在 **2 格厚的墙带**里，不能在竞技场内部、不能在墙角；
 * **L 形 / 凹形房**：竞技场包围盒里出现非 B 就判为异形，只给一条提示，
   不再逐格报「会挡住玩家」；门按实际几何检查，不会因为形状被误判；
 * 门的旋转值就是方向：**0=N 1=E 2=S 3=W**，和所在墙对不上会报错；
-* 门的另一格必须是空白：纵向门是下一行，横向门是右一格；
+* 普通门 `D` 的另一格必须是空白：纵向门是下一行，横向门是右一格；
+* **隐藏门 `H` 只占 1 格**（放在靠竞技场那侧的墙带格），没有"另一格"，背后是隐藏房墙；
 * 墙带里的空白如果不是门洞，会提示「漏出一个洞」；
 * 房间外（黑边）画了东西会提示，上板看不到；
 * 空白格上的旋转会提示（C 侧不读它）；
@@ -278,11 +351,13 @@ kind x,y,arg      # arg 0..255，当前保留给以后用
 
 ~~~text
 0 空       1 木地板 B   2 木墙 W    3 门 D
-4 角块 C   5 隐藏门 H   6 基岩 K    7 石头 S
+4 角块 C   5 隐藏门 H   6 隐藏房地板 K
 8 角块 X   9 角块 Y    10 角块 Z
+11 隐藏房墙 w   12 隐藏房角块 c   13/14/15 = 隐藏房角块 x/y/z
+（7 = 旧石头地板 S，已废弃；编号保留是为了旧存档还能读）
 ~~~
 
-旧的 `.txt` 文本仍然用 `. B W D H K S C X Y Z` 字母；JSON 存档已全面改成数字。
+旧的 `.txt` 文本用 `. B W D H K S C X Y Z` 字母，隐藏房皮肤再加 `w c x y z` 小写；JSON 存档已全面改成数字。
 
 `output/game_world_map.c` 只是**可选导出**，本身也是一份独立数据文件
 （`static` 数组 + 头文件保护 + `_Static_assert`），包含：
@@ -305,10 +380,9 @@ kind x,y,arg      # arg 0..255，当前保留给以后用
 静态数组；没写到的行 / 列由 C 自动补零，运行时仍按 `MAP_ROWS/MAP_COLS`
 使用，所以不会读到补零区域。数组是 `static`，不会和其他编译单元抢符号。
 
-> 按 `code/README_如何导入C文件到工程.md` 的约定：`code/` 是唯一真源，
-> 改完再**手工拷贝**进 Efinity 工程（工程不引用仓库外部路径）。
-> 生成文件放在 `output/` 是工作区，什么时候拷进 `code/` 由你决定；
-> `--check --c` 可以核对拷过去的那一份是不是最新的。
+> 当前开发以 `project/` 下的 C 工程为准，`code/` 保留为提交归档。
+> 页面单图导出的 C 留在 `output/`；游戏布局使用
+> `--emit-layouts --apply` 更新，`--emit-layouts --check` 检查是否过期。
 
 ### 固件侧最小消费方式
 
@@ -356,13 +430,17 @@ uv run python -m unittest discover -s tools/map_designer -p "test_*.py" -v
 
 ## 编辑器快捷键
 
+页面版本 2026-10-25d：左侧集中贴图选择、当前预览、状态和校验建议；
+右侧集中地图文件、模板和导入导出。选择贴图自动切换地形或对象层。
+地图统计、预览设置和高级导出可折叠；校验建议保留在预览下方。
+
 * 左键绘制 / 放对象，右键擦除 / 删对象；拖动连续画，一次拖动算一步撤销。
 * `O` 切换地形 / 对象层。
-* 地形层数字键 **0–7** 按笔刷顺序选择：
+* 地形层数字键 **0–8** 按笔刷顺序选择：
   `0` 空 / `1` 木地板 / `2` 木墙 / `3` 门 / `4` 角块 /
-  `5` 隐藏门 / `6` 基岩地板 / `7` 石头地板。
+  `5` 隐藏门 / `6` 隐藏房地板 / `7` 隐藏房墙 / `8` 隐藏房角块。
 * 对象层数字键 **0–6** 按顺序选 slime / bug / web / stone / box / crate / exit。
-* `R` 循环旋转；选角块时循环 C/X/Y/Z。角度也可以直接点左侧按钮。
+* `R` 循环旋转；选角块时循环 C/X/Y/Z（隐藏房角块循环 c/x/y/z）。角度也可以直接点左侧按钮。
 * `Ctrl+Z` 撤销，`Ctrl+Y` 重做，`Ctrl+S` 保存。
 * `F` 适应窗口；滚轮以光标为中心自由缩放 **10%–800%**；滑块同样是 10%–800%。
 * `Ctrl+0` 回到 100%。

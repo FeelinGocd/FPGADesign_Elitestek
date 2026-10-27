@@ -12,7 +12,7 @@
 * 地址: APB0 窗口 0xf8100000 的槽 2 内【观测子块】0x2000 ~ 0x2018(观测侧 PADDR[6]=0):
 *   0x2000 ID | 0x2004 STATUS | 0x2008 CMD_DONE | 0x200C FRAME_DONE
 *   0x2010 WR_BEATS | 0x2014 RD_BEATS | 0x2018 BUSY_CYC, 全是只读。
-*   同槽 0x2040 ~ 0x206F 是显示通道寄存器(user_lineBuffer.h)。
+*   同槽 0x2040 ~ 0x2078 是显示通道寄存器(user_lineBuffer.h)。
 *
 * 绘图命令走【CI】(peripheral/CInstruction/CI_gpu2d.h, 有顺序保证);
 * 本文件走【APB】, 只用来配置/看状态 —— 没有顺序保证, 绝不能拿它发命令。

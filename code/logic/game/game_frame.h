@@ -38,11 +38,13 @@ typedef struct {
     unsigned char band_rot[4];       /* 上 / 右 / 下 / 左 的木纹角度（0..3） */
     unsigned char corner;            /* 1 = 四角放 X/C/Z/Y 角块，0 = 纯木墙 */
     /*  ★ 贴图种类（"皮肤"）：几何完全一样，只换字符。0 = 用默认值。
-     *    floor: 'B' 木 / 'K' 基岩 / 'S' 石头；door: 'D' 普通门 / 'H' 隐藏门。
-     *    有了这三个字段，新房间只要换皮肤，不用再存一张 3.2 KB 的地形表。  */
+     *    floor: 'B' 木 / 'K' 隐藏房地板；wall: 'W' 木墙 / 'w' 隐藏房墙；
+     *    door: 'D' 普通门 / 'H' 隐藏门；corner: 0 = C/X/Y/Z 家族 / 'c' = c/x/y/z 家族。
+     *    有了这四个字段，新房间只要换皮肤，不用再存一张 3.2 KB 的地形表。  */
     unsigned char floor_ch;          /* 0 = 'B' */
     unsigned char wall_ch;           /* 0 = 'W' */
     unsigned char door_ch;           /* 0 = 'D' */
+    unsigned char corner_ch;         /* 0 = 'C' 家族（C/X/Y/Z）；'c' = 隐藏房家族（c/x/y/z） */
 } frame_geom_t;
 
 /*  这一格是什么字符：'.' 黑边 / 地板 / 墙 / 门 / 'C''X''Y''Z' 角块

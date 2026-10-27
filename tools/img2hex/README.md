@@ -31,6 +31,12 @@ uv run tools/img2hex/pic2pram.py          # 重新打包 res/pic → hex / 调�
 4. 不透明区不能有纯白（键色 = 白，会被 ck 抠掉）；脚本会自检。
 5. **hex / palette 是 BRAM 初值**：改完必须重新综合；`assets_desc.h` 下标会变，必须重编固件，两者一起烧。
 
+当前 C 描述表每项只保存四个 32 位数（基址、跨距、宽、高），共 16 字节。
+素材名称保留在枚举、注释和 report.txt，不再作为字符串编入游戏。
+仅修改描述表存储格式时，hex 与调色板内容不变，无需为此重综合；
+固件仍必须重新编译。可用 `python tools/img2hex/check_assets.py --sources-only`
+检查源图、hex 与 C 生成表是否一致。
+
 ---
 
 ## 加一张图 / 换一张图 —— 完整流程

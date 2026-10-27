@@ -1,0 +1,231 @@
+{
+  "format": "map_designer_layout",
+  "version": 1,
+  "name": "1x1_001",
+  "map": "1x1",
+  "objects": [
+    {
+      "kind": "web",
+      "x": 20,
+      "y": 5,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 6,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 7,
+      "arg": 0
+    },
+    {
+      "kind": "bug",
+      "x": 18,
+      "y": 8,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 8,
+      "arg": 0
+    },
+    {
+      "kind": "slime",
+      "x": 22,
+      "y": 8,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 19,
+      "y": 9,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 9,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 21,
+      "y": 9,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 11,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 12,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 13,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 14,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 15,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 16,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 17,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 18,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 19,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 20,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 21,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 22,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 23,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 24,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 25,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 26,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 27,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 28,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 29,
+      "y": 10,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 19,
+      "y": 11,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 11,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 21,
+      "y": 11,
+      "arg": 0
+    },
+    {
+      "kind": "slime",
+      "x": 18,
+      "y": 12,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 12,
+      "arg": 0
+    },
+    {
+      "kind": "bug",
+      "x": 22,
+      "y": 12,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 13,
+      "arg": 0
+    },
+    {
+      "kind": "stone",
+      "x": 20,
+      "y": 14,
+      "arg": 0
+    },
+    {
+      "kind": "web",
+      "x": 20,
+      "y": 15,
+      "arg": 0
+    }
+  ],
+  "layout_id": 1
+}

@@ -53,7 +53,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 OUT = HERE / "output"
 PIC = ROOT / "res" / "pic"
-#  布局数据生成到哪里：工程树（编译源）+ code/ 归档，两个都是仓库内的固定路径
+# 布局默认只生成到工程树；code/ 归档必须通过 --target archive/all 显式选择。
 GAME_DIRS = (
     ROOT / "project/GamingPlayUnit/embedded_sw/SoC_RISCV32/software/standalone/GamingPlayUnit/game",
     ROOT / "code/logic/game",
@@ -64,7 +64,7 @@ PIC_EXTS = (".png", ".gif", ".jpg", ".jpeg")
 MAX_BODY = 256 * 1024
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 STATIC_PREFIXES = ("/tools/map_designer/", "/res/")
-WRITE_LOCK = threading.Lock()
+WRITE_LOCK = threading.RLock()
 
 
 _MAPFMT_MTIME = os.path.getmtime(mapfmt.__file__)
@@ -198,6 +198,24 @@ def parse_payload(text: str, name: str = "room_map") -> Tuple[mapfmt.RoomMap, st
 #  HTTP
 # ---------------------------------------------------------------------------
 
+def numbered_layouts(map_id: str) -> List[Dict[str, Any]]:
+    mapfmt.pool_layout_name(map_id, 1)
+    entries = []
+    for path in sorted((OUT / "layouts").glob(map_id + "_*.json")):
+        room = mapfmt.parse_json(read_text(path), path.stem)
+        if room.layout_id is None or mapfmt.pool_map_id(room) != map_id:
+            raise mapfmt.MapError("编号布局缺少或混用了房型/编号：%s" % path.name)
+        if path.name != mapfmt.pool_layout_name(map_id, room.layout_id):
+            raise mapfmt.MapError("布局文件名与内部编号不一致：%s" % path.name)
+        entries.append({"id": room.layout_id, "file": path.name})
+    return sorted(entries, key=lambda e: e["id"])
+
+
+def next_layout_id(entries: List[Dict[str, Any]]) -> Optional[int]:
+    candidate = max((e["id"] for e in entries), default=0) + 1
+    return candidate if candidate <= 999 else None
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "MapDesigner/3.0"
 
@@ -231,6 +249,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self.api_template(parse_qs(request.query))
             elif request.path == "/api/load":
                 self.api_load(parse_qs(request.query))
+            elif request.path == "/api/layout_catalog":
+                self.api_layout_catalog(parse_qs(request.query))
+            elif request.path == "/api/load_layout":
+                self.api_load_layout(parse_qs(request.query))
             elif request.path == "/api/health":
                 self.send_json(200, {"ok": True, "files": str(OUT)})
             elif request.path == "/":
@@ -257,6 +279,10 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if request.path == "/api/save":
                 self.api_save(query)
+            elif request.path == "/api/save_layout":
+                self.api_save_layout(query)
+            elif request.path == "/api/save_map":
+                self.api_save_map(query)
             elif request.path == "/api/template_save":
                 self.api_template_save(query)
             elif request.path == "/api/template_delete":
@@ -392,6 +418,66 @@ class Handler(SimpleHTTPRequestHandler):
             },
         )
 
+    def api_save_layout(self, query: Dict[str, List[str]]) -> None:
+        room, _kind = parse_payload(self.read_body())
+        try:
+            map_id = mapfmt.pool_map_id(room)
+            if query.get("map", [map_id])[0] != map_id:
+                raise mapfmt.MapError("当前地图空间与所选房型不一致")
+            mapfmt.pool_layout_name(map_id, 1)  # 排除隐藏房等特殊房型
+            with WRITE_LOCK:
+                entries = numbered_layouts(map_id)
+                raw_id = query.get("id", [""])[0]
+                layout_id = int(raw_id) if raw_id else next_layout_id(entries)
+                name = mapfmt.pool_layout_name(map_id, layout_id)
+                target = OUT / "layouts" / name
+                create = query.get("create", ["1"])[0] == "1"
+                if create and target.exists():
+                    raise ApiError(409, "布局编号已存在，请刷新列表或选择已有方案后保存")
+                if not create and not target.exists():
+                    raise ApiError(404, "待更新布局不存在，请使用新建布局")
+                room.layout_id = layout_id
+                room.name = Path(name).stem
+                payload = mapfmt.serialize_pool_layout(room)
+                write_atomic(target, payload)
+        except (ValueError, mapfmt.MapError) as exc:
+            raise ApiError(400, str(exc)) from exc
+        self.send_json(200, {"ok": True, "file": name, "json": payload,
+                             "text": mapfmt.serialize_text(room), "layout_id": layout_id,
+                             "map": map_id, "issues": issues_json(mapfmt.validate(room))})
+
+    def api_layout_catalog(self, query: Dict[str, List[str]]) -> None:
+        map_id = query.get("map", ["1x1"])[0]
+        try:
+            entries = numbered_layouts(map_id)
+            self.send_json(200, {"ok": True, "map": map_id, "layouts": entries,
+                                 "next_id": next_layout_id(entries)})
+        except mapfmt.MapError as exc:
+            raise ApiError(400, str(exc)) from exc
+
+    def api_load_layout(self, query: Dict[str, List[str]]) -> None:
+        try:
+            name = mapfmt.pool_layout_name(query.get("map", [""])[0], int(query.get("id", ["0"])[0]))
+        except (ValueError, mapfmt.MapError) as exc:
+            raise ApiError(400, str(exc)) from exc
+        path = OUT / "layouts" / name
+        if not path.is_file():
+            raise ApiError(404, "布局不存在：%s" % name)
+        self.send_json(200, {"ok": True, "layout": json.loads(read_text(path))})
+
+    def api_save_map(self, query: Dict[str, List[str]]) -> None:
+        map_id = query.get("map", [""])[0]
+        if map_id not in mapfmt.NORMAL_MAP_IDS:
+            raise ApiError(400, "本轮仅支持普通房型 1x1、L、2x2")
+        room, _kind = parse_payload(self.read_body())
+        room.name = map_id
+        room.objects = []
+        # 地图模式导出为草稿，不覆盖作为布局依据的正式固定空间。
+        payload = mapfmt.serialize_json(room)
+        write_atomic(OUT / "maps" / (map_id + ".json"), payload)
+        self.send_json(200, {"ok": True, "file": map_id + ".json", "json": payload,
+                             "text": mapfmt.serialize_text(room)})
+
     def api_validate(self) -> None:
         text = self.read_body()
         room, kind = parse_payload(text)
@@ -410,6 +496,10 @@ class Handler(SimpleHTTPRequestHandler):
         text = self.read_body()
         room, kind = parse_payload(text)
         issues = mapfmt.validate(room)
+        try:
+            map_id = mapfmt.pool_map_id(room)
+        except mapfmt.MapError:
+            map_id = None
         self.send_json(
             200,
             {
@@ -419,6 +509,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "rot": room.rot,
                 "objects": [obj.as_dict() for obj in room.objects],
                 "name": room.name,
+                "map": map_id,
+                "layout_id": room.layout_id,
                 "issues": issues_json(issues),
                 "stats": mapfmt.stats(room),
             },
@@ -588,13 +680,20 @@ def cmd_emit_layouts(args: argparse.Namespace) -> int:
     """扫 output/*.json → 生成 game_layout_data.c/.h（零配置）。
 
     约定：**一份房间 = 一份文件**，文件名就是房间名（output/<房间名>.json）。
-    图纸里同时带地形（tiles/rotation）和对象（objects），不再分"地图 / 布局"两份。
-    · 默认只预览；加 --apply 才写文件（工程树 + code/ 各一份）；
+    布局引用 maps/ 的固定空间，只保存对象；旧完整 JSON 仍可读，但空间必须一致。
+    · 默认只预览；加 --apply 才写文件，默认目标是 project 工程树；
+    · --target archive/all 显式选择 code/ 归档或两份；
     · 加 --check 只比对"磁盘上的生成物是不是最新"，过期返回 1。
     """
     #  ★ 名字里带 `_tile_` 的是"房间部件"（L 房的分块 tile），不是独立房间：
     #    它们只是同一张画布的局部，导出成 room_layout_t 会把内存撑爆，直接跳过。
     all_files = sorted(OUT.glob("*.json"))
+    for map_id in mapfmt.NORMAL_MAP_IDS:
+        try:
+            all_files.extend(OUT / "layouts" / e["file"] for e in numbered_layouts(map_id))
+        except (OSError, mapfmt.MapError) as exc:
+            print("布局池读取失败：%s" % exc)
+            return 1
     files = [p for p in all_files if "_tile_" not in p.stem]
     skipped = [p.name for p in all_files if p not in files]
     if not files:
@@ -603,10 +702,20 @@ def cmd_emit_layouts(args: argparse.Namespace) -> int:
         return 1
 
     items = []
+    identities = set()
     for path in files:
         name = path.stem
         try:
             room = mapfmt.parse_json(read_text(path), name)
+            # 旧完整 JSON 兼容读取，固定空间必须属于地图池。
+            mapfmt.pool_map_id(room)
+            if room.layout_id is not None:
+                identity = (mapfmt.pool_map_id(room), room.layout_id)
+                if identity in identities:
+                    raise mapfmt.MapError("房型与布局编号重复：%s_%03d" % identity)
+                identities.add(identity)
+                if path.name != mapfmt.pool_layout_name(*identity):
+                    raise mapfmt.MapError("文件名与布局编号不一致：%s" % path.name)
         except mapfmt.MapError as exc:
             print("  ! %s：%s" % (path.name, exc))
             return 1
@@ -623,13 +732,16 @@ def cmd_emit_layouts(args: argparse.Namespace) -> int:
         print("  ~ %s" % item)
 
     targets = (("game_layout_data.h", header), ("game_layout_data.c", source))
+    target = getattr(args, "target", "project")
+    folders = (GAME_DIRS if target == "all" else
+               GAME_DIRS[:1] if target == "project" else GAME_DIRS[1:])
 
     if args.check:
         stale = []
         for filename, text in targets:
-            for folder in GAME_DIRS:
+            for folder in folders:
                 path = folder / filename
-                if path.is_file() and read_text(path) != text:
+                if not path.is_file() or read_text(path) != text:
                     stale.append(rel(path))
         if stale:
             print("生成物过期：%s" % "、".join(stale))
@@ -646,7 +758,7 @@ def cmd_emit_layouts(args: argparse.Namespace) -> int:
 
     if not args.apply:
         print("\n（预览，没写文件）确认无误后加 --apply：")
-        for folder in GAME_DIRS:
+        for folder in folders:
             print("  " + rel(folder))
         print("\n----- game_layout_data.h -----")
         print(header)
@@ -655,7 +767,7 @@ def cmd_emit_layouts(args: argparse.Namespace) -> int:
         return 0
 
     written = []
-    for folder in GAME_DIRS:
+    for folder in folders:
         if not folder.is_dir():
             continue
         for filename, text in targets:
@@ -758,6 +870,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--emit-frame", action="store_true", help="打印标准矩形框架的 g_maps[] 参数行")
     parser.add_argument("--emit-layouts", action="store_true", help="扫 output/*.json（一文件一房间）生成 game_layout_data.c/.h")
     parser.add_argument("--apply", action="store_true", help="配合 --emit-layouts：真正写文件（默认只预览）")
+    parser.add_argument("--target", choices=("project", "archive", "all"), default="project",
+                        help="布局生成/检查目标：默认仅 project，archive=code 归档，all=两份")
     parser.add_argument("--map", default="", help="地图 / JSON 路径（默认 output/room_map.json）")
     parser.add_argument("--json", default="", help="JSON 输出路径（默认 output/room_map.json）")
     parser.add_argument("--c", default="", help="C 输出路径（默认 output/game_world_map.c）")

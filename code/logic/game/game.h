@@ -639,7 +639,6 @@ int  game_room_door_asset_at(int tx, int ty);    /* 这扇门用哪张贴图（�
 int  game_room_door_exists_at(int tx, int ty);   /* 外面有没有房间 */
 int  game_room_door_open_at(int tx, int ty);     /* 能不能传送：有邻居且无怪 / 非 Boss 战 */
 int  game_room_door_visible(int tx, int ty);    /* 这扇门【画不画】：隐藏连接没炸开就是 0（当墙） */
-int  game_room_door_hide_cell(int tx, int ty, int *ix, int *iy); /* 洞口图贴哪格（隐藏连接专用） */
 int  game_room_hidden_is_open(int a, int b);    /* 这两间房之间的隐藏连接炸开了没（a/b 顺序无关） */
 int  game_room_hidden_open(int a, int b);       /* 记为已打开；返回 1 = 这次新打开 */
 void game_room_hidden_reset(void);              /* 换层 / 新一局：全部封回去 */
@@ -724,6 +723,7 @@ int  game_visible_screen(int x, int y, int w, int h);
 
 //==================== HUD（game_hud.c）====================
 void game_hud_static(u32 fb);
+void game_hud_mark_at(unsigned char dirty[GRID_H][GRID_W], int camx, int camy);
 extern int game_hud_need_full;              /* 这一帧要不要整块重画（有精灵压到面板上） */
 int  game_hud_prepare(unsigned char dirty[GRID_H][GRID_W], int buf,
                       int fps, int cmd_frame, int total_bullets, int coins);

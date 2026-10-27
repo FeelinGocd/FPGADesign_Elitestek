@@ -166,7 +166,7 @@ class MapFmtTest(unittest.TestCase):
         room.rows[5][20] = "W"                               # 竞技场内改成墙
         room.objects.append(mapfmt.MapObject("web", 20, 5))
         messages = [issue.message for issue in mapfmt.validate(room)]
-        self.assertTrue(any("基岩地板" in message for message in messages), messages)
+        self.assertTrue(any("地板 B/K/S" in message for message in messages), messages)
 
     def test_duplicate_object_warning(self):
         room = self.clone()
@@ -622,9 +622,14 @@ class LayoutDataTest(unittest.TestCase):
         if not world.is_file():
             self.skipTest("game_world.c 不存在")
         frames = mapfmt.parse_world_frames(world.read_text(encoding="utf-8"))
-        self.assertEqual([(f["cols"], f["rows"]) for f in frames], [(40, 23), (45, 35)])
+        self.assertEqual([(f["cols"], f["rows"]) for f in frames],
+                         [(40, 23), (45, 35), (40, 23)])
         self.assertEqual(frames[0]["arena"], [9, 4, 31, 16])
         self.assertEqual(frames[1]["doors"], [22, 17, 22, 17])
+        #  第 3 行是隐藏房皮肤：同一套 1×1 几何，只换地板/门字符
+        self.assertEqual((frames[2]["floor_ch"], frames[2]["wall_ch"],
+                          frames[2]["door_ch"], frames[2]["corner_ch"]),
+                         ("K", "w", "H", "c"))
 
     def test_layout_symbol(self):
         self.assertEqual(mapfmt.layout_symbol("boss"), "boss")

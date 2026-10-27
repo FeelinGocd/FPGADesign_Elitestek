@@ -191,9 +191,10 @@ assign src1_data = palette_data;
 | `Peripherial/GPU_2D/process/*` | `colorKey` / `alphaBlending` / `imageCombine` | 像素运算：ck / α / 合成 + 色调 |
 | `Peripherial/GPU_2D/factory/*` | `Factory` / `Compositor` / `DDRPacker` / `WriteController` | 选路 → 打包 → 写 |
 | `Peripherial/GPU_2D/interface/*` | `AXIMastersHandler` / `GPU2D_APBHandler` | AXI 主口 + APB 寄存器 |
-| `Peripherial/GPU_2D/lineBuffer/*` | `lineBuffer` / `bufferControler` / `bufferUnpacker` | 显示通道（**本规范的基准样板**） |
+| `Peripherial/GPU_2D/lineBuffer/*` | `lineBuffer` / `bufferControler` / `lineAligner` / `bufferUnpacker` | 显示通道（**本规范的基准样板**） |
 | `Peripherial/GPU_2D/lineBuffer/PingPongBuffer/*` | `async_PingPongBuffer` / `async_fifo` / `BlockRAM` | 跨域双 bank |
-| `Peripherial/APB0/*` | `APB0_Decoder` / `APB0_Interconnect` / `APB0_GPU_2D` / `APB0_key` | APB 子系统 |
+| `Peripherial/APB0/*` | `APB0_Decoder` / `APB0_Interconnect` / `APB0_gpu2d`（文件 `APB0_GPU_2D.v`）/ `APB0_key` | APB 子系统 |
+| `Peripherial/key/*` | `key` | 按键：同步 + 消抖 + 按下沿（功能层，总线层是 `APB0_key`） |
 | `Peripherial/AXI4/Master/*` | `AXI4_Master` / `AXI4_Master_Read` / `AXI4_Master_Write` | AXI4 主口 |
 
 ### 6.2 拿来的（保持原样）

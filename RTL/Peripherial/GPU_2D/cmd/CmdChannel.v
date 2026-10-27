@@ -30,7 +30,7 @@
 `timescale 1ns/100ps
 
 module CmdChannel #(
-    parameter FIFO_AW    = 9,                   // 命令队列深度 = 2^9 = 512 条（= 16 KB）
+    parameter FIFO_AW    = 9,                   // 命令队列深度 = 2^9 = 512 条（512×216 位 ≈ 13.5 KB）
     parameter LINE_BYTES = 5760,                // 单段行宽（全屏 1920×3）
     parameter IMAGE_NUM  = 2                    // 一条命令几张图（★ 必须与 CIUnpack 一致）
 )(

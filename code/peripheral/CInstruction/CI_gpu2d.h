@@ -69,7 +69,9 @@
  *   ★ MY 对两类源都成立；MX 目前只支持 PRAM 精灵源（DDR 源的行缓冲是 FIFO，倒着取不了）。 */
 #define GPU2D_FLIP_X   0x1u
 #define GPU2D_FLIP_Y   0x2u
-#define GPU2D_ROT90    0x4u   /* screen CW 90deg: right-facing source -> down; add FLIP_Y for up */
+#define GPU2D_ROT90    0x4u   /* 按列取样 = 转置(out(x,y)=src(y,x))，不是旋转。
+                                 * 真 90°: ROT90|FLIP_X = 顺时针, ROT90|FLIP_Y = 逆时针;
+                                 * 见 docs/spec/硬件_加速器.md §1.6.1 那张 8 组合表 */
 
 /* 硬件对每条 CI 回的固定标识("CMD1"), 必须和 CmdBuffer.v 的 CI_ID 一致 */
 #define GPU2D_CI_ID        0x434D4431u

@@ -10,14 +10,16 @@
 static int door_cells(const frame_geom_t *g, int side,
                       int *dx, int *dy, int *px, int *py)
 {
+    int one = (g->door_ch == 'H');              /* 隐藏门只占 1 格（靠竞技场那圈） */
+
     if (g->door[side] == FRAME_DOOR_NONE) return 0;
 
     switch (side) {
     case 0:                                     /* N：上边，门洞朝下 */
         *dx = (int)g->door[0];
-        *dy = (int)g->ay0 - 2;
+        *dy = (int)g->ay0 - (one ? 1 : 2);
         *px = *dx;
-        *py = *dy + 1;
+        *py = (int)g->ay0 - (one ? 2 : 1);
         return 1;
     case 1:                                     /* E：右边，门洞朝左 */
         *dy = (int)g->door[1];
@@ -33,8 +35,8 @@ static int door_cells(const frame_geom_t *g, int side,
         return 1;
     default:                                    /* W：左边，门洞朝右 */
         *dy = (int)g->door[3];
-        *dx = (int)g->ax0 - 2;
-        *px = *dx + 1;
+        *dx = (int)g->ax0 - (one ? 1 : 2);
+        *px = (int)g->ax0 - (one ? 2 : 1);
         *py = *dy;
         return 1;
     }
@@ -47,11 +49,12 @@ static char corner_char(const frame_geom_t *g, int x, int y)
     int ox1 = (int)g->ax1 + 2, oy1 = (int)g->ay1 + 2;
     int ix0 = (int)g->ax0 - 1, iy0 = (int)g->ay0 - 1;
     int ix1 = (int)g->ax1 + 1, iy1 = (int)g->ay1 + 1;
+    int low = (g->corner_ch == 'c');      /* 隐藏房角块家族：c / x / y / z */
 
-    if (y == oy0) { if (x == ox0) return 'X'; if (x == ox1) return 'C'; }
-    if (y == oy1) { if (x == ox0) return 'Z'; if (x == ox1) return 'Y'; }
-    if (y == iy0) { if (x == ix0) return 'X'; if (x == ix1) return 'C'; }
-    if (y == iy1) { if (x == ix0) return 'Z'; if (x == ix1) return 'Y'; }
+    if (y == oy0) { if (x == ox0) return low ? 'x' : 'X'; if (x == ox1) return low ? 'c' : 'C'; }
+    if (y == oy1) { if (x == ox0) return low ? 'z' : 'Z'; if (x == ox1) return low ? 'y' : 'Y'; }
+    if (y == iy0) { if (x == ix0) return low ? 'x' : 'X'; if (x == ix1) return low ? 'c' : 'C'; }
+    if (y == iy1) { if (x == ix0) return low ? 'z' : 'Z'; if (x == ix1) return low ? 'y' : 'Y'; }
     return 0;
 }
 
@@ -82,7 +85,7 @@ char frame_tile(const frame_geom_t *g, int x, int y)
     for (d = 0; d < 4; ++d) {
         if (!door_cells(g, d, &dx, &dy, &px, &py)) continue;
         if (x == dx && y == dy) return (char)(g->door_ch ? g->door_ch : 'D');
-        if (x == px && y == py) return '.';
+        if (x == px && y == py && g->door_ch != 'H') return '.';   /* H 外侧是墙，不是门洞 */
     }
 
     if (in_arena(g, x, y)) return (char)(g->floor_ch ? g->floor_ch : 'B');
@@ -105,7 +108,7 @@ unsigned char frame_rot(const frame_geom_t *g, int x, int y)
     for (d = 0; d < 4; ++d) {
         if (!door_cells(g, d, &dx, &dy, &px, &py)) continue;
         if (x == dx && y == dy) return (unsigned char)d;   /* 门的方向：N0 E1 S2 W3 */
-        if (x == px && y == py) return 0;
+        if (x == px && y == py && g->door_ch != 'H') return 0;
     }
 
     if (in_arena(g, x, y)) return 0;

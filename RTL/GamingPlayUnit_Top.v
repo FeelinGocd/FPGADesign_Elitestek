@@ -44,7 +44,7 @@ module GamingPlayUnit_Top # (
     input   wire                    pll_locked,
     input   wire                    user_pll_locked,
 
-    input   wire                    clk_HDMI_x1,        // HDMI 像素时钟 @ 148.5MHz(peri PLL slow)
+    input   wire                    clk_HDMI_x1,        // HDMI 像素时钟 @ 74.25MHz(720p60, peri PLL)
     input   wire                    pll_HDMI_locked,    // HDMI peri PLL 锁定指示(低 = 未锁 → 显示侧复位)
     //  input                              peripheralClk,
 
@@ -160,7 +160,7 @@ module GamingPlayUnit_Top # (
 //------------------------------------------------------------------------------
 // Parameter Define
 //------------------------------------------------------------------------------
-parameter   FREQ            = 200;			// default is 100 MHz.  Redefine as needed.
+parameter   FREQ            = 200;			// 只用来算 CNT_INIT: 1.5*FREQ*1000 拍 @100MHz = 3.0ms
 
 `ifndef SIM
     localparam CNT_INIT = 1.5*FREQ*1000;
@@ -385,9 +385,9 @@ wire                                lineBuffer_m_AXI_RVALID;
 wire                                lineBuffer_m_AXI_RREADY;
 
 //------------------------------------------------------------------------------
-// 外设 3:2D 加速器(GPU_2D)
+// 外设 1 的 AXI 侧:2D 加速器(GPU_2D)
 //   左: CI 8 根线(自定义指令)，接 SoC 的 cpu0_customInstruction_*
-//   右: AXI 主口，只接【写】通道 → Axi_Mux S3 (读通道 M2 做 Block Copy 才用)
+//   右: AXI 主口两组 —— 写 → Axi_Mux S3(帧缓存)；读 → Axi_Mux S2(BLIT/块拷贝读源)
 //   配置: 行模式(全屏/分屏)在 GPU_2D 内部于帧边界锁存，顶层不再有这根线
 //   复位: 与命令侧同域，用 axi_rst_n(DDR 校准完成前不许发 AXI)
 //------------------------------------------------------------------------------
@@ -795,7 +795,7 @@ key #(
 //   里面: CmdChannel(CI→命令→行任务) + WriteController(一行→若干笔 AXI 写)
 //         + AXIMastersHandler
 //         + lineBuffer
-//   时钟: clk_ci / clk_acc 都接 user_clk(100MHz)；显示通道另吃 clk_HDMI_x1(148.5MHz)
+//   时钟: clk_ci / clk_acc 都接 user_clk(100MHz)；显示通道另吃 clk_HDMI_x1(74.25MHz)
 //   复位: 命令侧都接 axi_rst_n —— DDR 没校准完加速器一律复位，不许发 AXI；
 //         显示通道接 rst_hdmi_n(= axi_rst_n & PLL 锁定)
 //   配置: 行模式(全屏/分屏)在 GPU_2D 内部于帧边界锁存，顶层不再有这根线

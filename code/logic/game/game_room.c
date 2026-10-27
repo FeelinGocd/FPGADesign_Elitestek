@@ -986,7 +986,7 @@ static void doors_build(void)
             int hidden;
             char tc = game_world_tile_at(x, y);
 
-            if (tc != 'D' && tc != 'H') continue;       /* 'H' = 隐藏门（两格，起点在 H） */
+            if (tc != 'D' && tc != 'H') continue;       /* 'D' 两格 / 'H' 隐藏门 1 格 */
 
             /*  1. 朝房间内那一侧（门洞内半格）= 门格往【房间方向】走一格  */
             ix = x - ndx[dir];
@@ -1297,47 +1297,6 @@ int game_room_door_open_at(int tx, int ty)
     return 1;
 }
 
-/*  这一格能站人吗（地板）。'S' 是石头地板，和 B/K 一样算地板。  */
-static int hide_floor_at(int cx, int cy)
-{
-    char c = game_world_tile_at(cx, cy);
-
-    return c == 'B' || c == 'K' || c == 'S';
-}
-
-/*  这一格的四邻里有地板吗  */
-static int hide_touch_floor(int cx, int cy)
-{
-    return hide_floor_at(cx + 1, cy) || hide_floor_at(cx - 1, cy) ||
-           hide_floor_at(cx, cy + 1) || hide_floor_at(cx, cy - 1);
-}
-
-/*  隐藏连接炸开之后，那张"洞口"图贴在哪一格？
- *  一扇门在图上占两格：地图里的门格（D/H）+ 它旁边那格；墙板正好也是两格厚，
- *  所以这两格就是整面墙的厚度。洞口图只有一格大，只能贴【挨着地板】的那一格 ——
- *  玩家站在房间里，第一眼看到的就是它。
- *  ★ 判据就是那句话本身：两格里哪格四邻有地板，就贴哪格。
- *    以前拿"像素落不落在竞技场矩形里"当判据，L 形房那种厚墙两边都落在场内，
- *    会判反（2026-10-25 改）。
- *  返回 0 = 这扇门不是"已炸开的隐藏连接"，调用方按原来的门格摆。  */
-int game_room_door_hide_cell(int tx, int ty, int *ix, int *iy)
-{
-    const door_info_t *d = door_at(tx, ty);
-
-    if (!d || d->room < 0 || !d->hidden) return 0;
-    if (!game_room_hidden_is_open(game_room_id(), d->room)) return 0;
-
-    /*  门洞两格：[0] 地图里写的门格，[1] 它旁边那格。  */
-    if (!hide_touch_floor(d->dx, d->dy) && hide_touch_floor(d->cx, d->cy)) {
-        *ix = d->cx;
-        *iy = d->cy;
-    } else {
-        *ix = d->dx;
-        *iy = d->dy;
-    }
-    return 1;
-}
-
 /*  这扇门用哪张贴图：
  *    · 隐藏连接【已炸开】 -> 隐藏入口（两侧都换，同一面墙）；
  *    · 自己是特殊房 -> 自己的特殊门；
@@ -1356,7 +1315,7 @@ int game_room_door_asset_at(int tx, int ty)
      *    所以两边看同一面墙，贴图一起换 —— 不会一边是入口、一边是普通门。  */
     if (d && d->hidden && d->room >= 0 &&
         game_room_hidden_is_open(game_room_id(), d->room))
-        return ASSET_background_interact_hideEnterance;
+        return ASSET_background_interact_hidden;
 
     cur = room_special_door((int)s_rooms[s_room].type);
     if (cur >= 0) return cur;

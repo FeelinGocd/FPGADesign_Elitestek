@@ -25,7 +25,7 @@ module async_PingPongBuffer #(
     parameter DEPTH      = 512
 )(
     input  wire                     clk_wr,             // 写时钟域（AXI 侧，100MHz）
-    input  wire                     clk_rd,             // 读时钟域（像素侧，148.5MHz）
+    input  wire                     clk_rd,             // 读时钟域（像素侧，74.25MHz）
     input  wire                     rst_n,              // 外部复位
 
     // ---- 写侧 ----

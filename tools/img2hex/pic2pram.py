@@ -43,7 +43,6 @@ pic2pram.py —— 把 res/pic 里的图片转成 2D 加速器【素材源】要
 """
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
@@ -65,7 +64,7 @@ PIC_DIR     = ROOT / "res" / "pic"                     # 输入图片根目录
 #   ★★ 默认扫【哪几个目录】—— 不是 res/pic 根目录！
 #     老版本默认扫根目录 ⇒ 会把根目录下的非素材图（以前那张实拍照片）也打进去，
 #     调色板被带偏、素材全错（踩过一次）。
-#   ★ 顺序 = 素材编号顺序：**新素材一律加在最后**，这样已有素材的编号不动。
+# 顺序 = 素材编号顺序；同目录按文件名排序，增删文件都会移动后续编号和基址。
 #   ★ res/pic/_原始图/ 放的是没缩过的原图，**故意不列在这里**（不参与打包）。
 #   ★★ 2026-10-24：res/pic 重组过（`base/*` 拉平到顶层、`character/bullet` → `bullet`、
 #      `base/alpha` 里的玻璃并进 `background/`）。下面按**当前**目录结构写。
@@ -119,6 +118,12 @@ THUMB       = 64           # 训练调色板时每张图缩到多大（越小越
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 SKIP_ASSET_NAMES = {"TheBoss.png"}  # 设定原图，不进入游戏 PRAM
+
+
+def write_if_changed(path: Path, text: str) -> None:
+    data = text.encode("ascii")
+    if not path.is_file() or path.read_bytes() != data:
+        path.write_bytes(data)
 
 
 def is_mirrored_character_left(name: str) -> bool:
@@ -191,13 +196,17 @@ def main():
                     help="单张素材最大边（默认 256）。★ 素材尺寸最好在绘图工具里就定好："
                          "这里一旦触发缩放，α 会被 LANCZOS 弄成连续值，"
                          "而硬件是\"一个索引 = 一种 (颜色, α)\" ⇒ 调色板项会被拆爆。")
-    ap.add_argument("--budget", type=int, default=PRAM_WORDS, help="PRAM 字数上限（默认 16384 = 64KB）")
+    ap.add_argument("--budget", type=int, default=PRAM_WORDS, help="PRAM 字数上限（默认 32768 = 128KB）")
     ap.add_argument("--dry", action="store_true", help="只算账，不写文件")
+    ap.add_argument("--target", choices=("project", "all"), default="project",
+                    help="默认仅同步 GamingPlayUnit 的 hex 和 C 描述表；all 另含验证工程及 code 归档")
     ap.add_argument("--dir", default=None, nargs="+",
                     help="输入图片目录（★ 可以给多个，按命令行顺序编号。"
                          "例：--dir res/pic/character res/pic/base/num res/pic/alpha）。"
                          "默认 = PIC_DIRS_DEFAULT 那三个目录（★ 不是 res/pic 根目录）；相对路径按工程根算。")
     args = ap.parse_args()
+    hex_targets = EFX_HEX_DIRS if args.target == "all" else EFX_HEX_DIRS[1:2]
+    sw_targets = SW_G2D_DIRS if args.target == "all" else SW_G2D_DIRS[1:2]
 
     if args.dir:
         pic_dirs = [Path(d) if Path(d).is_absolute() else (ROOT / d) for d in args.dir]
@@ -427,23 +436,19 @@ def main():
 
     # ---- 写进每个 Efinity 工程（$readmemh 按工程目录解析，少一份就报 VERI-1012）----
     hex_dirs = []
-    for d in EFX_HEX_DIRS:
+    for d in hex_targets:
         proj = d.parent                     # ★ 工程目录本身不存在就别建了（写错路径能立刻看出来）
         if not proj.is_dir():
             print(f"[WARN] 找不到工程目录 {proj}，{d.name}/ 下的 hex 没写")
             continue
         d.mkdir(parents=True, exist_ok=True)   # 目标子目录不存在就建（例如 <工程>/hex/）
-        with open(d / "assets.hex", "w", encoding="ascii", newline="\n") as f:
-            f.write(assets_hex_text)
-        with open(d / "palette.hex", "w", encoding="ascii", newline="\n") as f:
-            f.write(palette_hex_text)
+        write_if_changed(d / "assets.hex", assets_hex_text)
+        write_if_changed(d / "palette.hex", palette_hex_text)
         hex_dirs.append(d)
     if not hex_dirs:
         print("[WARN] 没有可写的工程 hex 目录，hex 先放 tools/img2hex/output/")
-        with open(OUT_DIR / "assets.hex", "w", encoding="ascii", newline="\n") as f:
-            f.write(assets_hex_text)
-        with open(OUT_DIR / "palette.hex", "w", encoding="ascii", newline="\n") as f:
-            f.write(palette_hex_text)
+        write_if_changed(OUT_DIR / "assets.hex", assets_hex_text)
+        write_if_changed(OUT_DIR / "palette.hex", palette_hex_text)
         hex_dirs.append(OUT_DIR)
 
     # ---- assets_desc.h：素材信息交给 C（软件发命令时把 base/宽/高带下去）----
@@ -458,12 +463,11 @@ def main():
                 "    unsigned int stride_word;  /* words per row = (width+3)/4 -> BLIT color */\n"
                 "    unsigned int width;        /* pixels -> BLIT cmd w */\n"
                 "    unsigned int height;       /* pixels -> BLIT cmd h */\n"
-                "    const char  *name;\n"
                 "} asset_desc_t;\n\n")
         f.write("static const asset_desc_t g_assets[] = {\n")
         for a in assets:
-            f.write(f"    {{ {a['base']:>6}u, {a['stride_word']:>4}u, {a['w']:>4}u, {a['h']:>4}u, "
-                    f"\"{a['safe']}\" }},\n")
+            f.write(f"    {{ {a['base']:>6}u, {a['stride_word']:>4}u, {a['w']:>4}u, {a['h']:>4}u }},"
+                    f" /* {a['safe']} */\n")
         f.write("};\n")
 
         #   ★ 素材名 -> 下标：加/删素材会让后面所有下标整体平移，代码里写数字必炸
@@ -505,9 +509,10 @@ def main():
     #   综合器没有重排的余地, 所以不需要"拆成 4 个文件名"去骗它。
 
     # ---- 固件要用的那一份：素材表放到 gpu2d 驱动目录（在 include 路径里）----
-    for d in SW_G2D_DIRS:
+    for d in sw_targets:
         if d.is_dir():
-            shutil.copyfile(OUT_DIR / "assets_desc.h", d / "assets_desc.h")
+            write_if_changed(d / "assets_desc.h",
+                             (OUT_DIR / "assets_desc.h").read_text(encoding="ascii"))
             print(f"[OK] 固件用素材表已放好：{d}")
         else:
             print(f"[WARN] 找不到固件目录 {d}，assets_desc.h 没放过去")

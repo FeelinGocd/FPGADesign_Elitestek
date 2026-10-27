@@ -5,10 +5,10 @@
 //      按 lineBuffer_addr 给的地址，把一行的 LINE_BEATS 拍从 DDR 搬进
 //      async_PingPongBuffer 的写口；一行交一次 buffer_wr_block_done；
 //      交完就等读侧让出 bank，再搬下一行。
-//      ★ 它不知道什么叫双缓冲/DONE/翻页 —— 那些是 bufferAPBHandler 的事;
+//      ★ 它不知道什么叫双缓冲/DONE/翻页 —— 那些是 GPU2D_APBHandler(在 GPU_2D 里)的事;
 //        它只认 enable / mode / {段0,段1} / frame_start
 //
-//  上一级是 bufferAPBHandler
+//  上一级是 GPU2D_APBHandler(寄存器翻译层) + lineBuffer(容器)
 //      它把 APB 寄存器翻译成三根有效信号: enable / mode / addr{段0,段1}
 //      本模块按 mode 决定"一行取几段":
 //          mode=0 全屏: 1 段, 段0 = 整帧,          241 拍, 行距 5760
@@ -45,7 +45,7 @@
 //        ★ frame_start 只在空闲时采纳: 正在取行时来的丢掉, 下一帧自纠
 //
 //  接口约定
-//      0) lineBuffer_enable=0 时不出命令(停在 IDLE); mode/addr 由 bufferAPBHandler 给
+//      0) lineBuffer_enable=0 时不出命令(停在 IDLE); mode/addr 由 GPU2D_APBHandler 经 lineBuffer 给
 //      1) lineBuffer_frame_start：★必须是【写域单拍事件】(见 lineBuffer.v 里的跨域桥)
 //      2) 只读不写：cmd_write 恒 0（行预取只从 DDR 读）
 //      3) 单 outstanding：上一笔收完(rd_last)之后才发下一笔
@@ -65,6 +65,7 @@ module bufferControler #(
     parameter AXI_LEN_WIDTH     = 8,
     parameter LINE_BYTES        = 5760,
     parameter ROW_STRIDE_BYTES  = LINE_BYTES,
+    //   ★ 帧尾停手行数；顶层实际传 720
     parameter FRAME_LINES       = 1080,
     parameter LINE_WIDTH        = 11,
     parameter LINE_BEATS        = LINE_BYTES/(AXI_DATA_WIDTH/8)
@@ -73,7 +74,7 @@ module bufferControler #(
     input  wire                         rst_n,
 
     //------------------------------------------------------------
-    // 显示参数（来自 bufferAPBHandler）
+    // 显示参数（来自 GPU2D_APBHandler，经 lineBuffer 转进来）
     //------------------------------------------------------------
     input  wire                         lineBuffer_enable,
     input  wire                         lineBuffer_mode,            // 0 = 全屏(1 段) 1 = 分屏(2 段)
