@@ -13,18 +13,21 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
 按键:
     W / ↑ 上      S / ↓ 下      A / ← 左      D / → 右（可以斜着按）
     R            按一下重开一局（不用按住）
-    P            在玩家脚下生成一个道具（当前池子只刷 MagicCard）
-    T            跳到 Boss 房（仅 Boss 调试版有效）
-    B            放置炸弹
+    Y            在玩家脚下生成道具和底座
+    1 / 小键盘1  跳到 Boss 房
+    E            放置炸弹
+    T            切换测试模式（无敌＋测试伤害；再次按下关闭）
     /            进入"命令行"：敲完回车发给板子（回车不会当移动键）
     ESC 退出（松手即停，所以也可以随时按 Ctrl+C）
 
 协议（板端 game/game_input.c）:
     两字节帧:  0xA5  +  mask
-    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 B / bit6 P / bit7 T
-    只在掩码变化时发一次；板端 500 ms 收不到就自动回落到板载按键。
+    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 E / bit6 Y / bit7 1
+    掩码变化时发送，按住时每 200 ms 补发；板端 500 ms 收不到就回落到板载按键。
+    T 使用独立文本命令 T + 回车，不占用方向/传送等掩码位。
 """
 import argparse
+import codecs
 import ctypes
 import os
 import sys
@@ -42,7 +45,7 @@ try:
 except ImportError:
     # 没装依赖（比如点了 IDE 的"运行"按钮，解释器是系统 Python）。
     # 仓库里如果有 uv 建的 .venv，就用它把自己重开一遍 —— 用户什么都不用配。
-    venv_py = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "python.exe"
+    venv_py = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "python.exe"
     if venv_py.exists() and Path(sys.executable).resolve() != venv_py.resolve():
         sys.stderr.write("用 .venv 的 Python 重开一次：%s\n" % venv_py)
         sys.stderr.flush()
@@ -69,11 +72,14 @@ VK = {
     0x41: 0x1,   # A
     0x44: 0x2,   # D
     0x52: 0x10,  # R：按一下重开一局
-    0x42: 0x20,  # B：放炸弹
-    0x50: 0x40,  # P：在玩家脚下生成一个道具
-    0x54: 0x80,  # T：Boss 调试版直接跳到 Boss 房
+    0x45: 0x20,  # E：放置炸弹
+    0x59: 0x40,  # Y：生成道具和底座
+    0x31: 0x80,  # 主键盘 1：直接跳到 Boss 房
+    0x61: 0x80,  # 小键盘 1（Num Lock 开启）
 }
 VK_ESC = 0x1B
+VK_TEST = 0x54
+VK_CONTROL = 0x77  # F8
 
 user32 = ctypes.windll.user32
 
@@ -106,6 +112,9 @@ def main():
                     help="串口名（默认用脚本顶部的 PORT 常量）")
     ap.add_argument("-b", "--baud", type=int, default=BAUD)
     ap.add_argument("--quiet", action="store_true", help="不显示板子回传的日志")
+    ap.add_argument("--log", type=Path, help="将板子串口输出同步追加到日志文件")
+    ap.add_argument("--quiet-keys", action="store_true", help="不逐次打印按键状态")
+    ap.add_argument("--keep-log", action="store_true", help="ESC 释放操控但继续记录；F8 恢复操控，Ctrl+C 退出")
     ap.add_argument("--list", action="store_true", help="只列串口")
     args = ap.parse_args()
 
@@ -126,15 +135,27 @@ def main():
                  % (port, e))
 
     print("已连接 %s @ %d" % (port, args.baud))
-    print("按键: W/A/S/D 或方向键移动，R 重开，P 生成道具，T 跳 Boss（调试版），/ 输入命令，ESC 退出。板子日志%s显示。" %
-          ("不" if args.quiet else "会"))
+    print("按键：WASD/方向键移动，R 重开，Y 道具+底座，E 炸弹，1 进 Boss，T 测试，/ 命令，ESC 退出。", flush=True)
     sys.stdout.flush()
+    if args.keep_log:
+        print("采集模式: ESC 释放操控但保留日志，F8 切换操控，Ctrl+C 退出。", flush=True)
 
     last_mask = -1
     last_send = 0.0
+    test_was_down = False
     cmd = None            # None = 普通模式；list = 正在输入一条命令
     skip_next = False     # 方向键等特殊键会连发两个码，第二个要丢掉
+    log = None
+    controls = True
+    control_was_down = False
+    exit_reason = "exception"
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     try:
+        if args.log:
+            args.log.parent.mkdir(parents=True, exist_ok=True)
+            log = args.log.open("ab")
+            log.write(b"GAMEPAD START\r\n")
+            log.flush()
         while True:
             # ---- 控制台文本输入：按 / 进入命令行，回车发到板子 ----
             if msvcrt is not None:
@@ -175,16 +196,34 @@ def main():
                         sys.stderr.write(ch)
                         sys.stderr.flush()
             # 板子打印过来的日志，原样转发到控制台
-            if not args.quiet:
+            if not args.quiet or log is not None:
                 data = ser.read(4096)
                 if data:
-                    sys.stdout.write(data.decode("utf-8", "replace"))
-                    sys.stdout.flush()
+                    if log is not None:
+                        log.write(data)
+                        log.flush()
+                    if not args.quiet:
+                        sys.stdout.write(decoder.decode(data))
+                        sys.stdout.flush()
 
             if held(VK_ESC):
-                break
+                if args.keep_log:
+                    controls = False
+                else:
+                    exit_reason = "ESC"
+                    break
+            control_down = held(VK_CONTROL)
+            if args.keep_log and control_down and not control_was_down:
+                controls = not controls
+            control_was_down = control_down
 
-            mask = read_mask()
+            test_down = held(VK_TEST)
+            if controls and cmd is None and test_down and not test_was_down:
+                ser.write(b"T\r")
+                ser.flush()
+            test_was_down = test_down  # Holding T must never repeat the toggle.
+
+            mask = read_mask() if controls else 0
             now = time.time()
             # 变化就发；一直按着也每 200 ms 补发一次（板端 500 ms 收不到会掉线）
             if mask != last_mask or (mask and now - last_send > 0.2):
@@ -195,20 +234,27 @@ def main():
                 # 状态行（覆盖同一行，别刷屏）
                 names = []
                 if mask & 0x80: names.append("BOSS")
-                if mask & 0x20: names.append("BOMB")
-                if mask & 0x40: names.append("SPAWN")
+                if mask & 0x20: names.append("BOMB(E)")
+                if mask & 0x40: names.append("SPAWN(Y)")
                 if mask & 0x10: names.append("RESTART")
                 if mask & 0x8: names.append("UP")
                 if mask & 0x4: names.append("DOWN")
                 if mask & 0x1: names.append("LEFT")
                 if mask & 0x2: names.append("RIGHT")
-                sys.stderr.write("\r  按键: %-22s" % (" ".join(names) if names else "(松开)"))
-                sys.stderr.flush()
+                if not args.quiet_keys:
+                    sys.stderr.write("\r  按键: %-22s" % (" ".join(names) if names else "(松开)"))
+                    sys.stderr.flush()
 
             time.sleep(0.01)
     except KeyboardInterrupt:
-        pass
+        exit_reason = "interrupt"
     finally:
+        if not args.quiet:
+            sys.stdout.write(decoder.decode(b"", final=True))
+            sys.stdout.flush()
+        if log is not None:
+            log.write(("\r\nGAMEPAD EXIT: " + exit_reason + "\r\n").encode("ascii"))
+            log.close()
         try:
             ser.write(bytes([PAD_MAGIC, 0]))     # 松手，别让它一直走
             ser.flush()

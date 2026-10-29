@@ -25,6 +25,7 @@
  *  和"虚拟手柄"的二进制帧共存：帧头 0xA5 不是可打印字符，所以
  *  可打印 ASCII 一律当命令收集，遇到回车执行。
  *      P      → 在玩家脚下生成一个道具（等同按 P）
+ *      T      → 切换测试模式（无敌 / GAME_TEST_DAMAGE 伤害）
  */
 #define CMD_MAX 16
 static char s_cmd[CMD_MAX];
@@ -33,11 +34,11 @@ static int  s_cmd_n;
 /*  P 键生成道具请求 / B 放置炸弹请求  */
 static int s_spawn_req;
 static int s_bomb_req;
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
 static int s_boss_req;
-#if GAME_PROFILE
-static int s_stats_req;
 #endif
+#if GAME_BOSS_DEBUG && GAME_PROFILE
+static int s_stats_req;
 #endif
 
 static void cmd_exec(void)
@@ -47,19 +48,33 @@ static void cmd_exec(void)
     s_cmd[s_cmd_n] = 0;
     s_cmd_n = 0;
 
-    if (single && command == 'p') {
+    if (single && command == 'y') {
         s_spawn_req = 1;
         bsp_printf("DEBUG: spawn queued\r\n");
-    } else if (single && command == 'b') {
+    } else if (single && command == 'e') {
         s_bomb_req = 1;
         bsp_printf("DEBUG: bomb queued\r\n");
+    } else if (single && command == 's') {
+        bsp_printf("LOAD fps=%d enemy=%d total=%d cmds=%d drops=%d\r\n",
+                   g.fps, game_enemy_bullets_alive(), game_bullets_alive(),
+                   g.cmd_frame, (int)rl_dropped());
+    } else if (single && command == 't') {
+        g.test_mode = !g.test_mode;
+        bsp_printf("TEST MODE: %s invincible=%d damage=%d hp=%d lives=%d boss_hp=%d boss_phase=%d mobs=%d\r\n",
+                   g.test_mode ? "ON" : "OFF", g.test_mode,
+                   game_player_hit_damage(BOSS_HIT_DMG), game_vital_hp(),
+                   game_vital_lives(), g.boss_hp, g.boss_phase+1,game_mobs_alive());
+#if GAME_BOSS_SHORTCUT
+    } else if (single && command == '1') {
+        s_boss_req = 1;
+#endif
 #if GAME_BOSS_DEBUG && GAME_PROFILE
     } else if (s_cmd[0] == 's' && s_cmd[1] == 't' &&
                s_cmd[2] == 'a' && s_cmd[3] == 't' && s_cmd[4] == 0) {
         s_stats_req = 1;
 #endif
     } else if (s_cmd[0] != 0) {
-        bsp_printf("DEBUG: unknown cmd '%s' (P/B)\r\n", s_cmd);
+        bsp_printf("DEBUG: unknown cmd '%s'\r\n", s_cmd);
     }
 }
 
@@ -87,21 +102,21 @@ int game_take_bomb(void)
     return r;
 }
 
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
 int game_take_boss_jump(void)
 {
     int r = s_boss_req;
     s_boss_req = 0;
     return r;
 }
-#if GAME_PROFILE
+#endif
+#if GAME_BOSS_DEBUG && GAME_PROFILE
 int game_take_debug_stats(void)
 {
     int r = s_stats_req;
     s_stats_req = 0;
     return r;
 }
-#endif
 #endif
 
 /*----------------------------------------------------------------------------*/
@@ -113,21 +128,22 @@ u32 game_keys_read(void)
     while (uart_readOccupancy(BSP_UART_TERMINAL) > 0) {
         c = (int)(uart_read(BSP_UART_TERMINAL) & 0xFF);
 
-        /*  ★ 0xA5 后面紧跟的一定是 mask；bit5(B)/bit6(P) 会到 0x20/0x40，
+        /*  ★ 0xA5 后面紧跟的一定是 mask；bit5(E)/bit6(Y) 会到 0x20/0x40，
          *    不能再按"可打印字符"区分。  */
         if (s_want_mask) {
             s_want_mask = 0;
-            s_keys = (u32)c & 0xFFu;        /* bit0..3 方向 / bit4 R / bit5 B / bit6 P / bit7 T */
+            s_keys = (u32)c & 0xFFu;        /* bit0..3 方向 / bit4 R / bit5 E / bit6 Y / bit7 1 */
             /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
                照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
-            if (s_keys & KEY_RESTART) s_restart_req = 1;
+            if ((s_keys & KEY_RESTART) && !(s_prev_mask & KEY_RESTART))
+                s_restart_req = 1;
 
             /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
             if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
                 s_spawn_req = 1;
             if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
                 s_bomb_req = 1;
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
             if ((s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
                 s_boss_req = 1;
 #endif

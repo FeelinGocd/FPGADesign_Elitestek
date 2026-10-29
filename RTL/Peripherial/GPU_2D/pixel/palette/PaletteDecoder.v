@@ -22,16 +22,17 @@
 //      多读回来的那几组本来就是垃圾，由 DDRPacker 在行边界丢掉 ——
 //      现有通路已有的约定，不新增机制。
 //
-//  流水（★ 现在只剩 LUT 自己的那一级）
+//  流水：两槽寄存索引队列 + LUT 的握手读口
 //      LUT 是【带握手的读口】：lookup_data 和 lookup_valid 同拍产生、且一直保持到
-//      下游取走 ⇒ 本模块不用维护任何"差一拍"的标志，出口就是 LUT 的出口。
+//      下游取走。队列的入口 ready 只看本地占用，出口仍是 LUT 的出口。
+//      line_start 同时清队列并锁存 MX；源在两趟之间排空后也用它重装上下文。
 //
 //      ★ 历史：这里曾经有 ① 一级 skid + 两个"入口/中间级有效"标志（兜"LUT 输出只在
 //        一拍有效"这个矛盾，根因是当时 PaletteLUT 读使能恒为 1 —— 已封进 PaletteRAM.v）；
 //        ② 一个 36 字节相位窗口（补 dst_off 个哑字节，已下沉到 DDRPacker，见文件头）。
 //
 //  一条不变式（改这里之前先守住）
-//      busy 要把 LUT 手上那个字也算上：少报一级，上游会在流水没排空时开新行，
+//      busy 要包含索引队列和 LUT 手上那个字：少报一级，上游会在流水没排空时开新行，
 //      把还没吐出去的像素【直接吃掉】。
 //
 //  水平镜像(MX)为什么也在这里做
@@ -108,6 +109,19 @@ wire                                        lookup_valid;   // 与 lookup_data �
 wire [LOOKUP_MASK_WIDTH-1:0]                lookup_mask;    // ★ 这 4 个像素的透明标志（3 位/像素）
 wire [INDEXES_PER_WORD*INDEX_WIDTH-1:0]     index_data_sw;  // ★ MX 时字内 4 个索引反序后的字
 
+// Two registered index slots split both the BRAM data path and the ready
+// return path. Input acceptance depends only on local occupancy, never on the
+// packer/LUT's combinational ready. Both entries count toward row drain/busy.
+reg  [INDEXES_PER_WORD*INDEX_WIDTH-1:0]     index_fifo_r [0:1];
+reg                                         index_wr_ptr_r;
+reg                                         index_rd_ptr_r;
+reg  [1:0]                                  index_count_r;
+wire [INDEXES_PER_WORD*INDEX_WIDTH-1:0]     index_data_r;
+wire                                        index_valid_r;
+wire                                        lut_index_ready;
+wire                                        index_push;
+wire                                        index_pop;
+
 //   ---- 水平镜像(MX)的行上下文 ----
 reg                                         mx_r;           // 本行要不要把字内 4 个索引反序
 
@@ -120,7 +134,12 @@ assign  palette_valid   = lookup_valid;
 
 //   ★ busy 给上游看：本行最后一个像素字还在 LUT 出口时就还不许开新行
 //     （上游自己那拍由素材 RAM 读口的 read_valid 兜住 —— 它要等 Decoder 收下才放手。）
-assign  busy            = lookup_valid;
+assign  busy            = lookup_valid | index_valid_r;
+assign  index_valid_r   = (index_count_r != 0);
+assign  index_data_r    = index_fifo_r[index_rd_ptr_r];
+assign  index_ready     = (index_count_r < 2) & ~line_start;
+assign  index_push      = index_valid & index_ready;
+assign  index_pop       = index_valid_r & lut_index_ready;
 
 //==============================================================================
 // 例化
@@ -145,8 +164,8 @@ genvar si;
 generate
     for (si = 0; si < INDEXES_PER_WORD; si = si + 1) begin : g_mx
         assign index_data_sw[si*INDEX_WIDTH +: INDEX_WIDTH] =
-               mx_r ? index_data[(INDEXES_PER_WORD-1-si)*INDEX_WIDTH +: INDEX_WIDTH]
-                    : index_data[si*INDEX_WIDTH +: INDEX_WIDTH];
+               mx_r ? index_data_r[(INDEXES_PER_WORD-1-si)*INDEX_WIDTH +: INDEX_WIDTH]
+                    : index_data_r[si*INDEX_WIDTH +: INDEX_WIDTH];
     end
 endgenerate
 
@@ -202,11 +221,38 @@ PaletteLUT #(
     .rst_n              (rst_n),
     .clear              (line_start),           // 行边界：丢掉上一行残留的那个像素字
     .index_data         (index_data_sw),        // ★ MX 时字内 4 个索引已反序
-    .index_valid        (index_valid),
-    .index_ready        (index_ready),          // 直接给上游：下游能收就说明收得下
+    .index_valid        (index_valid_r),
+    .index_ready        (lut_index_ready),
     .palette_data       (lut_data),             // 128 位 = 4 项 AARRGGBB
     .palette_valid      (lookup_valid),
     .palette_ready      (palette_ready)         // 下游取走 ⇒ 把这 4 个像素交出去
 );
+
+// FIFO occupancy changes only on a clock edge, cutting the ready chain.
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        index_count_r <= 2'd0;
+        index_wr_ptr_r <= 1'b0;
+        index_rd_ptr_r <= 1'b0;
+    end
+    else if (line_start) begin
+        index_count_r <= 2'd0;
+        index_wr_ptr_r <= 1'b0;
+        index_rd_ptr_r <= 1'b0;
+    end
+    else begin
+        if (index_push) begin
+            index_fifo_r[index_wr_ptr_r] <= index_data;
+            index_wr_ptr_r <= ~index_wr_ptr_r;
+        end
+        if (index_pop)
+            index_rd_ptr_r <= ~index_rd_ptr_r;
+        case ({index_push, index_pop})
+            2'b10: index_count_r <= index_count_r + 1'b1;
+            2'b01: index_count_r <= index_count_r - 1'b1;
+            default: index_count_r <= index_count_r;
+        endcase
+    end
+end
 
 endmodule

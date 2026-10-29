@@ -113,6 +113,7 @@ int game_vital_hit(u32 now)
     (void)i;
     return 0;
 #endif
+    if (g.test_mode) return 0;
     if (g.phase == PHASE_GAMEOVER) return 0;     /* 结束画面里不再扣血 */
     if (game_vital_invuln(now)) return 0;
     if (s_dead_until != 0u)     return 0;

@@ -19,7 +19,8 @@ async_fifo：异步FIFO模块，采用格雷码指针同步，支持不同读写
 module async_fifo #(
     parameter WR_WIDTH      = 10,          // 写入数据位宽
     parameter ADDR_WIDTH    = 10,          // 地址深度（2^ADDR_WIDTH）
-    parameter RD_WIDTH      = 2            // 读取数据位宽（必须 ≤ WR_WIDTH）
+    parameter RD_WIDTH      = 2,           // 读取数据位宽（必须 ≤ WR_WIDTH）
+    parameter USE_REGISTERS = 0            // shallow CDC queues must not consume full RAM blocks
 )(
     // write domain
     input                       clk_wr,
@@ -42,21 +43,36 @@ reg  [ADDR_WIDTH:0] pwr_bin;                     // 写指针（二进制，高�
 reg  [ADDR_WIDTH:0] pwr_grey;                    // 写指针（格雷码）
 wire [ADDR_WIDTH:0] pwr_bin_next;
 wire [ADDR_WIDTH:0] pwr_grey_next;
+wire [ADDR_WIDTH:0] pwr_bin_inc;
+wire [ADDR_WIDTH:0] pwr_grey_inc;
 
 reg  [ADDR_WIDTH:0] prd_bin;                     // 读指针（二进制，高位用于圈计数）
 reg  [ADDR_WIDTH:0] prd_grey;                    // 读指针（格雷码）
 wire [ADDR_WIDTH:0] prd_bin_next;
 wire [ADDR_WIDTH:0] prd_grey_next;
+wire [ADDR_WIDTH:0] prd_bin_inc;
+wire [ADDR_WIDTH:0] prd_grey_inc;
 
 wire full_next;
 wire empty_next;
+wire write_take;
+wire read_take;
+wire full_hold;
+wire full_inc;
+wire empty_hold;
+wire empty_inc;
+wire [ADDR_WIDTH:0] full_compare_target;
 
-// 写时钟域
-assign pwr_bin_next  = pwr_bin + (en_wr & ~wr_full);
-assign pwr_grey_next = pwr_bin_next ^ (pwr_bin_next >> 1);
+// 预增指针和 Gray 码不依赖外部请求。空/满标志并行计算当前/递增两种
+// 比较结果，再用本拍握手选择，避免 ready/enable 穿过加法和宽比较。
+assign write_take   = en_wr & ~wr_full;
+assign pwr_bin_inc  = pwr_bin + 1'b1;
+assign pwr_grey_inc = pwr_bin_inc ^ (pwr_bin_inc >> 1);
+assign pwr_bin_next = write_take ? pwr_bin_inc : pwr_bin;
+assign pwr_grey_next = write_take ? pwr_grey_inc : pwr_grey;
 
 // 同步读指针（格雷码）
-reg [ADDR_WIDTH:0] prd_grey_d, prd_grey_dd;
+(* async_reg = "true" *) reg [ADDR_WIDTH:0] prd_grey_d, prd_grey_dd;
 
 always @(posedge clk_wr or negedge rst_wr_n) begin
     if (!rst_wr_n) begin
@@ -81,7 +97,12 @@ end
 
 // 生成写满标志（格雷码最高两位取反比较）
 
-assign full_next = (pwr_grey_next == {~prd_grey_dd[ADDR_WIDTH:ADDR_WIDTH-1], prd_grey_dd[ADDR_WIDTH-2:0]});
+assign full_compare_target = {~prd_grey_dd[ADDR_WIDTH:ADDR_WIDTH-1],
+                              prd_grey_dd[ADDR_WIDTH-2:0]};
+// hold 分支也必须重新比较：没有写入时，对端读指针仍会跨域更新。
+assign full_hold = (pwr_grey == full_compare_target);
+assign full_inc  = (pwr_grey_inc == full_compare_target);
+assign full_next = write_take ? full_inc : full_hold;
 
 always @(posedge clk_wr or negedge rst_wr_n) begin
     if (!rst_wr_n)
@@ -90,12 +111,15 @@ always @(posedge clk_wr or negedge rst_wr_n) begin
         wr_full <= full_next;
 end
 
-// 读时钟域
-assign prd_bin_next  = prd_bin + (en_rd & ~rd_empty);
-assign prd_grey_next = prd_bin_next ^ (prd_bin_next >> 1);
+// 读时钟域：与写侧一样，先预增再在末端选择，不改变指针/标志周期。
+assign read_take    = en_rd & ~rd_empty;
+assign prd_bin_inc  = prd_bin + 1'b1;
+assign prd_grey_inc = prd_bin_inc ^ (prd_bin_inc >> 1);
+assign prd_bin_next = read_take ? prd_bin_inc : prd_bin;
+assign prd_grey_next = read_take ? prd_grey_inc : prd_grey;
 
 // 同步写指针（格雷码）
-reg [ADDR_WIDTH:0] pwr_grey_d, pwr_grey_dd;
+(* async_reg = "true" *) reg [ADDR_WIDTH:0] pwr_grey_d, pwr_grey_dd;
 
 always @(posedge clk_rd or negedge rst_rd_n) begin
     if (!rst_rd_n) begin
@@ -119,7 +143,10 @@ always @(posedge clk_rd or negedge rst_rd_n) begin
 end
 
 // 生成读空标志（格雷码相等比较）
-assign empty_next = (prd_grey_next == pwr_grey_dd);
+// 没有读取时仍重新比较，使新写入同步后能够解除 rd_empty。
+assign empty_hold = (prd_grey == pwr_grey_dd);
+assign empty_inc  = (prd_grey_inc == pwr_grey_dd);
+assign empty_next = read_take ? empty_inc : empty_hold;
 
 always @(posedge clk_rd or negedge rst_rd_n) begin
     if (!rst_rd_n)
@@ -139,6 +166,18 @@ assign bram_wr_addr = pwr_bin[ADDR_WIDTH-1:0];
 assign bram_rd_en   = (en_rd && !rd_empty) ? 1'b1 : 1'b0;
 assign bram_rd_addr = prd_bin[ADDR_WIDTH-1:0];
 
+// Small command/beat queues use registers; display and CI queues keep BRAM.
+generate if (USE_REGISTERS) begin : g_register_memory
+    (* syn_ramstyle = "registers" *) reg [WR_WIDTH-1:0] memory_r [0:(1<<ADDR_WIDTH)-1];
+    reg [WR_WIDTH-1:0] read_r;
+    assign data_out = read_r;
+    always @(posedge clk_wr) begin
+        if (bram_wr_en) memory_r[bram_wr_addr] <= data_in;
+    end
+    always @(posedge clk_rd) begin
+        if (bram_rd_en) read_r <= memory_r[bram_rd_addr];
+    end
+end else begin : g_block_memory
 // 实例化 BRAM 模块
 BlockRAM # (
 .DATA_WIDTH         (WR_WIDTH),
@@ -157,4 +196,5 @@ u_BlockRAM (
     .bram_en_rd         (bram_rd_en),
     .bram_addr_rd       (bram_rd_addr)
 );
+end endgenerate
 endmodule

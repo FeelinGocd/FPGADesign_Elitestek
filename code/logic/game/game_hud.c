@@ -102,6 +102,11 @@ static const unsigned char s_row_digits[HUD_CELLS_Y] = {
     2, 3, 3, 2, 0, 2, 2, 2, 3, 2, 3, 1
 };
 
+static const char *row_label(int row)
+{
+    return row == 5 && g.test_mode ? "TEST" : s_row_label[row];
+}
+
 /* Restore only glyph footprints; the panel has no opaque background.
  * Keep the full vital row to cover hearts and a previous extra-life label. */
 void game_hud_mark_at(dirty_map_t dirty, int camx, int camy)
@@ -115,6 +120,7 @@ void game_hud_mark_at(dirty_map_t dirty, int camx, int camy)
             continue;
         }
         while (s_row_label[i][len]) ++len;
+        if (i == 5) len = 4; /* Include the previous TEST label when toggled off. */
         game_mark_dirty(dirty, camx + HUD_LABEL_X, camy + i * HUD_ROW_H,
                         len * 16, 24);
         game_mark_dirty(dirty, camx + HUD_VALUE_X, camy + i * HUD_ROW_H,
@@ -128,7 +134,7 @@ void game_hud_static(u32 fb)
 
     fb = game_view_fb(fb);
     for (i = 0; i < HUD_CELLS_Y; ++i)
-        if (s_row_label[i]) hud_label(fb, HUD_LABEL_X, i * HUD_ROW_H, s_row_label[i]);
+        if (s_row_label[i]) hud_label(fb, HUD_LABEL_X, i * HUD_ROW_H, row_label(i));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -141,11 +147,11 @@ static void hud_values(int fps, int cmd_frame, int total_bullets, int coins, int
     v[2] = cmd_frame;
     v[3] = g.stage;
     v[4] = 0;                                   /* 血量行由 game_vital 负责 */
-    v[5] = BOSS_HIT_DMG;
-    v[6] = PLAYER_MAX_V8 / 8;
+    v[5] = game_player_hit_damage(BOSS_HIT_DMG);
+    v[6] = g.stats.move_v8 / 8;
     v[7] = g.stats.bullet_speed;
     v[8] = g.stats.range;
-    v[9] = (int)(60u / FIRE_EVERY);
+    v[9] = 60 / (g.stats.fire_every > 0 ? g.stats.fire_every : (int)FIRE_EVERY);
     v[10] = coins;
     v[11] = g.bomb_count;
 }
@@ -220,8 +226,10 @@ int game_hud_prepare(dirty_map_t dirty, int buf,
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
 
-        if (s_last[buf][i] != v[i]) {           /* ① 数值变了：标脏 + 重画这一行 */
-            s_last[buf][i] = v[i];
+        /* Cache mode as well as damage, even if configured equal to normal. */
+        int key = v[i] + (i == 5 && g.test_mode ? 1000 : 0);
+        if (s_last[buf][i] != key) {           /* ① 数值变了：标脏 + 重画这一行 */
+            s_last[buf][i] = key;
             s_draw[buf][i] = 1;
             any = 1;
             game_hud_dirty_row(dirty, i);
@@ -247,7 +255,7 @@ void game_hud_frame(u32 fb, int buf, int fps, int cmd_frame, int total_bullets, 
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
         if (!full && !s_draw[buf][i]) continue;
-        hud_row(fb, i, s_row_label[i], v[i], s_row_digits[i]);
+        hud_row(fb, i, row_label(i), v[i], s_row_digits[i]);
         s_draw[buf][i] = 0;
     }
 }
@@ -279,14 +287,13 @@ void game_hud_gameover(u32 fb, int score, int secs)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  Boss 血条：顶部居中的一条，血量右端往左缩。  */
+/*  Boss 名称与血条：名称固定在血条上方，进入锁血换阶段时仍持续绘制。 */
 void game_hud_boss_bar(u32 fb, int hp, int hp_max)
 {
     int fill = (hp_max > 0) ? (HUD_HP_W * hp) / hp_max : 0;
 
     fb = game_view_fb(fb);
-    hud_label(fb, HUD_HP_X + (HUD_HP_W - 4 * 16) / 2, HUD_HP_LABEL_Y, "BOSS");
-
+    hud_label(fb, HUD_HP_LABEL_X, HUD_HP_LABEL_Y, "BOSS");
     CI_gpu2d_fillRect(fb, (u32)HUD_HP_X, (u32)HUD_HP_Y, (u32)HUD_HP_W, (u32)HUD_HP_H, 0x00202020u);
     if (fill > 0)
         CI_gpu2d_fillRect(fb, (u32)HUD_HP_X, (u32)HUD_HP_Y, (u32)fill, (u32)HUD_HP_H, 0x00E03030u);
@@ -300,7 +307,8 @@ void game_hud_toast(u32 fb, const char *text)
 
     fb = game_view_fb(fb);
     while (*p++) ++len;
-    hud_label(fb, (SCR_W - len * 16) / 2, HUD_TOAST_Y, text);
+    hud_label(fb, HUD_TOAST_X + (HUD_TOAST_W - len * 16) / 2,
+              HUD_TOAST_Y, text);
 }
 
 /*----------------------------------------------------------------------------*/

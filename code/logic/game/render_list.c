@@ -6,7 +6,7 @@
 //    s_order[]  排序用的下标表（2 字节/项，移动它比移动 12 字节的结构便宜）
 //  排序:
 //    · 先看一眼是不是已经有序（子弹每帧只挪几像素时几乎总是有序）→ O(n)
-//    · 无序时对下标做堆排序：O(n log n)，不再分配临时归并数组
+//    · 无序时对下标做两趟稳定基数排序
 //    · 同 z 用提交下标兜底 ⇒ 与 push 顺序一致，画面不会逐帧抖
 //==============================================================================
 #include "render_list.h"
@@ -14,8 +14,8 @@
 /* Keep the hot queue compact: a function pointer costs four bytes per item,
  * while a frame normally reuses fewer than 16 distinct draw callbacks. */
 static short          s_z[RL_MAX];
-static u16            s_arg[RL_MAX];
-static unsigned char  s_fn_id[RL_MAX];
+/* Five callback bits + eleven entity-index bits share one 16-bit payload. */
+static u16            s_payload[RL_MAX];
 static rl_draw_fn     s_fns[32];
 static unsigned char  s_fn_n;
 static u16       s_order[RL_MAX];
@@ -31,29 +31,37 @@ void rl_begin(void)
 }
 
 /*----------------------------------------------------------------------------*/
-int rl_push(int z, rl_draw_fn fn, int arg)
+int rl_register_draw(rl_draw_fn fn)
 {
     int i;
-    unsigned char fn_id;
-
-    if (s_n >= RL_MAX || fn == 0 || z < -32768 || z > 32767) {
-        ++s_dropped;
-        return 0;
-    }
-
+    if (fn == 0) return -1;
     for (i = 0; i < s_fn_n; ++i)
         if (s_fns[i] == fn) break;
-    if (i >= 32) {
+    if (i >= 32) return -1;
+    if (i == s_fn_n) s_fns[s_fn_n++] = fn;
+    return i;
+}
+
+int rl_push_id(int z, int draw_id, int arg)
+{
+    if (s_n >= RL_MAX || (unsigned)draw_id >= s_fn_n || (unsigned)arg > RL_ARG_MAX || z < -32768 || z > 32767) {
         ++s_dropped;
         return 0;
     }
-    if (i == s_fn_n) s_fns[s_fn_n++] = fn;
-    fn_id = (unsigned char)i;
     s_z[s_n] = (short)z;
-    s_arg[s_n] = (u16)arg;
-    s_fn_id[s_n] = fn_id;
+    s_payload[s_n] = (u16)((draw_id << RL_ARG_BITS) | arg);
     ++s_n;
     return 1;
+}
+
+int rl_push(int z, rl_draw_fn fn, int arg)
+{
+    /* Rejected elements must not consume a callback-table entry. */
+    if (s_n >= RL_MAX || fn == 0 || (unsigned)arg > RL_ARG_MAX || z < -32768 || z > 32767) {
+        ++s_dropped;
+        return 0;
+    }
+    return rl_push_id(z, rl_register_draw(fn), arg);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -155,6 +163,7 @@ void rl_draw_all(u32 fb, u32 now, int buf)
 
     for (i = 0; i < s_n; ++i) {
         u16 idx = s_order[i];
-        s_fns[s_fn_id[idx]](fb, now, buf, (int)s_arg[idx]);
+        u16 payload = s_payload[idx];
+        s_fns[payload >> RL_ARG_BITS](fb, now, buf, (int)(payload & RL_ARG_MAX));
     }
 }

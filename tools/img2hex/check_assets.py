@@ -17,7 +17,7 @@ PROJECT = ROOT / "project/GamingPlayUnit"
 SOFTWARE = PROJECT / "embedded_sw/SoC_RISCV32/software/standalone/GamingPlayUnit"
 
 
-def elf_asset_table(path):
+def elf_asset_table(path, expected_count):
     """Read g_assets from a RISC-V ELF32 file without third-party ELF packages."""
     data = path.read_bytes()
     if data[:6] != b"\x7fELF\x01\x01":
@@ -43,11 +43,15 @@ def elf_asset_table(path):
             symbol = names[name:].split(b"\0", 1)[0]
             if symbol != b"g_assets":
                 continue
-            if size % 16:
-                raise ValueError("unexpected g_assets entry size")
+            entry_size = struct.calcsize(pic2pram.ASSET_DESC_FORMAT)
+            if size != expected_count * entry_size:
+                raise ValueError("unexpected g_assets size in %s: %d bytes, expected %d x %d; "
+                                 "rebuild firmware with the current asset header" %
+                                 (path, size, expected_count, entry_size))
             result = []
-            for offset in range(0, size, 16):
-                result.append(struct.unpack("<IIII", at_address(address+offset, 16)))
+            for offset in range(0, size, entry_size):
+                result.append(struct.unpack(pic2pram.ASSET_DESC_FORMAT,
+                                            at_address(address+offset, entry_size)))
             return result
     raise ValueError("g_assets not found in " + str(path))
 
@@ -78,7 +82,7 @@ def check(elf, bitstream):
         pattern = r'\{\s*(\d+)u,\s*(\d+)u,\s*(\d+)u,\s*(\d+)u\s*\}'
         descriptors = [tuple(int(v) for v in values)
                        for values in re.findall(pattern, (out_dir/"assets_desc.h").read_text())]
-    if elf is not None and elf_asset_table(elf) != descriptors:
+    if elf is not None and elf_asset_table(elf, len(descriptors)) != descriptors:
         stale.append(str(elf) + " (compiled g_assets differs from current images)")
     if bitstream is not None:
         # This is an age check, not proof of which bitstream is on the board.

@@ -47,13 +47,16 @@ module GPU_2D #(
     parameter AXI_ID_WIDTH  = 8,                    // 与 Axi_Mux 的 SLAVE_ID_WIDTH 一致
     parameter AXI_LEN_WIDTH = 8,
     parameter AXI_ID        = {AXI_ID_WIDTH{1'b0}},
-    parameter IMAGE_NUM     = 2                     // 一条命令几张图（★ 与 CIUnpack/CmdExec 一致）
+    parameter IMAGE_NUM     = 2,                    // 一条命令几张图（★ 与 CIUnpack/CmdExec 一致）
+    parameter ASYNC_MEMORY  = 0                     // 1: accelerator 200MHz, AXI/display 100MHz
 )(
     //==================== 时钟 / 复位 ====================
     input  wire                     clk_ci,         //(I) CI 侧时钟（= CPU 时钟）
     input  wire                     rst_ci_n,       //(I) CI 侧复位，异步低有效
     input  wire                     clk_acc,        //(I) 命令侧时钟（v1 与 clk_ci 同源）
     input  wire                     rst_acc_n,      //(I) 命令侧复位，异步低有效
+    input  wire                     clk_mem,        //(I) AXI/display clock (ASYNC_MEMORY=1)
+    input  wire                     rst_mem_n,      //(I) memory-domain reset
     input  wire                     clk_HDMI_x1,    //(I) 显示像素时钟 @74.25MHz（显示通道用）
     input  wire                     rst_hdmi_n,     //(I) 显示通道复位（顶层算好：axi_rst_n & pll_HDMI_locked）
 
@@ -291,6 +294,23 @@ wire [AXI_STRB_WIDTH-1:0]   wr_strb;
 wire                        wr_valid;
 wire                        wr_ready;
 
+// Memory-side command streams; all AXI pins remain in memory_clk's domain.
+wire                        memory_clk;
+wire                        memory_rst_n;
+wire                        mem_cmd_wr_valid, mem_cmd_wr_ready;
+wire [AXI_ADDR_WIDTH-1:0]   mem_cmd_wr_addr;
+wire [AXI_LEN_WIDTH-1:0]    mem_cmd_wr_len;
+wire                        mem_cmd_wr_done, mem_cmd_wr_err;
+wire [AXI_DATA_WIDTH-1:0]   mem_wr_data;
+wire [AXI_STRB_WIDTH-1:0]   mem_wr_strb;
+wire                        mem_wr_valid, mem_wr_ready;
+wire                        mem_rd_cmd_valid, mem_rd_cmd_ready;
+wire [AXI_ADDR_WIDTH-1:0]   mem_rd_cmd_addr;
+wire [AXI_LEN_WIDTH-1:0]    mem_rd_cmd_len;
+wire                        mem_rd_cmd_done;
+wire [AXI_DATA_WIDTH-1:0]   mem_rd_data;
+wire                        mem_rd_valid, mem_rd_last, mem_rd_ready;
+
 // ---- CmdExec 的观测输出（-> GPU2D_APBHandler）----
 wire                        acc_busy;                       // 有命令在手上
 wire                        cmd_done;                       // 单拍：一条命令做完
@@ -313,6 +333,73 @@ wire                        lineBuffer_enable;                  // Handler -> li
 wire                        lineBuffer_mode;                    // Handler -> lineBuffer(显示侧模式)
 wire [63:0]                 lineBuffer_addr;                    // Handler -> lineBuffer {段0基址, 段1基址}
 wire                        lineBuffer_frame_start;             // lineBuffer -> Handler(帧边界单拍)
+wire                        mem_display_enable, mem_display_mode;
+wire [63:0]                 mem_display_addr;
+wire                        mem_frame_start, mem_frame_commit;
+wire                        mem_display_rst_n;
+
+assign memory_clk = ASYNC_MEMORY ? clk_mem : clk_acc;
+assign memory_rst_n = ASYNC_MEMORY ? rst_mem_n : rst_acc_n;
+ResetSync u_display_reset (
+    .clk(memory_clk), .async_rst_n(rst_hdmi_n), .rst_n(mem_display_rst_n)
+);
+
+generate if (ASYNC_MEMORY) begin : g_memory_cdc
+    GPU2D_MemoryCDC #(
+        .ADDR_WIDTH(AXI_ADDR_WIDTH), .DATA_WIDTH(AXI_DATA_WIDTH), .LEN_WIDTH(AXI_LEN_WIDTH)
+    ) u_memory_cdc (
+        .clk_acc(clk_acc), .rst_acc_n(rst_acc_n),
+        .clk_mem(memory_clk), .rst_mem_n(memory_rst_n),
+        .cmd_wr_valid(cmd_wr_valid), .cmd_wr_ready(cmd_wr_ready),
+        .cmd_wr_addr(cmd_wr_addr), .cmd_wr_len(cmd_wr_len),
+        .cmd_wr_done(cmd_wr_done), .cmd_wr_err(cmd_wr_err),
+        .wr_data(wr_data), .wr_strb(wr_strb), .wr_valid(wr_valid), .wr_ready(wr_ready),
+        .rd_cmd_valid(rd_cmd_valid), .rd_cmd_ready(rd_cmd_ready),
+        .rd_cmd_addr(rd_cmd_addr), .rd_cmd_len(rd_cmd_len), .rd_cmd_done(rd_cmd_done),
+        .rd_data(rd_data), .rd_valid(rd_valid), .rd_ready(rd_ready),
+        .mem_cmd_wr_valid(mem_cmd_wr_valid), .mem_cmd_wr_ready(mem_cmd_wr_ready),
+        .mem_cmd_wr_addr(mem_cmd_wr_addr), .mem_cmd_wr_len(mem_cmd_wr_len),
+        .mem_cmd_wr_done(mem_cmd_wr_done), .mem_cmd_wr_err(mem_cmd_wr_err),
+        .mem_wr_data(mem_wr_data), .mem_wr_strb(mem_wr_strb),
+        .mem_wr_valid(mem_wr_valid), .mem_wr_ready(mem_wr_ready),
+        .mem_rd_cmd_valid(mem_rd_cmd_valid), .mem_rd_cmd_ready(mem_rd_cmd_ready),
+        .mem_rd_cmd_addr(mem_rd_cmd_addr), .mem_rd_cmd_len(mem_rd_cmd_len),
+        .mem_rd_data(mem_rd_data), .mem_rd_valid(mem_rd_valid),
+        .mem_rd_last(mem_rd_last), .mem_rd_ready(mem_rd_ready)
+    );
+    GPU2D_DisplayCDC #(.ADDR_WIDTH(AXI_ADDR_WIDTH)) u_display_cdc (
+        .clk_acc(clk_acc), .rst_acc_n(rst_hdmi_n),
+        .clk_mem(memory_clk), .rst_mem_n(mem_display_rst_n),
+        .mem_frame_start(mem_frame_start), .acc_frame_start(lineBuffer_frame_start),
+        .acc_enable(lineBuffer_enable), .acc_mode(lineBuffer_mode), .acc_addr(lineBuffer_addr),
+        .mem_enable(mem_display_enable), .mem_mode(mem_display_mode), .mem_addr(mem_display_addr),
+        .mem_frame_commit(mem_frame_commit)
+    );
+end else begin : g_memory_sync
+    assign mem_cmd_wr_valid = cmd_wr_valid;
+    assign cmd_wr_ready = mem_cmd_wr_ready;
+    assign mem_cmd_wr_addr = cmd_wr_addr;
+    assign mem_cmd_wr_len = cmd_wr_len;
+    assign cmd_wr_done = mem_cmd_wr_done;
+    assign cmd_wr_err = mem_cmd_wr_err;
+    assign mem_wr_data = wr_data;
+    assign mem_wr_strb = wr_strb;
+    assign mem_wr_valid = wr_valid;
+    assign wr_ready = mem_wr_ready;
+    assign mem_rd_cmd_valid = rd_cmd_valid;
+    assign rd_cmd_ready = mem_rd_cmd_ready;
+    assign mem_rd_cmd_addr = rd_cmd_addr;
+    assign mem_rd_cmd_len = rd_cmd_len;
+    assign rd_cmd_done = mem_rd_cmd_done;
+    assign rd_data = mem_rd_data;
+    assign rd_valid = mem_rd_valid;
+    assign mem_rd_ready = rd_ready;
+    assign lineBuffer_frame_start = mem_frame_start;
+    assign mem_frame_commit = mem_frame_start;
+    assign mem_display_enable = lineBuffer_enable;
+    assign mem_display_mode = lineBuffer_mode;
+    assign mem_display_addr = lineBuffer_addr;
+end endgenerate
 
 //==============================================================================
 // 行模式锁存（显示侧配置 → 加速器配置口）
@@ -535,21 +622,21 @@ AXIMastersHandler #(
     .LEN_WIDTH                      (AXI_LEN_WIDTH),
     .AXI_ID                         (AXI_ID)
 ) u_AXIMastersHandler (
-    .clk                            (clk_acc),
-    .rst_n                          (rst_acc_n),
+    .clk                            (memory_clk),
+    .rst_n                          (memory_rst_n),
 
     // ---- 写 ----
-    .cmd_wr_valid                   (cmd_wr_valid),
-    .cmd_wr_ready                   (cmd_wr_ready),
-    .cmd_wr_addr                    (cmd_wr_addr),
-    .cmd_wr_len                     (cmd_wr_len),
-    .cmd_wr_done                    (cmd_wr_done),
-    .cmd_wr_err                     (cmd_wr_err),
+    .cmd_wr_valid                   (mem_cmd_wr_valid),
+    .cmd_wr_ready                   (mem_cmd_wr_ready),
+    .cmd_wr_addr                    (mem_cmd_wr_addr),
+    .cmd_wr_len                     (mem_cmd_wr_len),
+    .cmd_wr_done                    (mem_cmd_wr_done),
+    .cmd_wr_err                     (mem_cmd_wr_err),
 
-    .wr_data                        (wr_data),
-    .wr_strb                        (wr_strb),
-    .wr_valid                       (wr_valid),
-    .wr_ready                       (wr_ready),
+    .wr_data                        (mem_wr_data),
+    .wr_strb                        (mem_wr_strb),
+    .wr_valid                       (mem_wr_valid),
+    .wr_ready                       (mem_wr_ready),
 
     .m_AXI_AWID                     (m_AXI_AWID),
     .m_AXI_AWADDR                   (m_AXI_AWADDR),
@@ -576,17 +663,17 @@ AXIMastersHandler #(
     .m_AXI_BREADY                   (m_AXI_BREADY),
 
     // ---- 读 ----
-    .rd_cmd_valid                   (rd_cmd_valid),
-    .rd_cmd_ready                   (rd_cmd_ready),
-    .rd_cmd_addr                    (rd_cmd_addr),
-    .rd_cmd_len                     (rd_cmd_len),
-    .rd_cmd_done                    (rd_cmd_done),
+    .rd_cmd_valid                   (mem_rd_cmd_valid),
+    .rd_cmd_ready                   (mem_rd_cmd_ready),
+    .rd_cmd_addr                    (mem_rd_cmd_addr),
+    .rd_cmd_len                     (mem_rd_cmd_len),
+    .rd_cmd_done                    (mem_rd_cmd_done),
     .rd_cmd_err                     (),                     // 恒 0，不接
 
-    .rd_data                        (rd_data),
-    .rd_valid                       (rd_valid),
-    .rd_last                        (),                     // 单笔的最后一拍用不上：笔长由我们自己算
-    .rd_ready                       (rd_ready),
+    .rd_data                        (mem_rd_data),
+    .rd_valid                       (mem_rd_valid),
+    .rd_last                        (mem_rd_last),
+    .rd_ready                       (mem_rd_ready),
 
     .m_AXI_ARID                     (m_AXI_ARID),
     .m_AXI_ARADDR                   (m_AXI_ARADDR),
@@ -686,19 +773,21 @@ lineBuffer #(
     .AXI_ID                             (8'h00),
     .LINE_BYTES                         (DISPLAY_LINE_BYTES),
     .ROW_STRIDE_BYTES                   (DISPLAY_ROW_STRIDE),
-    .FRAME_LINES                        (FRAME_LINES)
+    .FRAME_LINES                        (FRAME_LINES),
+    .EXTERNAL_FRAME_COMMIT              (ASYNC_MEMORY)
 ) u_lineBuffer (
-    .clk                                (clk_acc),
+    .clk                                (memory_clk),
     .clk_HDMI_x1                        (clk_HDMI_x1),
-    .rst_n_wr                           (rst_hdmi_n),
+    .rst_n_wr                           (ASYNC_MEMORY ? mem_display_rst_n : rst_hdmi_n),
 
     // 来自 ⑤ Handler：只有"已经翻译好的"3 根有效信号
-    .lineBuffer_enable                  (lineBuffer_enable),
-    .lineBuffer_mode                    (lineBuffer_mode),
-    .lineBuffer_addr                    (lineBuffer_addr),
+    .lineBuffer_enable                  (mem_display_enable),
+    .lineBuffer_mode                    (mem_display_mode),
+    .lineBuffer_addr                    (mem_display_addr),
 
     // 回给 ⑤ Handler：帧边界(翻页 / 帧率统计的时机)
-    .lineBuffer_frame_start             (lineBuffer_frame_start),
+    .lineBuffer_frame_start             (mem_frame_start),
+    .lineBuffer_frame_commit            (mem_frame_commit),
 
     // HDMI 输出(硬核 LVDS TX)
     .tmds_blue_o                        (tmds_blue_o),

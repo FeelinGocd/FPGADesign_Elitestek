@@ -103,6 +103,9 @@ wire [PIXEL_WIDTH/8-1:0]            pixel_mask;      // 合成器出口这一拍
 wire                                pixel_valid;
 wire                                pixel_ready;
 wire                                line_buf_free;   // 合成器汇总的各源 free
+wire [PIXEL_WIDTH-1:0]              stage_data;
+wire [PIXEL_WIDTH/8-1:0]            stage_mask;
+wire                                stage_valid, stage_ready, stage_free;
 
 // ---- DDRPacker inst ----
 wire [DATA_WIDTH-1:0]               packer_data;
@@ -127,7 +130,7 @@ assign  packer_ready        = wr_valid & wr_ready;
 //     所以"源空"只说明"我有空块"，不说明"上一行的数据已经流完"。
 //     这时发下一行任务，DDRPacker 会在 line_start 清兜，
 //     把【本行还没吐出去的正经数据】当尾巴丢掉（实测：整段偏移 4 字节）。
-assign  line_buffer_free    = line_buf_free & line_wr_free;
+assign  line_buffer_free    = line_buf_free & line_wr_free & stage_free;
 
 //==============================================================================
 // 例化
@@ -176,6 +179,13 @@ Compositor #(
 // ② 打包器：像素流 96 位/拍 → AXI 写拍 128 位/拍
 //      ★ 行边界把"上一行多读回来的尾巴"丢掉，否则下一行的字节会拼错位
 //------------------------------------------------------------------------------
+PixelPipeline #(.WIDTH(PIXEL_WIDTH)) u_PixelPipeline (
+    .clk(clk), .rst_n(rst_n), .line_start(line_start), .line_done(line_done),
+    .pixel_data(pixel_data), .pixel_mask(pixel_mask),
+    .pixel_valid(pixel_valid), .pixel_ready(pixel_ready),
+    .stage_data(stage_data), .stage_mask(stage_mask),
+    .stage_valid(stage_valid), .stage_ready(stage_ready), .stage_free(stage_free)
+);
 DDRPacker #(
     .IN_WIDTH                   (PIXEL_WIDTH            ),
     .OUT_WIDTH                  (DATA_WIDTH             )
@@ -186,10 +196,10 @@ DDRPacker #(
     .line_start                 (line_start             ),
     .line_dst_off               (line_dst_addr[3:0]     ),   // ★ 拍对齐：行首预置 dst_off 个哑字节
 
-    .pixel_data                 (pixel_data             ),
-    .pixel_mask                 (pixel_mask             ),   // ★ 掩码和数据同进同出（同一个字节兜）
-    .pixel_valid                (pixel_valid            ),
-    .pixel_ready                (pixel_ready            ),
+    .pixel_data                 (stage_data             ),
+    .pixel_mask                 (stage_mask             ),
+    .pixel_valid                (stage_valid            ),
+    .pixel_ready                (stage_ready            ),
 
     .packer_data                (packer_data            ),
     .packer_mask                (packer_mask            ),

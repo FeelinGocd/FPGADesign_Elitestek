@@ -4,7 +4,7 @@
 #include "render_list.h"
 #include "user_gpu2d.h"
 
-#if GAME_BOSS_BULLET_SWEEP
+#if GAME_BOSS_BULLET_SWEEP && !GAME_CAPACITY_AUDIT
 #if !GAME_BOSS_DEBUG
 #error GAME_BOSS_BULLET_SWEEP requires GAME_BOSS_DEBUG=1
 #endif

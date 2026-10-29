@@ -65,7 +65,8 @@ static const pattern_t *cur_pattern(const shot_t *s)
 static int eff_gap(const shot_t *s, const pattern_t *p)
 {
     int v = (int)p->gap - (g.stage - 1) - s->frenzy;
-    return v < 2 ? 2 : v;
+    int minimum = s->set == g_boss_def.moves ? 1 : 2;
+    return v < minimum ? minimum : v;
 }
 
 static int eff_rest(const shot_t *s, const pattern_t *p)
@@ -84,7 +85,8 @@ static int inter_volley_gap(const shot_t *s, const pattern_t *p)
 #else
     (void)s;
 #endif
-    return p->motion == MOTION_PULSE ? (int)p->gap : INTER_VOLLEY_GAP;
+    if (p->motion == MOTION_PULSE) return (int)p->gap;
+    return s->set == g_boss_def.moves ? 3 : INTER_VOLLEY_GAP;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -133,34 +135,49 @@ static void burst_next(shot_t *s)
     const pattern_t *p = cur_pattern(s);
     int a = s->burst_base + s->burst_idx * p->step;
 
+    int budget = s->enemy ? ENEMY_CAP - game_enemy_bullets_alive()
+                          : N_BULLETS - game_bullets_alive();
+    if (s->enemy && s->set == g_boss_def.moves)
+        budget = game_boss_shot_limit() - game_enemy_bullets_alive();
+    int free_slots = N_BULLETS - game_bullets_alive();
+    if (budget > free_slots) budget = free_slots;
+    if (budget < 0) budget = 0;
+
     if (p->motion == MOTION_PULSE) {
         int i, emit = p->count, mx = s->mx, my = s->my;
         if (s->set == g_boss_def.moves) {
             mx = g.boss_x + BOSS_W / 2;
             my = g.boss_y + BOSS_H / 2;
-            if (s->move_idx == 0) {
-                int available = ENEMY_CAP - game_bullets_alive();
-                if (emit > available) emit = available;
-                if (emit < 0) emit = 0;
-            }
         }
+        if (emit > budget) emit = budget;
         for (i = 0; i < emit; ++i)
-            shot_angle(s, s->burst_base +
-                       (s->move_idx == 0 ? i * ANGLE_STEPS / emit : i * p->step), p->speed,
-                       MOTION_PULSE, mx, my);
-#if GAME_BOSS_SKILL_DIAG
-        if (s->set == g_boss_def.moves && s->move_idx == 0 && s->rep_left == 0) {
+            shot_angle(s, s->burst_base + i * ANGLE_STEPS / emit,
+                       p->speed, MOTION_PULSE, mx, my);
+#if GAME_BOSS_SKILL_DIAG == 1
+        if (s->set == g_boss_def.moves && s->move_idx == 0 && s->rep_left == 0)
             game_dense_diag_start();
-        }
 #endif
         s->burst_idx = p->count;
         s->burst_left = 0;
     } else {
-        shot_angle(s, a, p->speed, MOTION_LINE, s->mx, s->my);
-        if (p->twin)
-            shot_angle(s, a + ANGLE_STEPS / 2,
-                       p->speed2 ? p->speed2 : p->speed,
-                       MOTION_LINE, s->mx, s->my);
+        int layer, twin, layers = p->layers ? p->layers : 1;
+        for (layer = 0; layer < layers && budget > 0; ++layer) {
+            /* Parallel lanes and 1/4-pixel speed steps keep layers distinct,
+             * while retaining each pattern's aim, fan, spin and twin arms. */
+            int offset = layers > 1 ? (2 * layer - layers + 1) : 0;
+            for (twin = 0; twin <= (p->twin != 0) && budget > 0; ++twin) {
+                int angle = (a + twin * (ANGLE_STEPS / 2)) & 63;
+                int speed = twin && p->speed2 ? p->speed2 : p->speed;
+                int speed8 = speed * 8 + offset;
+                int dx = g_sin_tab[(angle + 16) & 63];
+                int dy = g_sin_tab[angle];
+                game_bullet_spawn8(s->mx - BW / 2 - dy * offset * 3 / 64,
+                                   s->my - BH / 2 + dx * offset * 3 / 64,
+                                   (dx * speed8) >> 6, (dy * speed8) >> 6,
+                                   MOTION_LINE, s->type, s->enemy);
+                --budget;
+            }
+        }
         ++s->burst_idx;
         --s->burst_left;
     }
@@ -244,7 +261,8 @@ void game_shot_step(shot_t *s)
 #if GAME_BOSS_PACING_TEST
     if (s->set != g_boss_def.moves && game_enemy_bullets_alive() > WAVE_CLEAR_MAX) return;
 #else
-    if (game_enemy_bullets_alive() > WAVE_CLEAR_MAX) return;
+    if (game_enemy_bullets_alive() > WAVE_CLEAR_MAX &&
+        !(s->set == g_boss_def.moves && g.boss_phase == BOSS_PHASE_COMBINED)) return;
 #endif
 
     start_move(s, (s->move_idx + 1) % s->set->n_moves);

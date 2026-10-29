@@ -34,7 +34,8 @@ module lineBuffer #(
     parameter LINE_BYTES        = 3840,
     parameter ROW_STRIDE_BYTES  = 5760,
     //   ★ 帧尾停手行数；顶层实际传 720
-    parameter FRAME_LINES       = 1080
+    parameter FRAME_LINES       = 1080,
+    parameter EXTERNAL_FRAME_COMMIT = 0
 )(
     input  wire                         clk,
     input  wire                         clk_HDMI_x1,
@@ -49,6 +50,7 @@ module lineBuffer #(
 
     // 给 Handler/加速器: 写域单拍, "新的一帧现在开始"
     output wire                         lineBuffer_frame_start,
+    input  wire                         lineBuffer_frame_commit,
 
     //------------------------------------------------------------
     // HDMI
@@ -259,7 +261,7 @@ bufferControler # (
     .lineBuffer_enable          (lineBuffer_enable),
     .lineBuffer_mode            (lineBuffer_mode),
     .lineBuffer_addr            (lineBuffer_addr),
-    .lineBuffer_frame_start     (lineBuffer_frame_start),
+    .lineBuffer_frame_start     (EXTERNAL_FRAME_COMMIT ? lineBuffer_frame_commit : lineBuffer_frame_start),
     .line_skip                  (ctrl_line_skip),
 
     .buffer_wr_en               (ctrl_wr_en),

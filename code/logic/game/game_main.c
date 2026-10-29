@@ -3,12 +3,12 @@
 //------------------------------------------------------------------------------
 //  干什么      :
 //      frame_begin(now)          清脏表、记命令数基线、算 FPS
-//      game_logic_run(keys, now)   每显示帧更新一次；真正掉帧时补逻辑步
+//      game_logic_run(keys, now)   按 CLINT 累积 60 Hz 逻辑步，保留不足一步的余数
 //      game_draw(now, buf)       元素各自 push 进渲染队列（带 z）→ 排序后下发
 //      frame_end(now, buf)       交帧 + 统计 + 每秒探针（+ 压测推进）
 //  上一级是谁  : src/main.c（DEMO_RUN_SEL == 2 时调 game_demo_run()）
 //  接口契约    :
-//    · 只画后台那块（front ^ 1），永远不碰正在显示的那块
+//    · 双缓冲画 front ^ 1；三缓冲只画既未显示、也未排队的空闲块
 //    · 双缓冲复用前必须 FENCE + 等真帧边界，否则会写到正在显示的缓冲
 //    · 绘制顺序 = z 序：场景(0) → 实体(1000+底边 y) → 护盾(3000) → HUD(5000+) → GAME OVER(6000)
 //  为什么这么做:
@@ -21,6 +21,7 @@
 //  参考        : docs/spec/软件_驱动与API.md §6.3
 //==============================================================================
 #include "game.h"
+#include "game_schedule.h"
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"
 #include "user_lineBuffer.h"
@@ -46,6 +47,10 @@ static u32 s_dense_diag_cmd_sum;
 static u32 s_dense_diag_draw_sum, s_dense_diag_fence_sum;
 static u32 s_dense_diag_draw_max, s_dense_diag_fence_max;
 static u32 s_dense_diag_draw_n, s_dense_diag_fence_n;
+static u32 s_dense_diag_update_sum, s_dense_diag_update_max;
+static u32 s_dense_diag_present_sum, s_dense_diag_present_max;
+static u32 s_dense_diag_sim_steps, s_dense_diag_sim_zero, s_dense_diag_sim_multi;
+static u32 s_dense_diag_discarded_ticks;
 static gpu2d_stats_t s_dense_diag_hw_start;
 
 void game_dense_diag_start(void)
@@ -81,6 +86,10 @@ static void game_dense_diag_frame(void)
         s_dense_diag_draw_sum = s_dense_diag_fence_sum = 0u;
         s_dense_diag_draw_max = s_dense_diag_fence_max = 0u;
         s_dense_diag_draw_n = s_dense_diag_fence_n = 0u;
+        s_dense_diag_update_sum = s_dense_diag_update_max = 0u;
+        s_dense_diag_present_sum = s_dense_diag_present_max = 0u;
+        s_dense_diag_sim_steps = s_dense_diag_sim_zero = s_dense_diag_sim_multi = 0u;
+        s_dense_diag_discarded_ticks = 0u;
         gpu2d_getStats(&s_dense_diag_hw_start);
         return;
     }
@@ -119,6 +128,15 @@ static void game_dense_diag_frame(void)
                    (int)((hw_end.rd_beats - s_dense_diag_hw_start.rd_beats) / 120u),
                    (int)((hw_end.wr_beats - s_dense_diag_hw_start.wr_beats) / 120u),
                    (int)((hw_end.busy_cyc - s_dense_diag_hw_start.busy_cyc) / 120u));
+        bsp_printf("DENSE SCHED: steps=%d hz_x100=%d zero/multi=%d/%d dropped_us=%d update_avg/max=%d/%d us present_avg/max=%d/%d us buffers=%d\r\n",
+                   (int)s_dense_diag_sim_steps,
+                   (int)(s_dense_diag_sim_steps * 100000u / (s_dense_diag_elapsed ? s_dense_diag_elapsed : 1u)),
+                   (int)s_dense_diag_sim_zero, (int)s_dense_diag_sim_multi,
+                   (int)(s_dense_diag_discarded_ticks / ticks_per_us),
+                   (int)(s_dense_diag_update_sum / 120u / ticks_per_us),
+                   (int)(s_dense_diag_update_max / ticks_per_us),
+                   (int)(s_dense_diag_present_sum / 120u / ticks_per_us),
+                   (int)(s_dense_diag_present_max / ticks_per_us), GAME_FB_COUNT);
     }
 }
 #endif
@@ -138,10 +156,21 @@ int game_static_draw_force(void) { return s_static_force; }
 static int s_pending_fb = -1;
 static u32 s_pending_irq;
 
+static void triple_poll_pending(void)
+{
+    if (s_pending_fb >= 0 && IRQ_frame_count() != s_pending_irq) {
+        g.front = s_pending_fb;
+        s_pending_fb = -1;
+    }
+}
+
 static int triple_retire_pending(void)
 {
+    triple_poll_pending();
     if (s_pending_fb < 0) return 1;
-    if (IRQ_frame_count() == s_pending_irq && !game_wait_display()) return 0;
+    /* Keep the submission's IRQ baseline. A new snapshot inside the wait
+     * would miss a boundary arriving immediately after the poll above. */
+    if (!game_wait_display_after(s_pending_irq)) return 0;
     g.front = s_pending_fb;
     s_pending_fb = -1;
     return 1;
@@ -150,13 +179,22 @@ static int triple_retire_pending(void)
 static int triple_free_buffer(void)
 {
     int n;
-    for (n = 1; n <= GAME_FB_COUNT; ++n) {
+    triple_poll_pending();
+    for (n = 1; n < GAME_FB_COUNT; ++n) {
         int b = (g.front + n) % GAME_FB_COUNT;
         if (b != s_pending_fb) return b;
     }
     return -1;
 }
 #endif
+
+static int prepare_room_transition(void)
+{
+#if GAME_TRIPLE_BUFFER
+    if(!game_room_can_overlap_transition()) return triple_retire_pending();
+#endif
+    return 1;
+}
 
 static dirty_map_t g_dirty;                     /* 一帧的脏区位图（格子坐标） */
 static int  g_alive;                            /* 本帧在场子弹数 */
@@ -169,13 +207,13 @@ static int  g_hud_full;                         /* 相机移动过：本帧整�
 /*  ★ HUD 数字快照（2026-10-23）
  *    双缓冲是【隔帧】画的：若每帧都取实时值，两块缓冲会显示两个不同的数，
  *    屏幕上看到的就是"数字来回跳 + 闪烁"（相机一动、HUD 每帧重画时最明显）。
- *    每两帧才更新一次快照 ⇒ 两块缓冲拿到的永远是同一份数。  */
+ *    每轮缓冲才更新一次快照，双/三缓冲都使用同一组快照。  */
 static int      s_hv_fps, s_hv_bullets, s_hv_cmd, s_hv_coins;
 static unsigned s_hv_tick;
 
 static void hud_vals_update(int fps, int bullets, int cmd, int coins)
 {
-    if ((s_hv_tick++ & 1u) != 0u) return;       /* 两块缓冲各画一次才换一次数 */
+    if ((s_hv_tick++ % GAME_FB_COUNT) != 0u) return;
     s_hv_fps     = fps;
     s_hv_bullets = bullets;
     s_hv_cmd     = cmd;
@@ -190,38 +228,114 @@ static void hud_vals_update(int fps, int bullets, int cmd, int coins)
 #define GAME_FIXED_UPDATE 1
 #endif
 #if GAME_FIXED_UPDATE
-static u32 s_sim_last_ms;
-static int game_logic_run(u32 keys, u32 now)
+static game_clock_t s_sim_clock;
+static void game_logic_reset(void)
 {
-    u32 elapsed = now - s_sim_last_ms;
-    int steps = (int)((elapsed + 8u) / 17u);
-    int i;
-
-    /* The display normally presents at 60 Hz. Always advance once for its
-     * next frame: integer-millisecond phase drift must not make a 0-step
-     * frame followed by a 2-step frame. Catch up only after a real long gap. */
-    if (steps < 1) steps = 1;
-    if (steps > 4) steps = 4;
-    for (i = 0; i < steps; ++i) {
-        u32 step_now = s_sim_last_ms + (elapsed * (u32)(i + 1)) / (u32)steps;
-        game_update_step(keys, step_now);
-        game_room_step();
-        if (game_room_pending() || game_room_rebuild_pending()) break;
-    }
-    s_sim_last_ms = now;
-    return i + (i < steps ? 1 : 0);
-}
-#else
-static int game_logic_run(u32 keys, u32 now)
-{
-    game_update_step(keys, now);
-    game_room_step();
-    return 1;
+    game_clock_reset(&s_sim_clock, clint_getTimeLow(BSP_CLINT));
 }
 #endif
+
+static int game_logic_run(u32 keys, u32 now)
+{
+    int steps = 0;
+#if GAME_BOSS_SKILL_DIAG
+    u32 update_t0 = clint_getTimeLow(BSP_CLINT);
+#endif
+#if GAME_FIXED_UPDATE
+    u32 discarded = game_clock_feed(&s_sim_clock, clint_getTimeLow(BSP_CLINT), BSP_CLINT_HZ);
+#if GAME_BOSS_SKILL_DIAG
+    if (s_dense_diag_active) s_dense_diag_discarded_ticks += discarded;
+#else
+    (void)discarded;
+#endif
+    while (steps < (int)GAME_LOGIC_MAX_STEPS && game_clock_take(&s_sim_clock, BSP_CLINT_HZ)) {
+        u32 step_now = now - s_sim_clock.pending_ticks / (BSP_CLINT_HZ / 1000u);
+        game_update_step(keys, step_now);
+        game_room_step();
+        ++steps;
+        if (game_room_pending() || game_room_rebuild_pending()) break;
+    }
+#else
+    game_update_step(keys, now);
+    game_room_step();
+    steps = 1;
+#endif
+#if GAME_BOSS_SKILL_DIAG
+    if (s_dense_diag_active) {
+        u32 dt = clint_getTimeLow(BSP_CLINT) - update_t0;
+        s_dense_diag_update_sum += dt;
+        if (dt > s_dense_diag_update_max) s_dense_diag_update_max = dt;
+        s_dense_diag_sim_steps += (u32)steps;
+        if (steps == 0) ++s_dense_diag_sim_zero;
+        if (steps > 1) ++s_dense_diag_sim_multi;
+    }
+#endif
+    return steps;
+}
 #if GAME_PROFILE
+#if GAME_BOSS_STAGE_TEST
+typedef struct {
+    u32 frames, elapsed, enemy_peak, core_peak, rain_peak, mobs_peak;
+    u32 cmd_peak, gap_max, slow25, draw_max, fence_max;
+} stage_profile_t;
+static stage_profile_t s_stage_profile[BOSS_PHASE_COUNT+2];
+static u32 s_stage_last, s_stage_draw, s_stage_fence;
+static int s_stage_id = -1, s_stage_skip, s_stage_done;
+
+static void boss_stage_profile_frame(void)
+{
+    u32 now = game_ms(), gap;
+    int i, enemy, rain = 0, core = 0, mobs;
+    int id=g.boss_locked ? BOSS_PHASE_COUNT+g.boss_phase-1 : g.boss_phase;
+    stage_profile_t *v;
+    if (g.phase == PHASE_FIGHT && g.boss_phase == 0 && g.boss_tick == 0 && !g.boss_locked) {
+        for (i = 0; i < BOSS_PHASE_COUNT+2; ++i) s_stage_profile[i] = (stage_profile_t){0};
+        s_stage_done = 0; s_stage_last = 0; s_stage_id = -1;
+    }
+    if (g.phase != PHASE_FIGHT || (!g.boss_locked && !g.boss_tick)) {
+        s_stage_last = 0;
+        if (!s_stage_done && g.boss_hp == 0 && s_stage_profile[2].frames) {
+            u32 div = BSP_CLINT_HZ / 1000000u;
+            for (i = 0; i < BOSS_PHASE_COUNT+2; ++i) {
+                v = &s_stage_profile[i];
+                bsp_printf("%s LOAD: phase=%d frames=%d elapsed_ms=%d enemy_peak=%d core_peak=%d rain_peak=%d mobs_peak=%d cmd_max=%d gap_max_ms=%d slow25=%d draw_max_us=%d fence_max_us=%d\r\n",
+                           i<BOSS_PHASE_COUNT ? "PHASE" : "INTERMISSION",
+                           i<BOSS_PHASE_COUNT ? i+1 : i-BOSS_PHASE_COUNT+1,(int)v->frames,(int)v->elapsed,(int)v->enemy_peak,
+                           (int)v->core_peak,(int)v->rain_peak,(int)v->mobs_peak,
+                           (int)v->cmd_peak,(int)v->gap_max,(int)v->slow25,
+                           (int)(v->draw_max/div),(int)(v->fence_max/div));
+            }
+            bsp_printf("NAV LOAD: build_max_us=%d\r\n",(int)game_mobs_nav_max_us());
+            s_stage_done = 1;
+        }
+        return;
+    }
+    if (s_stage_done) return;
+    if (s_stage_id != id) { s_stage_id = id; s_stage_skip = 3; }
+    if (s_stage_skip > 0 || !s_stage_last) {
+        if (s_stage_skip > 0) --s_stage_skip;
+        s_stage_last = now; return;
+    }
+    gap = now - s_stage_last; s_stage_last = now;
+    v = &s_stage_profile[id]; ++v->frames; v->elapsed += gap;
+    for (i = 0; i < N_BULLETS; ++i) if (g.bullets[i].active && g.bullets[i].enemy) {
+        if (g.bullets[i].mode == MOTION_ACCEL) ++rain; else ++core;
+    }
+    enemy = rain + core; mobs = game_mobs_alive();
+    if ((u32)enemy > v->enemy_peak) v->enemy_peak = (u32)enemy;
+    if ((u32)rain > v->rain_peak) v->rain_peak = (u32)rain;
+    if ((u32)core > v->core_peak) v->core_peak = (u32)core;
+    if ((u32)mobs > v->mobs_peak) v->mobs_peak = (u32)mobs;
+    if ((u32)g.cmd_frame > v->cmd_peak) v->cmd_peak = (u32)g.cmd_frame;
+    if (gap > v->gap_max) v->gap_max = gap;
+    if (gap >= 25u) ++v->slow25;
+    if (s_stage_draw > v->draw_max) v->draw_max = s_stage_draw;
+    if (s_stage_fence > v->fence_max) v->fence_max = s_stage_fence;
+}
+#endif
 static u32 s_pf_begin, s_pf_update, s_pf_draw, s_pf_fence, s_pf_present;
 static u32 s_pf_draw_prepare, s_pf_draw_submit, s_pf_draw_execute;
+static u32 s_pf_history_merge, s_pf_history_build;
 static u32 s_pf_begin_max, s_pf_update_max, s_pf_draw_max;
 static u32 s_pf_fence_max, s_pf_present_max;
 static u32 s_pf_frames;
@@ -237,13 +351,17 @@ typedef struct {
     u32 frames, cmd_sum, cmd_max, bullet_max, dirty_max;
     u32 draw_max, fence_max, gap_max, slow25, cam_frames, pause_frames;
     u32 irq_repeats, irq_delta_max, sim0, sim2;
-    u32 spawn_rejects;
+    u32 spawn_rejects, elapsed_ms, enemy_max, visible_max, dense_frames;
+    u32 dense_ms, dense_gap_max;
+    u32 work_sum, work_max, dense_work_max, dense_visible_max;
 } boss_skill_diag_t;
 static boss_skill_diag_t s_skill_diag[BOSS_SKILL_DIAG_MAX];
 static u32 s_skill_gap, s_skill_draw, s_skill_fence, s_skill_reject_prev;
 static u32 s_skill_irq_last;
+static u32 s_skill_work_start, s_skill_work;
 static int s_skill_steps;
 static int s_skill_cam, s_skill_last = -1, s_skill_warmup = 3, s_skill_done;
+static int s_skill_cycle;
 
 static u32 boss_skill_irq_mark(void)
 {
@@ -267,6 +385,7 @@ static void boss_skill_diag_frame(void)
             s_skill_last = -1;
             s_skill_warmup = 3;
             s_skill_done = 0;
+            s_skill_cycle = 0;
             s_skill_irq_last = 0u;
         }
         s_skill_reject_prev = game_enemy_spawn_rejects();
@@ -281,19 +400,26 @@ static void boss_skill_diag_frame(void)
         s_skill_irq_last = boss_skill_irq_mark();
         return;
     }
-    if (idx == 0 && s_skill_last == g_boss_move_n - 1) {
+    if (idx == 0 && s_skill_last == g_boss_move_n - 1 &&
+        ++s_skill_cycle >= GAME_BOSS_SKILL_CYCLES) {
         if (div == 0u) div = 1u;
         for (i = 0; i < g_boss_move_n; ++i) {
             v = &s_skill_diag[i];
-            bsp_printf("SKILL LOAD: id=%d frames=%d cmd_avg/max=%d/%d bullets_max=%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d cam=%d pause=%d rejects=%d irq_repeat=%d irq_delta_max=%d sim0/2=%d/%d\r\n",
+            bsp_printf("SKILL LOAD: id=%d frames=%d cmd_avg/max=%d/%d bullets_max=%d enemy_max=%d visible_max=%d dense_frames=%d dense_ms=%d dense_gap_max_ms=%d elapsed_ms=%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d cam=%d pause=%d rejects=%d irq_repeat=%d irq_delta_max=%d sim0/2=%d/%d work_avg/max_us=%d/%d dense_work_max_us=%d dense_visible_max=%d\r\n",
                        i, (int)v->frames,
                        (int)(v->frames ? v->cmd_sum / v->frames : 0u),
-                       (int)v->cmd_max, (int)v->bullet_max, (int)v->dirty_max,
+                       (int)v->cmd_max, (int)v->bullet_max, (int)v->enemy_max,
+                       (int)v->visible_max, (int)v->dense_frames, (int)v->dense_ms,
+                       (int)v->dense_gap_max, (int)v->elapsed_ms,
+                       (int)v->dirty_max,
                        (int)(v->draw_max / div), (int)(v->fence_max / div),
                        (int)v->gap_max, (int)v->slow25,
                        (int)v->cam_frames, (int)v->pause_frames,
                        (int)v->spawn_rejects, (int)v->irq_repeats,
-                       (int)v->irq_delta_max, (int)v->sim0, (int)v->sim2);
+                       (int)v->irq_delta_max, (int)v->sim0, (int)v->sim2,
+                       (int)(v->frames ? v->work_sum / v->frames : 0u),
+                       (int)(v->work_max / div), (int)(v->dense_work_max / div),
+                       (int)v->dense_visible_max);
         }
         s_skill_done = 1;
         return;
@@ -303,6 +429,22 @@ static void boss_skill_diag_frame(void)
     v->spawn_rejects += game_enemy_spawn_rejects() - s_skill_reject_prev;
     s_skill_reject_prev = game_enemy_spawn_rejects();
     ++v->frames;
+    v->work_sum += s_skill_work / (div ? div : 1u);
+    if (s_skill_work > v->work_max) v->work_max = s_skill_work;
+    v->elapsed_ms += s_skill_gap;
+    {
+        u32 enemy = (u32)game_enemy_bullets_alive();
+        u32 visible = (u32)game_enemy_bullets_visible();
+        if (enemy > v->enemy_max) v->enemy_max = enemy;
+        if (visible > v->visible_max) v->visible_max = visible;
+        if (enemy >= (u32)(ENEMY_CAP - 8)) {
+            ++v->dense_frames;
+            v->dense_ms += s_skill_gap;
+            if (s_skill_gap > v->dense_gap_max) v->dense_gap_max = s_skill_gap;
+            if (s_skill_work > v->dense_work_max) v->dense_work_max = s_skill_work;
+            if (visible > v->dense_visible_max) v->dense_visible_max = visible;
+        }
+    }
     v->cmd_sum += (u32)g.cmd_frame;
     if ((u32)g.cmd_frame > v->cmd_max) v->cmd_max = (u32)g.cmd_frame;
     if ((u32)g_alive > v->bullet_max) v->bullet_max = (u32)g_alive;
@@ -329,11 +471,14 @@ typedef struct {
     u32 frames, cmd_sum, cmd_max, dirty_max;
     u32 draw_max, fence_max, gap_max, slow25;
     u32 step0, step2, irq_repeats, irq_delta_max, irq_late;
+    u32 elapsed, draw_sum, fence_sum, restore_sum, restore_max;
+    u32 bullets_min, bullets_max;
 } boss_cam_diag_t;
 static boss_cam_diag_t s_camdiag[2][2]; /* [camera moved][at least 32 bullets] */
 static u32 s_camdiag_start, s_camdiag_gap, s_camdiag_draw, s_camdiag_fence;
 static u32 s_camdiag_irq_last;
 static int s_camdiag_moved, s_camdiag_skip, s_camdiag_steps, s_camdiag_late;
+static int s_camdiag_room = -1;
 
 static void boss_cam_diag_frame(u32 now)
 {
@@ -341,10 +486,18 @@ static void boss_cam_diag_frame(u32 now)
     int moving, heavy, m, h;
     u32 div = (u32)(BSP_CLINT_HZ / 1000000u);
 
-    if (g.phase != PHASE_FIGHT) {
+    if (GAME_BOSS_AUTO_DIAG == 1 && g.phase != PHASE_FIGHT) {
         s_camdiag_start = 0u;
         s_camdiag_irq_last = 0u;
         return;
+    }
+    if (s_camdiag_room != game_room_id()) {
+        s_camdiag_room = game_room_id();
+        for (m = 0; m < 2; ++m) for (h = 0; h < 2; ++h)
+            s_camdiag[m][h] = (boss_cam_diag_t){0};
+        s_camdiag_start = 0u;
+        s_camdiag_irq_last = 0u;
+        s_camdiag_skip = 3;
     }
     if (s_camdiag_skip > 0) {
         --s_camdiag_skip;
@@ -359,7 +512,15 @@ static void boss_cam_diag_frame(u32 now)
     moving = s_camdiag_moved != 0;
     heavy = g_alive >= 32;
     v = &s_camdiag[moving][heavy];
+    if (v->frames == 0u || (u32)g_alive < v->bullets_min) v->bullets_min = (u32)g_alive;
+    if ((u32)g_alive > v->bullets_max) v->bullets_max = (u32)g_alive;
     ++v->frames;
+    v->elapsed += s_camdiag_gap;
+    v->draw_sum += s_camdiag_draw;
+    v->fence_sum += s_camdiag_fence;
+    v->restore_sum += game_restore_dirty_cmds();
+    if (game_restore_dirty_cmds() > v->restore_max)
+        v->restore_max = game_restore_dirty_cmds();
     v->cmd_sum += (u32)g.cmd_frame;
     if ((u32)g.cmd_frame > v->cmd_max) v->cmd_max = (u32)g.cmd_frame;
     if (game_restore_dirty_cells() > v->dirty_max)
@@ -389,14 +550,20 @@ static void boss_cam_diag_frame(u32 now)
     if (div == 0u) div = 1u;
     for (m = 0; m < 2; ++m) for (h = 0; h < 2; ++h) {
         v = &s_camdiag[m][h];
-        bsp_printf("CAMLOAD move=%d heavy=%d n=%d cmd_avg/max=%d/%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d sim0/2=%d/%d irq_repeat=%d irq_delta_max=%d irq_late=%d\r\n",
+        if (v->frames == 0u) continue;
+        bsp_printf("CAMLOAD move=%d heavy=%d n=%d cmd_avg/max=%d/%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d sim0/2=%d/%d irq_repeat=%d irq_delta_max=%d irq_late=%d elapsed_ms=%d draw_avg_us=%d fence_avg_us=%d restore_avg/max=%d/%d layout=%d flip=%d x/y=%d/%d cam_x/y=%d/%d bullets_min/max=%d/%d\r\n",
                    m, h, (int)v->frames,
                    (int)(v->frames ? v->cmd_sum / v->frames : 0u),
                    (int)v->cmd_max, (int)v->dirty_max,
                    (int)(v->draw_max / div), (int)(v->fence_max / div),
                    (int)v->gap_max, (int)v->slow25,
                    (int)v->step0, (int)v->step2, (int)v->irq_repeats,
-                   (int)v->irq_delta_max, (int)v->irq_late);
+                   (int)v->irq_delta_max, (int)v->irq_late,
+                   (int)v->elapsed, (int)(v->draw_sum / v->frames / div),
+                   (int)(v->fence_sum / v->frames / div),
+                   (int)(v->restore_sum / v->frames), (int)v->restore_max,
+                   game_room_layout(), game_room_flip(), g.x, g.y, g.cam_x, g.cam_y,
+                   (int)v->bullets_min, (int)v->bullets_max);
     }
     for (m = 0; m < 2; ++m)
         for (h = 0; h < 2; ++h) s_camdiag[m][h] = (boss_cam_diag_t){0};
@@ -433,6 +600,62 @@ static void prof_add(u32 *sum, u32 *max, u32 dt)
     if (dt > *max) *max = dt;
 }
 
+#if GAME_BOSS_STAGE_TEST == 2
+/* Manual profiling must not wait for UART transmission in the game loop. */
+static char s_trace_tx[512];
+static unsigned s_trace_len,s_trace_pos,s_trace_drop,s_trace_cam;
+static void trace_text(const char *s)
+{
+    while(*s && s_trace_len<sizeof(s_trace_tx)-2) s_trace_tx[s_trace_len++]=*s++;
+}
+static void trace_field(const char *key,u32 value)
+{
+    char digits[10];int n=0;
+    trace_text(" ");trace_text(key);trace_text("=");
+    do { digits[n++]=(char)('0'+value%10u);value/=10u; } while(value);
+    while(n && s_trace_len<sizeof(s_trace_tx)-2) s_trace_tx[s_trace_len++]=digits[--n];
+}
+static void trace_flush(void)
+{
+    u32 free=uart_writeAvailability(BSP_UART_TERMINAL),n=0;
+    while(s_trace_pos<s_trace_len && n<free && n<32u) {
+        uart_write(BSP_UART_TERMINAL,(u32)(unsigned char)s_trace_tx[s_trace_pos++]);++n;
+    }
+}
+static void trace_report(void)
+{
+    u32 n=s_pf_frames,div=BSP_CLINT_HZ/1000000u;
+    gpu2d_stats_t hw;
+    if(g.phase!=PHASE_FIGHT || !n) { s_trace_cam=0;return; }
+    if(s_trace_pos!=s_trace_len) { ++s_trace_drop;return; }
+    s_trace_len=s_trace_pos=0;trace_text("FRAME1S");
+    trace_field("n",n);trace_field("irq",s_pf_irq_ticks);
+    trace_field("irqmax",s_pf_irq_max);trace_field("late",s_pf_irq_late);
+    trace_field("gap",s_pf_gap_max);trace_field("slow25",s_pf_gap_25);
+    trace_field("sim",s_pf_sim_steps);trace_field("cam",s_trace_cam);
+    trace_field("upd",s_pf_update/n/div);trace_field("umax",s_pf_update_max/div);
+    trace_field("draw",s_pf_draw/n/div);trace_field("dmax",s_pf_draw_max/div);
+    trace_field("fence",s_pf_fence/n/div);trace_field("fmax",s_pf_fence_max/div);
+    trace_field("present",s_pf_present/n/div);trace_field("pmax",s_pf_present_max/div);
+    trace_field("prep",s_pf_draw_prepare/n/div);
+    trace_field("submit",s_pf_draw_submit/n/div);trace_field("exec",s_pf_draw_execute/n/div);
+    trace_field("enemy",(u32)game_enemy_bullets_alive());
+    trace_field("mobs",(u32)game_mobs_alive());trace_field("cmd",(u32)g.cmd_frame);
+    trace_field("dirty",game_restore_dirty_cells());trace_field("restore",game_restore_dirty_cmds());
+    trace_field("phase",(u32)g.boss_phase+1u);trace_field("lock",(u32)g.boss_locked);
+    trace_field("drop",s_trace_drop);
+    gpu2d_getStats(&hw);
+    if(s_gpu_prev_valid) {
+        trace_field("rd",(hw.rd_beats-s_gpu_prev.rd_beats)/n);
+        trace_field("wr",(hw.wr_beats-s_gpu_prev.wr_beats)/n);
+        trace_field("busy",(hw.busy_cyc-s_gpu_prev.busy_cyc)/n);
+    }
+    s_gpu_prev=hw;s_gpu_prev_valid=1;
+    s_trace_tx[s_trace_len++]='\r';s_trace_tx[s_trace_len++]='\n';
+    s_trace_cam=0;
+}
+#endif
+
 static void prof_report(void)
 {
 #if GAME_UART_TELEMETRY
@@ -442,6 +665,9 @@ static void prof_report(void)
     if (div == 0u) div = 1u;
 #endif
     if (s_pf_frames == 0u) return;
+#if GAME_BOSS_STAGE_TEST == 2
+    trace_report();
+#endif
 
 #if GAME_BOSS_DEBUG
     s_diag_frames += s_pf_frames;
@@ -462,10 +688,12 @@ static void prof_report(void)
                (int)(s_pf_fence / s_pf_frames / div),   (int)(s_pf_fence_max / div),
                (int)(s_pf_present / s_pf_frames / div), (int)(s_pf_present_max / div),
                (int)(s_pf_gap_sum / s_pf_frames), (int)s_pf_gap_max);
-    bsp_printf("DRAW detail us avg: prepare=%d submit=%d execute=%d\r\n",
+    bsp_printf("DRAW detail us avg: prepare=%d submit=%d execute=%d history_merge=%d history_build=%d\r\n",
                (int)(s_pf_draw_prepare / s_pf_frames / div),
                (int)(s_pf_draw_submit / s_pf_frames / div),
-               (int)(s_pf_draw_execute / s_pf_frames / div));
+               (int)(s_pf_draw_execute / s_pf_frames / div),
+               (int)(s_pf_history_merge / s_pf_frames / div),
+               (int)(s_pf_history_build / s_pf_frames / div));
     bsp_printf("IRQ timing: ticks/frame=%d max=%d late_before_present=%d/%d\r\n",
                (int)(s_pf_irq_ticks / s_pf_frames), (int)s_pf_irq_max,
                (int)s_pf_irq_late, (int)s_pf_frames);
@@ -485,6 +713,7 @@ static void prof_report(void)
 
     s_pf_begin = s_pf_update = s_pf_draw = s_pf_fence = s_pf_present = 0u;
     s_pf_draw_prepare = s_pf_draw_submit = s_pf_draw_execute = 0u;
+    s_pf_history_merge = s_pf_history_build = 0u;
     s_pf_begin_max = s_pf_update_max = s_pf_draw_max = 0u;
     s_pf_fence_max = s_pf_present_max = 0u;
     s_pf_gap_sum = s_pf_gap_max = 0u;
@@ -498,8 +727,17 @@ static void prof_report(void)
 
 /*----------------------------------------------------------------------------*/
 /*  ① 帧首  */
+static int fps_from_counts(u32 frames, u32 elapsed_ms)
+{
+    if (elapsed_ms == 0u) return 0;
+    return (int)((frames * 1000u + elapsed_ms / 2u) / elapsed_ms);
+}
+
 static void frame_begin(u32 now)
 {
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST == 2
+    trace_flush();
+#endif
     dirty_clear(g_dirty);
     game_dirty_begin();                 /* 同时清空脏格队列（mark 时只登记 0→1） */
 
@@ -525,7 +763,7 @@ static void frame_begin(u32 now)
 #endif
     ++g.fps_frames;
     if ((u32)(now - g.fps_epoch) >= 1000u) {
-        g.fps = (int)((g.fps_frames * 1000u) / (now - g.fps_epoch));
+        g.fps = fps_from_counts(g.fps_frames, now - g.fps_epoch);
         g.fps_frames = 0u;
         g.fps_epoch = now;
     }
@@ -560,7 +798,7 @@ static void scene_restore(u32 fb, u32 now, int buf, int arg)
              * Offscreen old pixels remain invalid until exposed. */
             game_floor_prepare_frame(fb);
         } else {
-            game_restore_dirty(fb, g_dirty);
+            game_restore_dirty_view(fb, g_dirty);
         }
     }
 }
@@ -683,10 +921,10 @@ static void mark_hud_rects_at(int camx, int camy)
     /* 左侧面板（标签 + 数值 + 心/命数） */
     game_hud_mark_at(g_dirty, camx, camy);
 
-    /* 顶部 Boss 血条 */
+    /* 顶部 BOSS 名称与血条 */
     if (g.phase == PHASE_FIGHT || g_bossbar_fade > 0)
-        game_mark_dirty(g_dirty, camx + HUD_HP_X, camy + 0,
-                        HUD_HP_W, HUD_HP_Y + HUD_HP_H);
+        game_mark_dirty(g_dirty, camx + HUD_BOSS_X, camy + 0,
+                        HUD_BOSS_W, HUD_BOSS_H);
 
     /* 右上角小地图 */
     game_minimap_rect(&x, &y, &w, &h);
@@ -699,8 +937,8 @@ static void mark_hud_rects_at(int camx, int camy)
 
     /* 拾取字幕（显示期间 + 消失后的 3 帧擦除期） */
     if (g.toast_until != 0u || g_toast_fade > 0)
-        game_mark_dirty(g_dirty, camx + SCR_W / 2 - 200, camy + HUD_TOAST_Y - 8,
-                        400, 32);
+        game_mark_dirty(g_dirty, camx + HUD_TOAST_X, camy + HUD_TOAST_Y,
+                        HUD_TOAST_W, HUD_TOAST_H);
 
     /* GAME OVER 窗口：它每帧都画，但相机一动旧窗口也得擦掉 */
     if (g.phase == PHASE_GAMEOVER)
@@ -722,13 +960,47 @@ static void mark_old_actors(dirty_map_t dirty, int buf)
         game_mark_dirty(dirty, g.old_item[buf].x,
                         g.old_item[buf].y + ITEM_ICON_DY - ITEM_FLOAT_AMP - 2,
                         ITEM_W, ITEM_H - ITEM_ICON_DY + ITEM_FLOAT_AMP + 2);
+    for (i = 0; i < GAME_TRIPRISM_MAX; ++i)
+        if (g.old_triprism[buf][i].active)
+            game_mark_dirty(dirty, g.old_triprism[buf][i].x,
+                            g.old_triprism[buf][i].y,
+                            GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE);
+#if GAME_PROFILE
+    {
+        u32 history_t0 = prof_now();
+        game_bullets_mark_old(dirty, buf);
+        s_pf_history_merge += prof_now() - history_t0;
+    }
+#else
     game_bullets_mark_old(dirty, buf);
+#endif
     for (i = 0; i < N_MOBS; ++i)
         if (g.old_mob[buf][i].active)
             game_mark_dirty(dirty, g.old_mob[buf][i].x, g.old_mob[buf][i].y - 8, 32, 40);
     for (i = 0; i < N_COINS; ++i)
         if (g.old_coin[buf][i].active)
             game_mark_dirty(dirty, g.old_coin[buf][i].x, g.old_coin[buf][i].y, 24, 24);
+}
+
+/* Start independent terrain work only after the loop has selected a buffer
+ * owned by neither the display nor the queued display request. */
+static void game_preupdate_restore(int buf)
+{
+#if GAME_BG_PREUPDATE_RESTORE && GAME_BG_COPY && !GAME_BG_EXACT_RECT
+    if ((unsigned)buf >= GAME_FB_COUNT || game_perf_frozen() ||
+        !game_perf_keep_bg() || game_floor_needs_prepare(g_fb[buf])) return;
+#if GAME_TRIPLE_BUFFER
+    triple_poll_pending();
+    if (buf == g.front || buf == s_pending_fb) return;
+#else
+    if (buf == g.front) return;
+#endif
+    mark_old_actors(g_dirty, buf);
+    game_shop_mark_old(g_dirty, buf);
+    game_restore_preupdate(g_fb[buf], g_dirty);
+#else
+    (void)buf;
+#endif
 }
 
 static void mark_layout_props(dirty_map_t dirty, int layout, int flip)
@@ -760,8 +1032,9 @@ void game_capture_floor_damage(void)
         game_mark_doors_dirty(g_dirty);
         x = g.hud_cam_x[buf]; y = g.hud_cam_y[buf];
         game_hud_mark_at(g_dirty, x, y);
-        game_mark_dirty(g_dirty, x + HUD_HP_X, y, HUD_HP_W, HUD_HP_Y + HUD_HP_H);
-        game_mark_dirty(g_dirty, x + SCR_W / 2 - 200, y + HUD_TOAST_Y - 8, 400, 32);
+        game_mark_dirty(g_dirty, x + HUD_BOSS_X, y, HUD_BOSS_W, HUD_BOSS_H);
+        game_mark_dirty(g_dirty, x + HUD_TOAST_X, y + HUD_TOAST_Y,
+                        HUD_TOAST_W, HUD_TOAST_H);
         if (g.phase == PHASE_GAMEOVER)
             game_mark_dirty(g_dirty, x + GAMEOVER_X, y + GAMEOVER_Y, GAMEOVER_W, GAMEOVER_H);
         game_minimap_rect(&tx, &ty, &w, &h);
@@ -775,16 +1048,62 @@ void game_capture_floor_damage(void)
 
 /*----------------------------------------------------------------------------*/
 /*  ③ 绘制  */
+#if (GAME_PROFILE && GAME_BOSS_DEBUG && GAME_BOSS_AUTO_DIAG == 2) || GAME_BOSS_CAMERA_PAN
+/* Rendering-only sweep: exercise every viewport even when a test spawn is
+ * blocked by an L-shaped wall or a prop. Never enabled in release builds. */
+static void room_render_pan(u32 now)
+{
+    static int room = -1;
+    static u32 epoch;
+    u32 t, progress;
+    int mx = game_world_w() - SCR_W, my = game_world_h() - SCR_H;
+    if (mx < 0) mx = 0;
+    if (my < 0) my = 0;
+    if (room != game_room_id()) { room = game_room_id(); epoch = now; }
+#if GAME_BOSS_CAMERA_PAN
+    t = (now - epoch) % 6000u;
+    progress = t < 500u ? 0u : t < 3000u ? t - 500u :
+               t < 3500u ? 2500u : 6000u - t;
+    g.cam_x = (int)(progress * (u32)mx / 2500u);
+    g.cam_y = (int)(progress * (u32)my / 2500u);
+#else
+    t = (now - epoch) % 24000u;
+    if (t < 2000u || t >= 22000u) progress = 0u;
+    else if (t < 10000u) progress = t - 2000u;
+    else if (t < 14000u) progress = 8000u;
+    else progress = 22000u - t;
+    g.cam_x = (int)(progress * (u32)mx / 8000u);
+    g.cam_y = (int)(progress * (u32)my / 8000u);
+#endif
+}
+#endif
+
 static void game_draw(u32 now, int buf)
 {
+#if GAME_CAPACITY_AUDIT
+    game_capacity_mark(0);
+#endif
     u32 fb = g_fb[buf];
-    int cam_moved;
+    int cam_moved, prop_dirty;
+#if (GAME_PROFILE && GAME_BOSS_DEBUG && GAME_BOSS_AUTO_DIAG == 2) || GAME_BOSS_CAMERA_PAN
+    room_render_pan(now);
+#endif
+#if GAME_BOSS_SKILL_DIAG
+    u32 dense_draw_t0 = clint_getTimeLow(BSP_CLINT);
+#endif
 #if GAME_PROFILE
     u32 draw_t0 = prof_now(), draw_t1;
 #endif
 
+    /* This consumes one buffered transition count; share it with both uses. */
+    prop_dirty = game_room_prop_dirty();
     {
         unsigned char key = (unsigned char)(game_room_id() + 1);
+#if GAME_BG_PREUPDATE_RESTORE
+        if (s_static_room_key[buf] != key || game_floor_needs_prepare(fb) ||
+            g.door_dirty > 0 || prop_dirty)
+            game_restore_preupdate_cancel();
+#endif
         s_static_force = s_static_room_key[buf] != key || game_floor_needs_prepare(fb);
         s_static_room_key[buf] = key;
     }
@@ -804,6 +1123,9 @@ static void game_draw(u32 now, int buf)
      *    HUD 是"屏幕固定"的，但画进 framebuffer 时必须跟着相机走。
      *    ★ 必须按 buf 各记一份：双缓冲下这块缓冲上次画可能是两帧前、相机更旧。  */
     cam_moved = (g.cam_x != g.hud_cam_x[buf]) || (g.cam_y != g.hud_cam_y[buf]);
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST == 2
+    if(cam_moved) ++s_trace_cam;
+#endif
 #if GAME_PROFILE && GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
     s_skill_cam = cam_moved;
 #endif
@@ -837,13 +1159,14 @@ static void game_draw(u32 now, int buf)
     }
 
     /*  商店：商品按 room 持久；先擦这块缓冲上次画的位置  */
-    game_shop_mark_old(g_dirty, buf);
-
-    /* 收集脏区：把"这块缓冲里上次画在哪"都并进格子 */
-    mark_old_actors(g_dirty, buf);
+    if (!GAME_BG_PREUPDATE_RESTORE || !game_restore_preupdate_active(fb)) {
+        game_shop_mark_old(g_dirty, buf);
+        /* Include old history again after a terrain/background invalidation. */
+        mark_old_actors(g_dirty, buf);
+    }
     /*  蜘蛛网已经没有实例（位置来自蓝图）：只在换房后的两帧里，
      *  把【旧房间】的网所在格补标脏，否则上一个房间的网会留在缓冲里。  */
-    if (game_room_prop_dirty())
+    if (prop_dirty)
         mark_layout_props(g_dirty, game_room_prev_layout(), game_room_prev_flip());
     {
         int ex, ey, k;
@@ -889,24 +1212,22 @@ static void game_draw(u32 now, int buf)
 
     /* 拾取字幕 */
     {
-        const char *t = game_item_desc(g.toast_type);
-        int len = 0, w, x0;
-
-        while (t[len]) ++len;
-        w  = len * 16 + 16;
-        x0 = (SCR_W - len * 16) / 2 - 8;
-
         g_toast_on = (g.toast_until != 0u && (int)(now - g.toast_until) < 0);
         if (g.toast_until != 0u && !g_toast_on) {
             g.toast_until = 0u;
             g_toast_fade = 3;                   /* 之后 3 帧继续擦 */
         }
         if (g_toast_on) {
-            game_mark_hud_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
+            /* Always restore the full fixed band. The next pickup may have a
+             * shorter description, so marking only its current glyphs would
+             * retain the previous description's tail. */
+            game_mark_hud_dirty(g_dirty, HUD_TOAST_X, HUD_TOAST_Y,
+                                HUD_TOAST_W, HUD_TOAST_H);
             /* 字幕的脏区会按【整瓦片】擦，连带血条所在那行 ⇒ 一起标脏，血条随后重画 */
             game_mark_hud_dirty(g_dirty, HUD_HP_X, HUD_HP_Y, HUD_HP_W, HUD_HP_H);
         } else if (g_toast_fade > 0) {
-            game_mark_hud_dirty(g_dirty, x0, HUD_TOAST_Y - 8, w, 32);
+            game_mark_hud_dirty(g_dirty, HUD_TOAST_X, HUD_TOAST_Y,
+                                HUD_TOAST_W, HUD_TOAST_H);
             --g_toast_fade;
         }
     }
@@ -920,17 +1241,36 @@ static void game_draw(u32 now, int buf)
         if (bar_on) {
             g_bossbar_fade = 3;
         } else if (g_bossbar_fade > 0) {
-            game_mark_hud_dirty(g_dirty, HUD_HP_X, 0, HUD_HP_W,
-                                HUD_HP_Y + HUD_HP_H);
+            game_mark_hud_dirty(g_dirty, HUD_BOSS_X, 0, HUD_BOSS_W, HUD_BOSS_H);
             --g_bossbar_fade;
         }
     }
+
+#if GAME_CAPACITY_AUDIT
+    game_capacity_mark(1);
+#endif
+#if GAME_BG_EARLY_RESTORE
+    /* The dirty grid is now complete. Issue terrain commands before the
+     * history copies, queue construction and sort so the GPU can overlap
+     * that CPU work. All entity/HUD commands still follow terrain in FIFO
+     * order; s_static_force retains the pre-restore invalidation decision. */
+    scene_restore(fb, now, buf, 0);
+#endif
 
     /*  ★ 帧首：把"这块缓冲里已经过期"的 HUD 行 / 血量行 / 道具池标脏，
      *    让下面的脏区恢复统一擦掉 —— 擦除只在帧首做，绘制层不再贴地砖，
      *    否则会把走到面板上的人物一起盖掉。
      *    （飘心的标脏已提前到上面的 HUD 重叠检查之前。）  */
+#if GAME_PROFILE
+    {
+        u32 history_t0 = prof_now();
+        game_bullets_sync(buf);
+        s_pf_history_build += prof_now() - history_t0;
+    }
+#else
     game_bullets_sync(buf);             /* 脏区用：记下这一帧每颗弹画在哪 */
+#endif
+    game_mobs_sync(buf);
     game_coins_sync(buf);               /* 金币同样：擦完旧位置再把 old_coin 对齐到这一帧 */
     game_shop_sync(buf);                /* 商店商品：房间 + 位置的 old 对齐 */
 
@@ -946,11 +1286,14 @@ static void game_draw(u32 now, int buf)
 #endif
     rl_begin();
     hud_submit();                         /* z 最大：先入队，永远不会被丢弃 */
+#if !GAME_BG_EARLY_RESTORE
     rl_push(Z_SCENE, scene_restore, 0);   /* 脏区恢复（擦旧精灵）必须最先 */
+#endif
     if (g.exit_active && game_room_id() == g.exit_room)
         rl_push(Z_SCENE + 5, exit_draw, 0);  /* exit 在地板上、人物下面 */
     game_shop_submit();                   /* 商店商品也在地板上、人物下面 */
     game_player_submit();                 /* 同深度时玩家在实体里最靠后 ⇒ 先提交 */
+    game_triprism_submit();
     game_bullets_submit();
     game_boss_submit();                   /* 本体 + 锁血护盾（Z_SHIELD） */
     game_mobs_submit();
@@ -975,6 +1318,14 @@ static void game_draw(u32 now, int buf)
     g_hud_full = 0;
     g.hud_cam_x[buf] = g.cam_x;
     g.hud_cam_y[buf] = g.cam_y;
+#if GAME_BOSS_SKILL_DIAG
+    if (s_dense_diag_active) {
+        u32 dt = clint_getTimeLow(BSP_CLINT) - dense_draw_t0;
+        s_dense_diag_draw_sum += dt;
+        if (dt > s_dense_diag_draw_max) s_dense_diag_draw_max = dt;
+        ++s_dense_diag_draw_n;
+    }
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
@@ -989,6 +1340,12 @@ static int frame_end(u32 now, int buf)
 #endif
 
     if (!game_finish_gpu()) return 0;
+#if GAME_RUN_AUDIT
+    game_run_audit_end();
+#endif
+#if GAME_CAPACITY_AUDIT
+    game_capacity_work_end();
+#endif
 #if GAME_BOSS_SKILL_DIAG
     if (s_dense_diag_active) {
         u32 dt = (u32)clint_getTime(BSP_CLINT) - dense_fence_t0;
@@ -996,10 +1353,17 @@ static int frame_end(u32 now, int buf)
         if (dt > s_dense_diag_fence_max) s_dense_diag_fence_max = dt;
         ++s_dense_diag_fence_n;
     }
+    dense_fence_t0 = clint_getTimeLow(BSP_CLINT);
 #endif
 #if GAME_PROFILE
     {
         u32 t1 = prof_now();
+#if GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
+        s_skill_work = t1 - s_skill_work_start;
+#endif
+#if GAME_BOSS_STAGE_TEST
+        s_stage_fence = t1 - t0;
+#endif
 #if GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
         s_skill_fence = t1 - t0;
 #endif
@@ -1026,6 +1390,13 @@ static int frame_end(u32 now, int buf)
 #else
     if (!game_present(g_fb[buf])) return 0;
 #endif
+#if GAME_BOSS_SKILL_DIAG
+    if (s_dense_diag_active) {
+        u32 dt = clint_getTimeLow(BSP_CLINT) - dense_fence_t0;
+        s_dense_diag_present_sum += dt;
+        if (dt > s_dense_diag_present_max) s_dense_diag_present_max = dt;
+    }
+#endif
 #if GAME_PROFILE
     {
         u32 t1 = prof_now();
@@ -1042,8 +1413,14 @@ static int frame_end(u32 now, int buf)
 #endif
 
     g.cmd_frame = (int)(gpu2d_getCmdDone() - g.cmd_before);
+#if GAME_RUN_AUDIT
+    game_run_audit_frame();
+#endif
 #if GAME_BOSS_SKILL_DIAG
     game_dense_diag_frame();
+#endif
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST
+    boss_stage_profile_frame();
 #endif
 #if GAME_PROFILE && GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
     boss_skill_diag_frame();
@@ -1113,11 +1490,19 @@ static int frame_end(u32 now, int buf)
 void game_demo_run(void)
 {
     bsp_printf("\r\nGAME: KEY0=left KEY1=right KEY2=down KEY3=up, auto fire\r\n");
-    bsp_printf("DEBUG CMDS: R = restart, P = spawn item, B = bomb (type + Enter)\r\n");
+    bsp_printf("GAME CONFIG: buffers=%d pool=%d enemy_cap=%d rings=%d logic_hz=%d tint=%d restore_early=%d\r\n",
+               GAME_FB_COUNT, N_BULLETS, ENEMY_CAP, GAME_BOSS_DENSE_RINGS,
+               GAME_FIXED_UPDATE ? (int)GAME_LOGIC_HZ : 0, GAME_BULLET_TINT,
+               GAME_BG_EARLY_RESTORE);
+    bsp_printf("DEBUG CMDS: R = restart, Y = spawn item+base, E = bomb (type + Enter)\r\n");
+    bsp_printf("TEST MODE: T = toggle invincibility and %d damage (GamePad / type + Enter)\r\n", GAME_TEST_DAMAGE);
+#if GAME_BOSS_SHORTCUT
+    bsp_printf("BOSS SHORTCUT: 1 = jump to boss room\r\n");
+#endif
 #if GAME_BOSS_DEBUG
-    bsp_printf("BOSS TEST: T = jump to boss room, player damage disabled\r\n");
+    bsp_printf("BOSS DEBUG: player damage disabled\r\n");
 #if GAME_BOSS_BULLET_SWEEP
-    bsp_printf("BOSS TEST: T starts automatic moving-bullet 60Hz sweep\r\n");
+    bsp_printf("BOSS TEST: 1 starts automatic moving-bullet 60Hz sweep\r\n");
 #endif
 #if GAME_PROFILE
     bsp_printf("BOSS TEST: /stat prints accumulated frame timing, then resets it\r\n");
@@ -1131,16 +1516,20 @@ void game_demo_run(void)
         bsp_printf("PERF TEST: %d moving bullets, background restore OFF\r\n", PERF_TEST_BULLETS);
 
     if (!game_init()) return;
+#if GAME_CAPACITY_AUDIT
+    if (GAME_CAPACITY_BOSS) game_room_debug_boss();
+    game_boss_stress_arm();
+#endif
 #if GAME_TRIPLE_BUFFER
     s_pending_fb = -1;
 #endif
 #if GAME_FIXED_UPDATE
-    s_sim_last_ms = game_ms();
+    game_logic_reset();
 #endif
 
     for (;;) {
-        u32 now  = game_ms();
         u32 keys = game_keys_read();
+        u32 now  = game_ms();
         int back;
 
 #if GAME_TRIPLE_BUFFER
@@ -1158,21 +1547,21 @@ void game_demo_run(void)
 #endif
             if (!game_restart()) return;
 #if GAME_FIXED_UPDATE
-            s_sim_last_ms = game_ms();
+            game_logic_reset();
 #endif
             continue;                       /* 这一帧已重开，别再用旧状态画 */
         }
 
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
         if (game_take_boss_jump()) {
             game_room_debug_boss();
 #if GAME_BOSS_BULLET_SWEEP
             game_boss_stress_arm();
 #endif
         }
-#if GAME_PROFILE
-        if (game_take_debug_stats()) game_debug_frame_report();
 #endif
+#if GAME_BOSS_DEBUG && GAME_PROFILE
+        if (game_take_debug_stats()) game_debug_frame_report();
 #endif
 
         /* A transition owns the back buffer. Finish it before accepting
@@ -1183,25 +1572,33 @@ void game_demo_run(void)
 #endif
             if (!game_room_finish_rebuild()) return;
 #if GAME_FIXED_UPDATE
-            s_sim_last_ms = game_ms();
+            game_logic_reset();
 #endif
             continue;
         }
         if (game_room_pending()) {
-#if GAME_TRIPLE_BUFFER
-            if (!triple_retire_pending()) return;
-#endif
+            if (!prepare_room_transition()) return;
             if (!game_room_commit()) return;
 #if GAME_FIXED_UPDATE
-            s_sim_last_ms = game_ms();
+            game_logic_reset();
 #endif
             continue;
         }
+#if GAME_RUN_AUDIT
+        game_run_audit_begin();
+#endif
+#if GAME_CAPACITY_AUDIT
+        game_capacity_work_begin();
+#endif
 #if GAME_PROFILE
         {
             u32 t0 = prof_now();
+#if GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
+            s_skill_work_start = t0;
+#endif
 
             frame_begin(now);
+            game_preupdate_restore(back);
             {
                 u32 t1 = prof_now();
                 prof_add(&s_pf_begin, &s_pf_begin_max, t1 - t0);
@@ -1225,6 +1622,9 @@ void game_demo_run(void)
             game_draw(now, back);
             {
                 u32 t1 = prof_now();
+#if GAME_BOSS_STAGE_TEST
+                s_stage_draw = t1 - t0;
+#endif
 #if GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
                 s_skill_draw = t1 - t0;
 #endif
@@ -1236,21 +1636,12 @@ void game_demo_run(void)
         }
 #else
         frame_begin(now);
+        game_preupdate_restore(back);
         game_logic_run(keys, now);
-#if GAME_BOSS_SKILL_DIAG
-        {
-            u32 dense_draw_t0 = s_dense_diag_active ? (u32)clint_getTime(BSP_CLINT) : 0u;
-            game_draw(now, back);
-            if (s_dense_diag_active) {
-                u32 dt = (u32)clint_getTime(BSP_CLINT) - dense_draw_t0;
-                s_dense_diag_draw_sum += dt;
-                if (dt > s_dense_diag_draw_max) s_dense_diag_draw_max = dt;
-                ++s_dense_diag_draw_n;
-            }
-        }
-#else
         game_draw(now, back);
 #endif
+#if GAME_CAPACITY_AUDIT
+        game_capacity_mark(2);
 #endif
         if (!frame_end(now, back)) return;
 

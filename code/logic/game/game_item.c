@@ -34,30 +34,40 @@ static int item_index(int item)
 
 const item_def_t g_item_defs[ITEM_COUNT] = {
     /* ITEM_CHILI  */ {
-        "YOU FEEL SO HOT", ASSET_accessory_chili, 2, 0, 0,
-        { 0, 0, 0, 0, 0, 0, 0, 0, BULLET_CHILI, 0 }
+        "YOU FEEL SO HOT", ASSET_accessory_chili, 2, 1, 0,
+        /* Chili does not permanently replace the normal weapon. Each player
+         * projectile gets a 33% chance to use the flame effect instead. */
+        { 0, 0, 0, 0, 1, 1, 3, 0, -1, 0 }
     },
     /* ITEM_URANUS */ {
-        "IT FEELS LIKE IRON", ASSET_accessory_Uranus, 2, 0, 0,
-        { 0, 0, 0, 2, -1, 2, 0, 2, BULLET_URANUS, 0 }
+        "IT FEELS LIKE IRON", ASSET_accessory_Uranus, 2, 1, 0,
+        { 0, 0, 0, 2, -1, 2, 3, 2, BULLET_URANUS, 0 }
     },
     /* ITEM_EYES   */ {
-        "SLOWER BUT MORER", ASSET_accessory_Inner_eyes, 2, 0, 0,
-        { 0, 0, 0, 0, -5, 0, 0, -1, -1, 2 }
+        "SLOWER BUT MORER", ASSET_accessory_Inner_eyes, 2, 1, 0,
+        { 0, 0, 0, 0, 5, 0, 3, -1, -1, 1 }
     },
     /* ITEM_1UP    */ {
-        "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE, 2, 0, 0,
+        "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE, 2, 1, 0,
         { 1, 0, 1, 1, 0, 0, 0, 0, -1, 0 }
     },
     /* ITEM_MAGICCARD */ {
         "TURN BACK", ASSET_accessory_MagicCard_, 3, 1, ITEM_FLAG_LIFE_PLUS,
-        { 0, 0, 0, 0, -3, -3, -1, 1, -1, 0 }
+        { 0, 0, 0, 0, -1, -2, 5, 1, -1, 0 }
+    },
+    /* ITEM_TRIPRISM */ {
+        "SPLIT", ASSET_accessory_TriPrism, 3, 1, 0,
+        { 1, 0, 1, 0, 0, 0, 0, 0, -1, 0 }
     }
 };
 
 const char *game_item_desc(int item)   { return g_item_defs[item_index(item)].desc; }
 int  game_item_icon(int item)          { return g_item_defs[item_index(item)].icon; }
 int  game_item_bullet(int item)        { return g_item_defs[item_index(item)].mod.bullet_type; }
+int game_item_has(int item)
+{
+    return item >= 0 && item < ITEM_COUNT && (g.item_mask & (1u << item)) != 0u;
+}
 int  game_item_fx(int item)
 {
     const item_def_t *d = &g_item_defs[item_index(item)];
@@ -112,7 +122,8 @@ static int item_weighted_pick(u32 r)
 }
 
 static u32 s_item_seed;
-static u32 s_pickup_lock_until;   /* P 生成后短暂禁止拾取，先让图标露个脸 */
+static int s_debug_item_type = ITEM_MAGICCARD; /* Y cycles to TriPrism first. */
+static u32 s_pickup_lock_until;   /* Y 生成后短暂禁止拾取，先让图标露个脸 */
 
 static u32 item_rand(void)
 {
@@ -147,7 +158,7 @@ static void item_add_slot(int type)
 }
 
 /*  道具消失后，从剩余背包【整体重算】属性，而不是只减一项。
- *  这样 bullet_type / triple 这类“覆盖型/布尔型”字段也能正确恢复；
+ *  这样 bullet_type / triple 这类覆盖型或累加型字段也能正确恢复；
  *  hp / lives 是拾取时的一次性收益，不参与重算（也不可逆）。  */
 static void item_recompute_stats(void)
 {
@@ -157,9 +168,9 @@ static void item_recompute_stats(void)
     g.stats.fire_every   = (int)FIRE_EVERY;
     g.stats.bullet_speed = PLAYER_BULLET_SPEED;
     g.stats.range        = PLAYER_RANGE;
-    g.stats.damage       = 1;
+    g.stats.damage       = PLAYER_BASE_DAMAGE;
     g.bullet_type        = BULLET_A;
-    g.fire_triple        = 0;
+    g.fire_extra_paths   = 0;
 
     for (i = 0; i < g.inv_n; ++i) {
         const item_mod_t *m = &g_item_defs[g.inv[i].type].mod;
@@ -185,7 +196,7 @@ static void item_recompute_stats(void)
         if (g.stats.damage > 9) g.stats.damage = 9;
 
         if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
-        if (m->triple) g.fire_triple = 1;
+        if (m->triple > 0) g.fire_extra_paths += m->triple;
     }
 }
 
@@ -250,7 +261,6 @@ void game_item_apply(int type)
 
     /*  ★ 道具池：每个实例按拾取顺序进数组；效果【累加】。  */
     item_add_slot(type);
-
     /*  ---- 属性增减（HUD 展示还没设计，这里先结算数值） ---- */
     for (i = 0; i < m->hp; ++i) game_vital_heal_one();
     for (i = 0; i < m->lives; ++i) game_vital_extra_life();
@@ -267,24 +277,33 @@ void game_item_apply(int type)
  *  用 LCG 而不是 rand()：不拉 libc 的大表；第一次用毫秒时钟做种子，
  *  同一次上电里每次进房（或新的一轮）拿到的道具不同。
  *  ★ 拿过的道具权重减半（2 → 1），但不降到 0 —— 仍有机会再刷出来。  */
-void game_item_spawn_random(int x, int y)
+static void item_place(int type, int x, int y)
 {
-    g.item.type   = game_item_random_type();
+    g.item.type   = (unsigned char)type;
     g.item.x      = x;
     g.item.y      = y;
     g.item.active = 1;
     s_pickup_lock_until = 0u;
 
-    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_item[b].active = 0;
+    /* Keep each framebuffer's last drawn pedestal/icon until that buffer
+     * restores it. A new item can replace the old one during model update,
+     * after only the current back buffer has started its restoration. */
 }
 
-/*  P 键：在玩家脚下生成一个道具；400 ms 内不拾取，避免刚生成就消失。  */
+void game_item_spawn_random(int x, int y)
+{
+    item_place(game_item_random_type(), x, y);
+}
+
+/*  Y 键：在玩家脚下按六种道具循环生成并放置底座；400 ms 内不拾取。
+ *  第一件固定为 TriPrism，方便直接验证特殊效果；房间/商店仍走加权随机。 */
 void game_item_spawn_at_player(void)
 {
     int x = g.x + PW / 2 - ITEM_W / 2;
     int y = g.y + PH / 2 - ITEM_H / 2;
 
-    game_item_spawn_random(x, y);
+    s_debug_item_type = (s_debug_item_type + 1) % ITEM_COUNT;
+    item_place(s_debug_item_type, x, y);
     s_pickup_lock_until = game_ms() + 400u;
 }
 
@@ -347,6 +366,7 @@ static unsigned s_pool_last[GAME_FB_COUNT];
 
 void game_item_reset_cache(void)
 {
+    s_debug_item_type = ITEM_MAGICCARD;
     for (int b = 0; b < GAME_FB_COUNT; ++b) {
         s_pool_last[b] = 0xFFFFFFFFu;
         s_pool_redraw[b] = 1;
@@ -457,4 +477,47 @@ static void item_draw_entry(u32 fb, u32 now, int buf, int arg)
 void game_item_submit(void)
 {
     rl_push(ACTOR_Z(g.item.y + ITEM_H), item_draw_entry, 0);
+}
+
+/*----------------------------------------------------------------------------*/
+/*  TriPrism: up to three orbiting emitters. A player shot can cross one and
+ *  split once; game_bullet.c owns the projectile fan and reserve-slot limit. */
+static void triprism_draw_entry(u32 fb, u32 now, int buf, int index)
+{
+    static const unsigned char seq[5] = { 0u, 1u, 2u, 1u, 0u };
+    static const u32 flip_seq[5] = { 0u, 0u, 0u, GPU2D_FLIP_X, 0u };
+    int count = game_triprism_count();
+    int x, y, visible;
+    int ai, step;
+
+    if (index < 0 || index >= count) return;
+    game_triprism_position(index, count, now, &x, &y);
+    visible = game_visible_world(x, y, GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE);
+
+    g.old_triprism[buf][index].active = (unsigned)visible;
+    g.old_triprism[buf][index].x = x;
+    g.old_triprism[buf][index].y = y;
+    if (!visible) return;
+
+    step = (int)((now / 180u) % 5u);
+    switch (seq[step]) {
+    case 0:  ai = ASSET_SpecialEffect_TriPrism_00; break;
+    case 1:  ai = ASSET_SpecialEffect_TriPrism_01; break;
+    default: ai = ASSET_SpecialEffect_TriPrism_02; break;
+    }
+    CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
+        fb, (u32)x, (u32)y, GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE, flip_seq[step]);
+}
+
+void game_triprism_submit(void)
+{
+    int count = game_triprism_count();
+    int i;
+
+    if (g.phase == PHASE_GAMEOVER) return;
+    for (i = 0; i < count; ++i) {
+        int x, y;
+        game_triprism_position(i, count, game_ms(), &x, &y);
+        rl_push(ACTOR_Z(y + GAME_TRIPRISM_SIZE), triprism_draw_entry, i);
+    }
 }

@@ -138,9 +138,11 @@ localparam  MODE_TINT_ALPHA = 3'd4;             // 纯色层 tint + alpha 混合
 //   本模块现在只用【第 1 格】（= 第 1 条参数 = 原图那一份），
 //   所以格宽就是下面的字面位数，第 2 格（特效）等合成做的时候从 cmd_*[31:16] 之类取
 
-localparam  S_IDLE          = 2'd0;             // 看队列，取命令
-localparam  S_SEND          = 2'd1;             // 发一行任务（只停一拍）
-localparam  S_RUN           = 2'd2;             // 发与收并行
+localparam  S_IDLE          = 3'd0;             // 看队列，取命令
+localparam  S_SEND          = 3'd1;             // 发一行任务（只停一拍）
+localparam  S_RUN           = 3'd2;             // 发与收并行
+localparam  S_MULT          = 3'd3;             // registered height/stride -> last-row product
+localparam  S_ADDR          = 3'd4;             // registered product -> initial source address
 
 //==============================================================================
 // 函数
@@ -160,8 +162,8 @@ localparam  S_RUN           = 2'd2;             // 发与收并行
 //      源地址 / 参数 / 模式 每张图各一格，下面都按"格"处理（generate / for 循环）----
 
 // ---- 状态机 ----
-reg  [1:0]                          state;
-reg  [1:0]                          next_state;
+reg  [2:0]                          state;
+reg  [2:0]                          next_state;
 
 // ---- 命令上下文（取命令那一拍锁存）----
 //   ★ 这几个必须锁存：命令从队列出来只在【一个拍】有效, 而行任务要重复广播 h 次
@@ -171,6 +173,8 @@ reg                                 line_fx_en_r;                   // 本命令
 reg  [8*IMAGE_NUM-1:0]              cmd_flags_r;            // 每张图的模式位（原样转发）
 reg  [24*IMAGE_NUM-1:0]             cmd_param_r;            // 每张图的参数（原样转发）
 reg  [24*IMAGE_NUM-1:0]             cmd_src_stride_r;       // 每张图的源行跨距（取命令那拍算好）
+reg  [15:0]                         rows_minus_one_r;
+reg  [40*IMAGE_NUM-1:0]             lane_last_row_r;
 
 // ---- 行推进（★ 每张图各推各的：各自跨距、各自 MX/MY 起点）----
 reg  [15:0]                         line_y_r;                       // 已经【发出去】几行（0 … h）
@@ -343,7 +347,7 @@ genvar gi;
 
         // 取命令那一拍用【端口值】算（那拍命令字是有效的）
         assign lane_take_stride[24*gi +: 24]   = src_stride_of(take_flags, cmd_args[32*gi +: 24], dst_stride);
-        assign lane_take_last_row[40*gi +: 40] = ({24'd0, cmd_h} - 40'd1) * {16'd0, lane_take_stride[24*gi +: 24]};
+        assign lane_take_last_row[40*gi +: 40] = rows_minus_one_r * cmd_src_stride_r[24*gi +: 24];
         //   ★★ 广播这一侧必须看【锁存的】上下文，不能看端口：
         //      命令队列是 FWFT 预读的 —— CmdExec 取走命令那一拍，端口上立刻换成【下一条命令】，
         //      而行任务要发 h 次。用端口就会把下一条命令的模式位当成这一条的（踩过）
@@ -400,7 +404,9 @@ end
 always @(*) begin
     next_state = state;
     case (state)
-        S_IDLE : if (take_cmd)          next_state = draw_cmd ? S_SEND : S_IDLE;
+        S_IDLE : if (take_cmd)          next_state = draw_cmd ? S_MULT : S_IDLE;
+        S_MULT :                        next_state = S_ADDR;
+        S_ADDR :                        next_state = S_SEND;
         S_SEND :                        next_state = S_RUN;             // 发任务只占一拍
         S_RUN  : if (can_send)          next_state = S_SEND;            // 下游有空就继续发
                  else if (cmd_finished) next_state = S_IDLE;            // 发完 + 落盘完 → 收工
@@ -420,6 +426,8 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
         line_y_r        <= 16'd0;
         line_done_cnt_r <= 16'd0;
         line_dst_r      <= 32'd0;
+        rows_minus_one_r <= 16'd0;
+        lane_last_row_r <= 0;
         for (i = 0; i < IMAGE_NUM; i = i + 1) begin
             cmd_flags_r[8*i +: 8]      <= 8'd0;
             cmd_param_r[24*i +: 24]    <= 24'd0;
@@ -438,6 +446,7 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
             S_IDLE : if (take_cmd) begin
                          cmd_w_r     <= cmd_w;
                          cmd_h_r     <= cmd_h;
+                         rows_minus_one_r <= cmd_h - 16'd1;
                          line_y_r    <= 16'd0;
                          line_done_cnt_r <= 16'd0;
                          line_dst_r  <= cmd_dst;
@@ -457,18 +466,24 @@ always @(posedge clk_acc or negedge rst_acc_n) begin
                              //      tone[2] 正好落在 param[23] 上，CIUnpack 会把它同时塞进
                              //      flags[7]（ROT90）⇒ 这里若不排除，tone=4 就会被当成旋转，
                              //      第 0 行颜色就被 rot_col_last_addr 改坏（h≥5 时 +1 起步）。
-                             line_src_r[32*i +: 32]        <=
-                                 ((cmd_flags[8*i +: 3] == MODE_CKEY) ||
-                                  (cmd_flags[8*i +: 3] == MODE_TINT_ALPHA))
-                                 ? cmd_src[32*i +: 32]
-                                 : (cmd_flags[8*i + 7]
-                                    ? (cmd_flags[8*i + 6]
-                                       ? rot_col_last_addr(cmd_src[32*i +: 32], cmd_h)
-                                       : cmd_src[32*i +: 32])
-                                    : (cmd_flags[8*i + 6]
-                                       ? (cmd_src[32*i +: 32] + lane_take_last_row[40*i +: 32])
-                                       : cmd_src[32*i +: 32]));
+                             line_src_r[32*i +: 32] <= cmd_src[32*i +: 32];
                          end
+                     end
+
+            S_MULT : lane_last_row_r <= lane_take_last_row;
+            S_ADDR : begin
+                         for (i = 0; i < IMAGE_NUM; i = i + 1)
+                             line_src_r[32*i +: 32] <=
+                                 ((cmd_flags_r[8*i +: 3] == MODE_CKEY) ||
+                                  (cmd_flags_r[8*i +: 3] == MODE_TINT_ALPHA))
+                                 ? line_src_r[32*i +: 32]
+                                 : (cmd_flags_r[8*i + 7]
+                                    ? (cmd_flags_r[8*i + 6]
+                                       ? rot_col_last_addr(line_src_r[32*i +: 32], cmd_h_r)
+                                       : line_src_r[32*i +: 32])
+                                    : (cmd_flags_r[8*i + 6]
+                                       ? (line_src_r[32*i +: 32] + lane_last_row_r[40*i +: 32])
+                                       : line_src_r[32*i +: 32]));
                      end
 
             // ---- 发一行任务那一拍：行号++ / 两个地址各推进一个跨距 ----

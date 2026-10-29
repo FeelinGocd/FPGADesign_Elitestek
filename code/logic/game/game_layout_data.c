@@ -5,6 +5,57 @@
 #define O(x, y, k) { (unsigned char)(x), (unsigned char)(y), (unsigned char)(k), 0 }
 #define OP(x, y, k, p) { (unsigned char)(x), (unsigned char)(y), (unsigned char)(k), (unsigned char)(p) }
 
+/* Shared rows; per-terrain uint16 indexes preserve every cell/rotation. */
+static const char LT_rows[24][LAYOUT_MAX_COLS + 1] = {
+    ".............................................",
+    "......ZWWWWWWWDWWWWWWWWWWWWWDWWWWWX..........",
+    "......WZWWWWWW.WWWWWWWWWWWWW.WWWWXW..........",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
+    "......D.BBBBBBBBBBBBBBBBBBBBBBBBBD...........",
+    "......WCWWWWWWDWWWWWWWWZBBBBBBBBBWW..........",
+    "......CWWWWWWW.WWWWWWWZWBBBBBBBBBWW..........",
+    "......................WWBBBBBBBBBWW..........",
+    "......................D.BBBBBBBBBD...........",
+    "......................WZWWWWDWWWWXW..........",
+    "......................ZWWWWW.WWWWWX..........",
+    "........................................",
+    ".......ywwwwwwwwwwwwwwwwwwwwwwwwwc......",
+    ".......wywwwwwwwwwwwHwwwwwwwwwwwcw......",
+    ".......wwKKKKKKKKKKKKKKKKKKKKKKKww......",
+    ".......wHKKKKKKKKKKKKKKKKKKKKKKKHw......",
+    ".......wzwwwwwwwwwwwHwwwwwwwwwwwxw......",
+    ".......zwwwwwwwwwwwwwwwwwwwwwwwwwx......",
+    "......YWWWWWWWDWWWWWWWWWWWWWDWWWWWWWC........",
+    "......WYWWWWWW.WWWWWWWWWWWWW.WWWWWWCW........",
+    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBBBWW........",
+    "......D.BBBBBBBBBBBBBBBBBBBBBBBBBBBD.........",
+    "......WCWWWWWWDWWWWWWWWWWWWWDWWWWWWCW........",
+    "......CWWWWWWW.WWWWWWWWWWWWW.WWWWWWWC........",
+};
+static const unsigned char RT_rows[21][LAYOUT_ROT_COLS] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 16, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0 },
+    { 0, 112, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
+    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
+    { 0, 48, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0 },
+    { 0, 176, 170, 170, 170, 170, 0, 0, 20, 0, 0, 0 },
+    { 0, 160, 170, 138, 170, 234, 0, 0, 20, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 48, 0, 0, 4, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 48, 170, 170, 26, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 128, 170, 168, 42, 0, 0, 0 },
+    { 0, 192, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0 },
+    { 0, 192, 3, 0, 0, 0, 0, 0, 5, 0, 0, 0 },
+    { 0, 192, 168, 170, 170, 170, 170, 170, 4, 0, 0, 0 },
+    { 0, 0, 170, 170, 170, 170, 170, 170, 2, 0, 0, 0 },
+    { 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 176, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+    { 0, 240, 0, 0, 0, 0, 0, 0, 64, 1, 0, 0 },
+    { 0, 48, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0 },
+    { 0, 176, 170, 170, 170, 170, 170, 170, 106, 1, 0, 0 },
+    { 0, 160, 170, 138, 170, 170, 170, 168, 170, 1, 0, 0 },
+};
+
 /* 1x1_000：40×23，0 个对象 */
 const obj_place_t L__1x1_000[] = {
     { 0, 0, 0, 0 },   /* 占位：空布局，n = 0 */
@@ -42,83 +93,10 @@ const obj_place_t L__1x1_002[] = {
 };
 
 /* L_001：45×35 异形地形 */
-static const char LT_L_001[35][LAYOUT_MAX_COLS + 1] = {
-    ".............................................",
-    ".............................................",
-    ".............................................",
-    ".............................................",
-    ".............................................",
-    "......ZWWWWWWWDWWWWWWWWWWWWWDWWWWWX..........",
-    "......WZWWWWWW.WWWWWWWWWWWWW.WWWWXW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......D.BBBBBBBBBBBBBBBBBBBBBBBBBD...........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WWBBBBBBBBBBBBBBBBBBBBBBBBBWW..........",
-    "......WCWWWWWWDWWWWWWWWZBBBBBBBBBWW..........",
-    "......CWWWWWWW.WWWWWWWZWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................D.BBBBBBBBBD...........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WWBBBBBBBBBWW..........",
-    "......................WZWWWWDWWWWXW..........",
-    "......................ZWWWWW.WWWWWX..........",
-    ".............................................",
-    ".............................................",
-    ".............................................",
-    ".............................................",
-    ".............................................",
-};
-/* Four rotations per byte; low two bits are the leftmost cell. */
-static const unsigned char RT_L_001[35][LAYOUT_ROT_COLS] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 16, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0 },
-    { 0, 112, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 48, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 240, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0 },
-    { 0, 176, 170, 170, 170, 170, 0, 0, 20, 0, 0, 0 },
-    { 0, 160, 170, 138, 170, 234, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 48, 0, 0, 4, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 240, 0, 0, 20, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 48, 170, 170, 26, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 128, 170, 168, 42, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-};
+static const unsigned short LTI_L_001[35] = { 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 4, 3, 3, 3, 3, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 9, 10, 0, 0, 0, 0, 0 };
+static const unsigned short RTI_L_001[35] = { 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 4, 3, 3, 3, 3, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 9, 10, 0, 0, 0, 0, 0 };
 const layout_terrain_t T_L_001 = {
-    LT_L_001, RT_L_001, 45, 35, 8, 7, 32, 27, 1440, 1120, 40, 34
+    LT_rows, RT_rows, 45, 35, 8, 7, 32, 27, 1440, 1120, 40, 34, LTI_L_001, RTI_L_001
 };
 
 /* L_001：45×35，66 个对象 */
@@ -159,9 +137,23 @@ const obj_place_t L_map_L[] = {
     { 0, 0, 0, 0 },   /* 占位：空布局，n = 0 */
 };
 
+/* map_hidden_normal：40×23 异形地形 */
+static const unsigned short LTI_map_hidden_normal[23] = { 11, 11, 12, 13, 14, 14, 14, 14, 14, 14, 15, 14, 14, 14, 14, 14, 14, 16, 17, 11, 11, 11, 11 };
+static const unsigned short RTI_map_hidden_normal[23] = { 0, 0, 0, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 14, 0, 0, 0, 0 };
+const layout_terrain_t T_map_hidden_normal = {
+    LT_rows, RT_rows, 40, 23, 9, 4, 31, 16, 1280, 720, 40, 20, LTI_map_hidden_normal, RTI_map_hidden_normal
+};
+
 /* map_hidden_normal：40×23，0 个对象 */
 const obj_place_t L_map_hidden_normal[] = {
     { 0, 0, 0, 0 },   /* 占位：空布局，n = 0 */
+};
+
+/* room_2x2：45×35 异形地形 */
+static const unsigned short LTI_room_2x2[35] = { 0, 0, 0, 0, 0, 18, 19, 20, 20, 20, 20, 20, 20, 21, 20, 20, 20, 20, 20, 20, 20, 21, 20, 20, 20, 20, 20, 20, 22, 23, 0, 0, 0, 0, 0 };
+static const unsigned short RTI_room_2x2[35] = { 0, 0, 0, 0, 0, 15, 16, 17, 17, 17, 17, 17, 17, 18, 17, 17, 17, 17, 17, 17, 17, 18, 17, 17, 17, 17, 17, 17, 19, 20, 0, 0, 0, 0, 0 };
+const layout_terrain_t T_room_2x2 = {
+    LT_rows, RT_rows, 45, 35, 8, 7, 34, 27, 1440, 1120, 42, 34, LTI_room_2x2, RTI_room_2x2
 };
 
 /* room_2x2：45×35，0 个对象 */
@@ -176,8 +168,8 @@ const room_layout_t g_layouts[LAYOUT_COUNT] = {
     { "L_001", L_L_001, 66, 3, &T_L_001 },
     { "map_1x1_type0", L_map_1x1_type0, 37, 0, 0 },
     { "map_L", L_map_L, 0, 3, &T_L_001 },
-    { "map_hidden_normal", L_map_hidden_normal, 0, 2, 0 },
-    { "room_2x2", L_room_2x2, 0, 1, 0 },
+    { "map_hidden_normal", L_map_hidden_normal, 0, 6, &T_map_hidden_normal },
+    { "room_2x2", L_room_2x2, 0, 7, &T_room_2x2 },
 };
 const unsigned short g_layout_ids[LAYOUT_COUNT] = { 0, 1, 2, 1, 0, 0, 0, 0 };
 

@@ -24,45 +24,35 @@
  *  speed2 : twin 那发的速度（0 = 同速）⇒ 内外两条环
  *  spin   : 每轮再转几格      repeat: 这一招连续发几轮（>1 = 招式会动）
  *============================================================================*/
+/* Scale established volleys above their original 300-shot density. Layers have distinct
+ * positions/speeds; the pool budget clips the last beat before allocation.
+ * count/gap/rest/step/base/speed/twin/speed2/spin/repeat/aim/motion/layers */
+#define BOSS_LAYERS(n) (ENEMY_CAP > 300 ? ((n) * ENEMY_CAP + 299) / 300 : (n))
+/* Larger trial pools need enough emitted shots to replace losses before the
+ * final ring. Above the established 500-shot density, use all 64 directions. */
+#define BOSS_RING_SHOTS (ENEMY_CAP > 500 ? ANGLE_STEPS : 50)
+#define BOSS_RAIN_BURST(n) (ENEMY_CAP > 500 ? ((n) * ENEMY_CAP + 499) / 500 : (n))
 const pattern_t g_boss_patterns[] = {
-    /*  0 CIRCUIT     : 16 方向均分一圈（静止） */
-    { 16, 2, 70,  4, 16, 4, 0, 0,  0, 1, 0 },
-    /*  1 ROT         : 前后对射，双臂异速 */
-    { 16, 3, 66,  4, 16, 3, 1, 3,  0, 1, 0 },
-    /*  2 CROSS       : 十字四发，每招自转 90 度 */
-    {  4, 4, 80, 16,  0, 4, 0, 0, 16, 1, 0 },
-    /*  3 SPREAD      : 静止扇形七发 */
-    {  7, 3, 70,  2, 10, 3, 0, 0,  4, 1, 0 },
-    /*  4 SWEEP_FAN   : 旋转半圆（扇形转 10 轮，扫过大半圈） */
-    {  7, 2, 70,  2,  4, 3, 0, 0,  6, 10, 0 },
-    /*  5 DOUBLE_RING : 前后对射，两臂速度不同（内外两条环） */
-    { 12, 3, 66,  5, 16, 3, 1, 2,  0, 1, 0 },
-    /*  6 WIDE_FAN    : 半圆 13 发横扫一片 */
-    { 13, 2, 76,  3, 62, 3, 0, 0,  0, 1, 0 },
-    /*  7 PULSE       : 八对快弹，压迫感最强 */
-    {  8, 6, 60,  8,  0, 5, 1, 5,  8, 1, 0 },
-    /*  8 SPIRAL_ARM  : 双臂各 4 个方向 × 6 轮 = 48 发，避开 64 发池截断 */
-    {  4, 5, 66,  8,  0, 3, 1, 3,  5, 6, 0 },
-    /*  9 STRAIGHT_UP : 朝上三连（一对一教学用的固定方向） */
-    {  3, 8, 60,  0, 48, 4, 0, 0,  0, 1, 0 },
-    /* 10 WIDE_SWEEP  : 扇形但转得慢、覆盖更宽（11 发 × 6 轮） */
-    { 11, 2, 74,  2,  0, 3, 0, 0, 10,  6, 0 },
-    /* 11 AIMED_1     : 单发自机狙（小怪最基础的一招） */
-    {  1, 10, 50,  0,  0, 4, 0, 0,  0, 1, 1 },
-    /* 12 AIMED_3     : 三发扇形朝玩家 */
-    {  3,  8, 56,  3,  0, 4, 0, 0,  0, 1, 1 },
-    /* 13 AIMED_5_FAST: 五发快速扇狙，每轮转 7 格 */
-    {  5,  4, 62,  3,  0, 5, 0, 0,  7, 1, 1 },
-    /* 14 AIMED_TWIN  : 沿瞄准线正反两发（像一道穿过去的激光） */
-    {  2,  6, 58,  0,  0, 5, 1, 0,  0, 1, 1 },
-    /* 15 AIMED_STREAM: 同向连发四颗（机枪感） */
-    {  4,  3, 56,  0,  0, 5, 0, 0,  0, 1, 1 },
-    /* 16 AIMED_SPIN  : 五发扇狙连扫 6 轮，绕着玩家转 */
-    {  5,  3, 60,  3,  0, 4, 0, 0,  5, 6, 1 },
-    /* 17 PULSE_RINGS: six offset rings, 16 simultaneous shots per ring. */
-    { 16, 20, 70,  4,  0, 4, 0, 0,  2, 6, 0, MOTION_PULSE },
-    /* 18 DENSE_RINGS: nine 36-shot rings fill 324 enemy slots in a 356-slot pool. */
-    { 36,  8, 70,  2,  0, 3, 0, 0,  1, GAME_BOSS_DENSE_RINGS, 0, MOTION_PULSE }
+    { 16, 1, 70,  4, 16, 4, 0, 0,  0,  4, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* CIRCUIT */
+    { 16, 1, 66,  4, 16, 3, 1, 3,  1,  2, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* ROT */
+    {  4, 1, 80, 16,  0, 4, 0, 0,  2,  8, 0, MOTION_LINE, BOSS_LAYERS(10) }, /* CROSS */
+    {  7, 3, 70,  2, 10, 3, 0, 0,  4,  1, 0 }, /* SPREAD (unused) */
+    {  7, 1, 70,  2,  4, 3, 0, 0,  6, 10, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* SWEEP_FAN */
+    { 12, 1, 66,  5, 16, 3, 1, 2,  2,  3, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* DOUBLE_RING */
+    { 13, 1, 76,  3, 62, 3, 0, 0,  0,  4, 0, MOTION_LINE, BOSS_LAYERS(6) }, /* WIDE_FAN */
+    {  8, 1, 60,  8,  0, 5, 1, 5,  8,  4, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* PULSE */
+    {  4, 1, 66,  8,  0, 3, 1, 3,  5,  8, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* SPIRAL_ARM */
+    {  3, 8, 60,  0, 48, 4, 0, 0,  0,  1, 0 }, /* STRAIGHT_UP (unused) */
+    { 11, 1, 74,  2,  0, 3, 0, 0, 10,  6, 0, MOTION_LINE, BOSS_LAYERS(5) }, /* WIDE_SWEEP */
+    {  1,10, 50,  0,  0, 4, 0, 0,  0,  1, 1 }, /* AIMED_1 (unused) */
+    {  3, 1, 56,  3,  0, 4, 0, 0,  0, 12, 1, MOTION_LINE, BOSS_LAYERS(10) }, /* AIMED_3 */
+    {  5, 1, 62,  3,  0, 5, 0, 0,  7,  7, 1, MOTION_LINE, BOSS_LAYERS(10) }, /* AIMED_5_FAST */
+    {  2, 1, 58,  0,  0, 5, 1, 0,  0,  9, 1, MOTION_LINE, BOSS_LAYERS(10) }, /* AIMED_TWIN */
+    {  4, 1, 56,  0,  0, 5, 0, 0,  0,  9, 1, MOTION_LINE, BOSS_LAYERS(10) }, /* AIMED_STREAM */
+    {  5, 1, 60,  3,  0, 4, 0, 0,  5,  7, 1, MOTION_LINE, BOSS_LAYERS(10) }, /* AIMED_SPIN */
+    { BOSS_RING_SHOTS, ENEMY_CAP > 300 ? 12 : 20, 70, 0, 0, 4, 0, 0, 2,
+      GAME_BOSS_DENSE_RINGS + (ENEMY_CAP > 300), 0, MOTION_PULSE, 1 }, /* PULSE_RINGS */
+    { BOSS_RING_SHOTS, 8, 70,  0,  0, 3, 0, 0,  1, GAME_BOSS_DENSE_RINGS, 0, MOTION_PULSE, 1 }
 };
 
 const int g_boss_pattern_n = (int)(sizeof(g_boss_patterns) / sizeof(g_boss_patterns[0]));
@@ -76,9 +66,9 @@ const int g_boss_pattern_n = (int)(sizeof(g_boss_patterns) / sizeof(g_boss_patte
 enum { M_SWEEP_X, M_CENTER, M_LEFT, M_RIGHT, M_SWEEP_Y,
        M_UP, M_DOWN, M_ORBIT };
 const move_t g_boss_moves[] = {
-    { 18, 1, M_CENTER },    /* DENSE_RINGS: fill enemy quota, player keeps 32 slots */
+    { 18, 1, M_CENTER },    /* DENSE_RINGS: fills the configured enemy cap */
     {  0, 1, M_SWEEP_X },   /* CIRCUIT      放射一圈，开胃 */
-    { 17, 1, M_CENTER },    /* PULSE_RINGS: six pulsing rings from Boss center */
+    { 17, 1, M_CENTER },    /* PULSE_RINGS: ten pulsing rings from Boss center */
     { 12, 1, M_SWEEP_Y },   /* AIMED_3      ★ 扇狙 */
     {  4, 1, M_LEFT },      /* SWEEP_FAN    ★ 从左侧旋转半圆 */
     { 15, 1, M_RIGHT },     /* AIMED_STREAM ★ 向右移动并连发 */
@@ -95,9 +85,13 @@ const move_t g_boss_moves[] = {
 };
 
 /*  小怪的招式（预设）：单发/三发自机狙，间隔长、节奏慢  */
+static const pattern_t g_minion_patterns[] = {
+    { 1, 10, 50, 0, 0, 4, 0, 0, 0, 1, 1 },
+    { 3,  8, 56, 3, 0, 4, 0, 0, 0, 1, 1 }
+};
 const move_t g_minion_moves[] = {
-    { 11, 1, 0 },      /* AIMED_1 */
-    { 12, 2, 0 }       /* AIMED_3 连放两轮 */
+    { 0, 1, 0 },      /* AIMED_1 */
+    { 1, 2, 0 }       /* AIMED_3 连放两轮 */
 };
 const int g_minion_move_n = (int)(sizeof(g_minion_moves) / sizeof(g_minion_moves[0]));
 
@@ -107,7 +101,7 @@ const move_set_t g_boss_move_set = {
 };
 
 const move_set_t g_minion_move_set = {
-    g_boss_patterns, (int)(sizeof(g_boss_patterns) / sizeof(g_boss_patterns[0])),
+    g_minion_patterns, (int)(sizeof(g_minion_patterns) / sizeof(g_minion_patterns[0])),
     g_minion_moves,  (int)(sizeof(g_minion_moves) / sizeof(g_minion_moves[0]))
 };
 const int g_boss_move_n = (int)(sizeof(g_boss_moves) / sizeof(g_boss_moves[0]));
@@ -131,9 +125,7 @@ const boss_def_t g_boss_def = {
     BOSS_HP_MAX,            /* hp */
     BOSS_GATE_1,            /* gate1 : 第一次锁血线 */
     BOSS_GATE_2,            /* gate2 : 第二次锁血线 */
-    RAIN_MS,                /* rain_ms   : 锁血弹幕雨持续多久 */
-    20,                     /* rain_wave : 每 20 帧一波雨 */
-    RAIN_DROP,              /* rain_drop : 一波几颗 */
+    BOSS_PHASE_SHIFT_MS,     /* phase_shift_ms : 转阶段护盾持续时间 */
     BOSS_W,                 /* w */
     BOSS_H,                 /* h */
     67,                     /* muzzle_dx : ★ Boss 的左手 = 画面右侧（精灵是镜像的，宽处 x 2..73） */
@@ -141,4 +133,12 @@ const boss_def_t g_boss_def = {
     &g_boss_move_set,       /* ★ 用哪套招式（换 Boss 只要换这个指针） */
     g_boss_motions,
     (unsigned char)(sizeof(g_boss_motions) / sizeof(g_boss_motions[0]))
+};
+
+/* Per-phase 60 Hz schedules. All mechanics share ENEMY_CAP, never add pools.
+ * rain_on/rest, shot_cap, rain_every/drop, first_move. Summons are intermissions. */
+const boss_phase_def_t g_boss_phases[BOSS_PHASE_COUNT] = {
+    {   0,   0, ENEMY_CAP,  0,  0,  0 },
+    { 360, 120,         0, ENEMY_CAP > 300 ? 4 : 8, BOSS_RAIN_BURST(28), 0 },
+    { 180, 120, ENEMY_CAP * 15 / 16, 12, BOSS_RAIN_BURST(10), 10 }
 };

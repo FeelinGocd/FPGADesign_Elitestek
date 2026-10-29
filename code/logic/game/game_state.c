@@ -189,12 +189,10 @@ int game_present(u32 fb)
     return game_wait_display();
 }
 
-int game_wait_display(void)
+int game_wait_display_after(u32 before)
 {
-    u32 before, wait = 0u;
-
 #if IRQ_FRAME_USE
-    before = IRQ_frame_count();
+    u32 wait = 0u;
     while (IRQ_frame_count() == before && wait < 200000u) {
         bsp_uDelay(1u);
         ++wait;
@@ -204,10 +202,19 @@ int game_wait_display(void)
         return 0;
     }
 #else
-    (void)before; (void)wait;
+    (void)before;
     bsp_uDelay(20000u);
 #endif
     return 1;
+}
+
+int game_wait_display(void)
+{
+#if IRQ_FRAME_USE
+    return game_wait_display_after(IRQ_frame_count());
+#else
+    return game_wait_display_after(0u);
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
@@ -230,7 +237,8 @@ void game_reset_state(void)
     g.moving = 0; g.was_moving = 0; g.last_dir = DOWN;
     g.anim = 0u; g.fire_tick = 0u; g.anim_step = 0u;
     g.vx8 = 0; g.vy8 = 0; g.rx = 0; g.ry = 0;
-    g.fire_triple = 0;
+    g.fire_extra_paths = 0;
+    g.test_mode = 0;
     g.item_mask = 0u;                       /* 道具池清空 */
     g.inv_n = 0;                            /* 实例数组清空 */
     ++g.inv_rev;                            /* 池子内容版本变化 */
@@ -250,7 +258,7 @@ void game_reset_state(void)
     g.stats.fire_every   = (int)FIRE_EVERY;
     g.stats.bullet_speed = PLAYER_BULLET_SPEED;
     g.stats.range        = PLAYER_RANGE;
-    g.stats.damage       = 1;
+    g.stats.damage       = PLAYER_BASE_DAMAGE;
     g.pickup_until = 0u;
     g.hurt_until = 0u;
     g.toast_until = 0u;
@@ -259,6 +267,7 @@ void game_reset_state(void)
     g.boss_x = (ARENA_X0 + ARENA_X1) / 2 - BOSS_W / 2;
     g.boss_y = (ARENA_Y0 + ARENA_Y1) / 2 - BOSS_H / 2;
     g.boss_tick = 0u;
+    g.boss_phase = BOSS_PHASE_CORE;
     g.stage = 1;                            /* 重开也从第 1 关开始 */
     g.score = 0;                            /* 本局得分清零 */
     g.coins = 0;                            /* 本局金币清零（下一层保留） */
@@ -277,6 +286,8 @@ void game_reset_state(void)
     g.boss_blink_on = 0;
     g.boss_blink_next = 0u;
     g.boss_blink_cool = 0u;
+    g.boss_slow_until = 0u;
+    g.boss_slow_next = 0u;
     game_shot_stop(&g.shot);
 
     /*  开局在起始房：没有道具、没有 Boss。
@@ -298,11 +309,12 @@ void game_reset_state(void)
 
     game_bullets_clear();                   /* 同时复位 alive 计数 / 空闲槽栈 */
     for (i = 0; i < GAME_FB_COUNT; ++i) {
-        int j;
-        for (j = 0; j < N_BULLETS; ++j) g.old_bullets[i][j].active = 0;
+        game_bullets_clear_history(i);
         g.old_item[i].active = 0;
         g.old_boss[i].active = 0;
         g.old_player[i].active = 0;
+        for (int k = 0; k < GAME_TRIPRISM_MAX; ++k)
+            g.old_triprism[i][k].active = 0;
     }
 }
 
@@ -467,7 +479,7 @@ void game_flow_enter_room(void)
             g.phase = PHASE_FIGHT;
             g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
             game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
-            game_shot_begin(&g.shot, 0);
+            game_boss_resume();
         } else {
             g.phase = PHASE_EXPLORE;        /* 已击破：exit 在上面等玩家 */
         }
@@ -510,6 +522,8 @@ void game_boss_spawn(void)
     g.boss_blink_on = 0;
     g.boss_blink_next = 0u;
     g.boss_blink_cool = 0u;
+    g.boss_slow_until = 0u;
+    g.boss_slow_next = 0u;
     g.boss_wait_until = game_ms() + BOSS_WAIT_MS;
     g.exit_active = 0;
     g.exit_dirty = 0;
@@ -526,12 +540,23 @@ void game_start_fight(void)
     g.phase = PHASE_FIGHT;
 
     game_shot_init(&g.shot, g_boss_def.moves, 1, BULLET_URANUS);
-    game_shot_begin(&g.shot, 0);
 
     g.boss_hp = g_boss_def.hp;
     g.boss_gate = g_boss_def.gate1;
+#if GAME_CAPACITY_AUDIT == 2
+    /* Enter the selected real attack phase without crossing a health gate
+     * or summoning/clearing an intermission wave before measurement. */
+#if GAME_CAPACITY_PHASE == 1
+    g.boss_hp = g_boss_def.gate1;
+    g.boss_gate = g_boss_def.gate2;
+#elif GAME_CAPACITY_PHASE == 2
+    g.boss_hp = g_boss_def.gate2;
+    g.boss_gate = 0;
+#endif
+#endif
     g.boss_locked = 0;
     g.boss_tick = 0u;
+    game_boss_resume();
     bsp_printf("FIGHT: stage %d\r\n", g.stage);
 }
 
@@ -619,7 +644,7 @@ int game_init(void)
 #if GAME_BG_COPY
     {
         u32 bg0 = gpu2d_getCmdDone();
-        u32 bg_cmds = game_background_build(FB_BG);
+        u32 bg_cmds = game_background_warmup();
         u32 bg_target = bg0 + bg_cmds;
         if (gpu2d_waitCmdDone(bg_target, 10000000u) != 0) {
             bsp_printf("INIT ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",

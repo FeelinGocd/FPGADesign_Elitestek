@@ -35,7 +35,8 @@ module GamingPlayUnit_Top # (
 // Clock and reset ports
 //------------------------------------------------------------------------------
     input   wire                    axi_clk,      
-    input   wire                    core_clk,           // CORE CLK @ 100MHz
+    input   wire                    core_clk,           // CPU / GPU fast clock (main project: 300MHz)
+    input   wire                    core_clk_feedback,  // PLL_TL0 GCLK @ 100MHz: DDR / AXI / display
     input   wire                    sdram_clk,          // SDRAM CK @ 400MHz
     input   wire                    rx_cal_clk,         // SDRAM CK @ 400MHz
     input   wire                    tx_cal_clk,         // SDRAM CK @ 400MHz
@@ -174,6 +175,8 @@ parameter   FREQ            = 200;			// 只用来算 CNT_INIT: 1.5*FREQ*1000 拍
 
 // 全局时钟复位
 wire                                user_clk;
+wire                                mem_clk;
+wire                                mem_rst_n;
 wire                                ddr_rstn;
 reg  [19:0]                         cnt;
 wire                                sys_rst;
@@ -310,9 +313,7 @@ parameter   DEBOUNCE_CNT            =   1_000_000;
 wire [3:0]                          key_state;
 wire [3:0]                          key_edge;
 
-// cal_done 采样两拍后并进复位 —— 系统级门控在顶层做,功能模块只认 rst_n
-reg                                 cal_done_d1;
-reg                                 cal_done_d2;
+// Independent synchronous reset release for each fabric clock domain.
 wire                                axi_rst_n;
 
 //------------------------------------------------------------------------------
@@ -449,7 +450,7 @@ wire                                GPU2D_m_AXI_RREADY;
 // 两个 PLL 都锁了才为高
 assign sys_rst       = pll_locked & user_pll_locked;
 
-always @(posedge user_clk or negedge sys_rst) begin
+always @(posedge mem_clk or negedge sys_rst) begin
 	if (!sys_rst)
 		cnt <= 0;
     else if (cnt != CNT_INIT) 
@@ -469,24 +470,18 @@ generate
     end
 endgenerate
 
+// DDR3_PLL.CLKOUT4 is peripheral-only RCLK on Ti60. The existing TL0 feedback
+// output is a 100MHz GCLK; use it for fabric logic, preserving the DDR ratio.
+assign mem_clk = core_clk_feedback;
+ResetSync u_mem_reset (.clk(mem_clk), .async_rst_n(sys_rst & cal_done), .rst_n(mem_rst_n));
+
 //------------------------------------------------------------------------------
 // 系统门控:把 cal_done 并进复位(顶层统一做,功能模块只认 rst_n)
 //   - sys_rst     : 异步断言
-//   - cal_done_d2 : 时钟域内的寄存器输出 -> 同步撤销
+//   - DDR calibration loss asserts both domains immediately; each releases locally
 //   合成后的 axi_rst_n 就是"异步断言 / 同步撤销"的标准复位
 //------------------------------------------------------------------------------
-always @(posedge user_clk or negedge sys_rst) begin
-    if (!sys_rst) begin
-        cal_done_d1 <= 1'b0;
-        cal_done_d2 <= 1'b0;
-    end
-    else begin
-        cal_done_d1 <= cal_done;
-        cal_done_d2 <= cal_done_d1;
-    end
-end
-
-assign axi_rst_n = sys_rst & cal_done_d2;
+ResetSync u_acc_reset (.clk(user_clk), .async_rst_n(sys_rst & cal_done), .rst_n(axi_rst_n));
 
 // 显示通道复位 = 校准完成 + HDMI PLL 锁定
 //   DDR 没校准完 → Axi_Mux/DDR 还不能收命令, 不许它发 AXI 读
@@ -505,11 +500,11 @@ wire                                IRQ_frame;                 // 显示帧起�
 
 SoC_RISCV32 u_sapphire_soc(
     .io_systemClk                       (user_clk),
-    .io_asyncReset                      (!pll_locked),
+    .io_asyncReset                      (!sys_rst),
     // output类型：SoC 输出的系统域同步复位
     .io_systemReset                     (),
 
-    .io_memoryClk                       (user_clk),
+    .io_memoryClk                       (mem_clk),
     // output 类型：SoC 输出的存储器域同步复位
     .io_memoryReset                     (                                 ),
     
@@ -623,8 +618,8 @@ SoC_RISCV32 u_sapphire_soc(
 //------------------------------------------------------------------------------
 
 ddr3_top u_ddr3_top ( 
-    .axi_clk                            (user_clk            ),
-    .core_clk                           (core_clk            ),
+    .axi_clk                            (mem_clk             ),
+    .core_clk                           (mem_clk             ),
     .sdram_clk                          (sdram_clk           ),  
     .rx_cal_clk                         (rx_cal_clk          ),
     .tx_cal_clk                         (tx_cal_clk          ),
@@ -810,12 +805,15 @@ GPU_2D #(
     .AXI_STRB_WIDTH                     (16),
     .AXI_ID_WIDTH                       (8),
     .AXI_LEN_WIDTH                      (8),
-    .AXI_ID                             (8'h00)
+    .AXI_ID                             (8'h00),
+    .ASYNC_MEMORY                       (1)
 ) u_GPU_2D (
     .clk_ci                             (user_clk),
     .rst_ci_n                           (axi_rst_n),
     .clk_acc                            (user_clk),
     .rst_acc_n                          (axi_rst_n),
+    .clk_mem                            (mem_clk),
+    .rst_mem_n                          (mem_rst_n),
 
     // CI(自定义指令)
     .ci_cmd_valid                       (cpu0_ci_cmd_valid),
@@ -970,8 +968,8 @@ GPU_2D #(
 //------------------------------------------------------------------------------
 
 Axi_Mux  u_Axi_Mux (
-    .Sys_Clk                            (user_clk                  ),
-    .Sys_Rst_N                          (sys_rst                   ),   // sys_rst 为低有效，可直接相接
+    .Sys_Clk                            (mem_clk                   ),
+    .Sys_Rst_N                          (mem_rst_n                 ),
 
     .Cfg_Arb_Type                       (1'b0                      ),   // 0=轮询(共享) / 1=固定优先级
     .Cfg_Cnl_Mask                       (4'b1111                   ),   // ★必须全 1，否则对应通道被屏蔽

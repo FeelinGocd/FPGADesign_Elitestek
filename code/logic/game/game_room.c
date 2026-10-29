@@ -140,7 +140,7 @@ int game_room_prop_dirty(void)
 
 static int s_start_room;            /* 本轮起点房间的格子编号 */
 static int s_boss_anchor = -1;      /* Boss 2×2 的左上角（规范房间 id） */
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
 static int s_debug_boss_entry;
 #endif
 static int s_boss_entry = -1;       /* 生成时选中的 Boss 入口格（验证距离用） */
@@ -825,7 +825,7 @@ static void room_fallback(void)
 }
 
 
-/*  隐藏房：所有房间都定好之后，挑一个空格塞进去（见 交接_2026-10-24.md §4.1）。
+/*  隐藏房：所有房间都定好之后，挑一个空格塞进去（设计边界见 docs/spec/游戏_房间.md）。
  *   · 候选 = 空格，且 4 邻域里**没有 Boss**（硬性）
  *   · adj = 4 邻域里已有房间数；**从多到少**，取最前一档里随机一个（蓄水池抽样）
  *   · 谁都不挨着（adj = 0）的格子不要 —— 那样的门永远炸不到
@@ -1135,8 +1135,9 @@ static void doors_build(void)
 
     s_door_count = n;
 
-    /* Keep Boss connections observable on hardware. This is intentionally
-     * limited to doors touching a Boss room so normal play logs stay quiet. */
+    /* Eight per-door lines overflow the UART FIFO and can block a Boss-room
+     * transition for tens of milliseconds. Enable them only for telemetry. */
+#if GAME_UART_TELEMETRY
     for (i = 0; i < s_door_count; ++i) {
         int t = s_doors[i].room;
         int cur = game_room_id();
@@ -1150,6 +1151,7 @@ static void doors_build(void)
                        s_doors[i].hidden);
         }
     }
+#endif
 }
 
 /*  移动边界：只要这个方向【有邻居房间】，就把那一段门洞放行。
@@ -1257,8 +1259,9 @@ int game_room_owner_at(int gx, int gy)
 int game_room_cell_walkable(int tx, int ty)
 {
     int i;
+    char tile = game_world_tile_at(tx, ty);
 
-    if (game_world_tile_at(tx, ty) == 'B' || game_world_tile_at(tx, ty) == 'K') return 1;
+    if (tile == 'B' || tile == 'K') return 1;
     for (i = 0; i < s_door_count; ++i) {
         const door_info_t *d = &s_doors[i];
 
@@ -1354,6 +1357,7 @@ int game_room_blast_hidden(int cx, int cy, int r)
             bsp_printf("BOMB: hidden link %d <-> %d\r\n", me, (int)d->room);
         }
     }
+    if (opened) (void)game_background_refresh_doors();
     return opened;
 }
 
@@ -1597,7 +1601,7 @@ void game_room_request_full(int target, int entry_dir)
     game_room_request(target, entry_dir);
 }
 
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
 void game_room_debug_boss(void)
 {
     if (s_boss_anchor < 0 || s_pending || s_rebuild_buf >= 0 || s_room == s_boss_anchor)
@@ -1778,7 +1782,7 @@ void game_room_reset(void)
      * so the first ordinary room transition can use the same-map path. */
     s_force_full = 0;
     s_pending = 0;
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
     s_debug_boss_entry = 0;
 #endif
     s_rebuild_buf = -1;
@@ -1955,6 +1959,16 @@ int game_room_finish_rebuild(void)
     }
 }
 
+int game_room_can_overlap_transition(void)
+{
+    int target=s_target;
+    if(!s_pending || target<0 || target>=ROOM_COUNT) return 0;
+    if(s_rooms[target].owner>=0) target=s_rooms[target].owner;
+    /* Cached commits update FB_BG and model/cache metadata only. Uncached
+     * paced rebuilds retain exclusive ownership of their chosen framebuffer. */
+    return game_background_cached_for_layout(s_rooms[target].layout,s_rooms[target].flip);
+}
+
 int game_room_commit(void)
 {
     int old_map_idx = game_world_map_index();   /* 同图判定：比池子下标，不比指针 */
@@ -2017,29 +2031,27 @@ int game_room_commit(void)
     if (s_entry_dir < 0) {
         g.x = (ARENA_X0 + ARENA_X1) / 2 - PW / 2;
         g.y = (ARENA_Y0 + ARENA_Y1) / 2 - PH / 2;
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
         if (s_debug_boss_entry) g.y = ARENA_Y1 - PH - 64;
 #endif
     } else {
         place_at_door(s_entry_dir);
     }
-#if GAME_BOSS_DEBUG
+#if GAME_BOSS_SHORTCUT
     s_debug_boss_entry = 0;
 #endif
 
     s_lock = 1;
     game_camera_snap();                 /* 换房后窗口立即对准新位置，不做过渡 */
 
-    if (same_layout) {
+    if (same_layout || game_background_ready()) {
 #if GAME_BG_COPY
-        /* The terrain is shared by normal rooms, but door ownership and
-         * special-door skins belong to the room graph. Rebuild the DDR
-         * background even when game_world_select() was skipped. */
+        /* The terrain is shared by normal rooms. Refresh just the door
+         * footprints; a map/background invalidation falls back to a rebuild. */
         {
             u32 bg0 = gpu2d_getCmdDone();
             u32 bg_cmds;
-            game_background_invalidate();
-            bg_cmds = game_background_build(FB_BG);
+            bg_cmds = game_background_refresh_doors();
             if (gpu2d_waitCmdDone(bg0 + bg_cmds, 10000000u) != 0) {
                 bsp_printf("ROOM BUILD ERROR: same-map background timeout base=%u cmds=%u done=%u\r\n",
                            bg0, bg_cmds, gpu2d_getCmdDone());
@@ -2060,10 +2072,9 @@ int game_room_commit(void)
     }
 
     {
-        int i;
         int b;
         for (b = 0; b < GAME_FB_COUNT; ++b) {
-            for (i = 0; i < N_BULLETS; ++i) g.old_bullets[b][i].active = 0;
+            game_bullets_clear_history(b);
             g.old_item[b].active = 0;
             g.old_boss[b].active = 0;
             g.old_player[b].active = 0;

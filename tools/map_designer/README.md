@@ -460,7 +460,6 @@ uv run python -m unittest discover -s tools/map_designer -p "test_*.py" -v
 | `check_game_layout.py` | 生成布局的对象位置检查 |
 | `templates/` | 内置 1×1 / 2×2 / L 模板（JSON v4 数字） |
 | `templates/custom/` | 页面保存的自定义模板 `custom_*.json` |
-| `HANDOVER.md` | 交接文档（状态、格式、模板、固件待办） |
 | `output/` | 房间 JSON v4、可选的 C 导出 |
 
 ## 已知边界

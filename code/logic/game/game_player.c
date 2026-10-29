@@ -178,6 +178,18 @@ void game_player_step(u32 keys, u32 now)
 
 /*----------------------------------------------------------------------------*/
 /*  发一发：从枪口沿 angle(1/64 圈) 出去，速度 = speed + 自机动量            */
+static unsigned int s_chili_rng = 0x6d2b79f5u;
+
+static int player_shot_type(void)
+{
+    unsigned int r;
+
+    if (!game_item_has(ITEM_CHILI)) return g.bullet_type;
+    s_chili_rng = s_chili_rng * 1664525u + 1013904223u;
+    r = s_chili_rng >> 24;
+    return (r % 100u) < CHILI_TRIGGER_PERCENT ? BULLET_CHILI : g.bullet_type;
+}
+
 static void player_shot(int angle, int speed)
 {
     int a  = angle & (ANGLE_STEPS - 1);
@@ -189,13 +201,13 @@ static void player_shot(int angle, int speed)
     /*  ★ 动量：直接加自机速度（它本来就是 1/8 像素单位）。
      *    跑动中开枪，弹道会朝走的方向偏 —— 这就是"动能"手感。  */
     game_bullet_spawn8(px, py, vx8 + g.vx8, vy8 + g.vy8,
-                       MOTION_LINE, g.bullet_type, 0);
+                       MOTION_LINE, player_shot_type(), 0);
 }
 
 /*----------------------------------------------------------------------------*/
 /*  自动开火：只有【当前朝向方向】里真的有敌人时才发，且沿朝向直射。
  *  · 背对/侧对敌人不开火，必须自己转过去；
- *  · g.fire_triple（inner_eyes）时一次发三发：正前 + 左右各 45°，速度更慢  */
+ *  · 每个 Inner Eyes 增加一条弹道，以瞄准方向为中心均匀展开。 */
 void game_player_fire(void)
 {
     int tx, ty, a;
@@ -210,13 +222,13 @@ void game_player_fire(void)
     if (!game_enemy_in_dir(g.dir, &tx, &ty)) return;   /* 朝向没怪：不放空枪 */
     (void)tx; (void)ty;
 
-    if (g.fire_triple) {
-        /* 多弹幕：正前 + 左右各偏 PLAYER_TRIPLE_SPREAD 格；速度统一用玩家弹速 */
-        player_shot(a - PLAYER_TRIPLE_SPREAD, g.stats.bullet_speed);
-        player_shot(a,                        g.stats.bullet_speed);
-        player_shot(a + PLAYER_TRIPLE_SPREAD, g.stats.bullet_speed);
-    } else {
-        player_shot(a, g.stats.bullet_speed);
+    {
+        int paths = game_player_bullet_paths();
+        int path;
+        for (path = 0; path < paths; ++path) {
+            int offset = (2 * path - (paths - 1)) * PLAYER_FAN_STEP;
+            player_shot(a + offset, g.stats.bullet_speed);
+        }
     }
 }
 

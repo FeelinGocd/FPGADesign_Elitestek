@@ -389,7 +389,10 @@ async_PingPongBuffer #(
     .rst_n                  (rst_n),
 
     //   交块之后本块不再收数（ping-pong 内部也有这道，这里再挡一道更直观）
-    .buffer_wr_en           (unpack_out_valid & bank_wr_ready & ~bank_hand_r),
+    // async_PingPongBuffer gates each selected FIFO with its own wr_full.
+    // Do not repeat bank_wr_ready here: that mux depends on both FIFO full
+    // flags and creates a same-clock full0 <-> full1 timing loop at 300 MHz.
+    .buffer_wr_en           (unpack_out_valid & ~bank_hand_r),
     .buffer_wr_data         (unpack_out_data),
     .buffer_wr_block_done   (bank_done_r),       // ★ 单拍脉冲
     .buffer_wr_block_ready  (bank_wr_ready),

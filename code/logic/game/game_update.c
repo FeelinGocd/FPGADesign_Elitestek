@@ -16,6 +16,9 @@ void game_update_step(u32 keys, u32 now)
          * must keep running so the visible-load test covers scrolling. */
         game_player_step(keys, now);
         game_camera_step();
+#if GAME_CAPACITY_AUDIT
+        game_capacity_camera(now);
+#endif
         game_bullets_stress_step();
         return;
     }

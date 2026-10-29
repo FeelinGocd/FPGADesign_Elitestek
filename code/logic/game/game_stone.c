@@ -315,54 +315,51 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
 }
 
 #if GAME_STATIC_CULL
-static int stone_rect_touches(int x, int y, int w, int h,
-                              int ox, int oy, int ow, int oh)
-{
-    return x < ox + ow && x + w > ox && y < oy + oh && y + h > oy;
-}
-
 /* A newly entering actor may cover a retained stone even when none of the
  * old sprite footprints dirtied its tile. Keep that stone in the z-sorted
  * list so the original front/behind relationship remains correct. */
-static int stone_dynamic_touches(int x, int y)
+static dirty_map_t s_stone_dynamic;
+
+static void stone_dynamic_mark(int x, int y, int w, int h)
+{
+    int tx, ty, x0, y0, x1, y1;
+    if (x + w <= 0 || y + h <= 0) return;
+    x0 = x < 0 ? 0 : x / TILE;
+    y0 = y < 0 ? 0 : y / TILE;
+    x1 = (x + w - 1) / TILE;
+    y1 = (y + h - 1) / TILE;
+    if (x1 >= GRID_W) x1 = GRID_W - 1;
+    if (y1 >= GRID_H) y1 = GRID_H - 1;
+    for (ty = y0; ty <= y1; ++ty)
+        for (tx = x0; tx <= x1; ++tx) dirty_set(s_stone_dynamic, tx, ty);
+}
+
+/* Build once, on demand, instead of scanning all entity pools for each stone.
+ * Stones occupy aligned full tiles, so these bits preserve exact overlap. */
+static void stone_dynamic_build(signed char room)
 {
     int i;
-    if (g.phase != PHASE_GAMEOVER &&
-        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE, g.x, g.y, PW, PH)) return 1;
+    dirty_clear(s_stone_dynamic);
+    if (g.phase != PHASE_GAMEOVER) stone_dynamic_mark(g.x, g.y, PW, PH);
     for (i = 0; i < N_MOBS; ++i)
-        if (g.mobs[i].active &&
-            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                               g.mobs[i].x, g.mobs[i].y - 8, 32, 40)) return 1;
+        if (g.mobs[i].active) stone_dynamic_mark(g.mobs[i].x, g.mobs[i].y - 8, 32, 40);
     if (game_bullets_alive())
         for (i = 0; i < N_BULLETS; ++i)
-            if (g.bullets[i].active &&
-                stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                                   g.bullets[i].x, g.bullets[i].y, BW, BH)) return 1;
-    if (g.item.active &&
-        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                           g.item.x, g.item.y, ITEM_W, ITEM_H)) return 1;
+            if (g.bullets[i].active) stone_dynamic_mark(g.bullets[i].x, g.bullets[i].y, BW, BH);
+    if (g.item.active) stone_dynamic_mark(g.item.x, g.item.y, ITEM_W, ITEM_H);
     for (i = 0; i < N_COINS; ++i)
-        if (g.coin_items[i].active &&
-            g.coin_items[i].room == (signed char)game_room_id() &&
-            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                               g.coin_items[i].x, g.coin_items[i].y, 24, 24)) return 1;
+        if (g.coin_items[i].active && g.coin_items[i].room == room)
+            stone_dynamic_mark(g.coin_items[i].x, g.coin_items[i].y, 24, 24);
     for (i = 0; i < N_BOMBS; ++i)
-        if (g.bombs[i].active && g.bombs[i].room == (signed char)game_room_id() &&
-            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                               g.bombs[i].x, g.bombs[i].y, BOMB_W, BOMB_H)) return 1;
-    if (g.bomb_pickup.active &&
-        g.bomb_pickup.room == (signed char)game_room_id() &&
-        stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                           g.bomb_pickup.x, g.bomb_pickup.y,
-                           BOMB_PICK_W, BOMB_PICK_H)) return 1;
+        if (g.bombs[i].active && g.bombs[i].room == room)
+            stone_dynamic_mark(g.bombs[i].x, g.bombs[i].y, BOMB_W, BOMB_H);
+    if (g.bomb_pickup.active && g.bomb_pickup.room == room)
+        stone_dynamic_mark(g.bomb_pickup.x, g.bomb_pickup.y, BOMB_PICK_W, BOMB_PICK_H);
     for (i = 0; i < N_BOMB_AIRS; ++i)
-        if (g.bomb_airs[i].active &&
-            g.bomb_airs[i].room == (signed char)game_room_id() &&
-            stone_rect_touches(x, y, STONE_SIZE, STONE_SIZE,
-                               g.bomb_airs[i].x, g.bomb_airs[i].y,
-                               BOMB_PICK_W, BOMB_PICK_H)) return 1;
-    return 0;
+        if (g.bomb_airs[i].active && g.bomb_airs[i].room == room)
+            stone_dynamic_mark(g.bomb_airs[i].x, g.bomb_airs[i].y, BOMB_PICK_W, BOMB_PICK_H);
 }
+
 #endif
 
 void game_stones_submit(int buf)
@@ -372,6 +369,9 @@ void game_stones_submit(int buf)
     int i;
 
     (void)buf;
+#if GAME_STATIC_CULL
+    int dynamic_ready = 0;
+#endif
 
     if (!L) return;
     for (i = 0; i < (int)L->n_objs; ++i) {
@@ -388,8 +388,10 @@ void game_stones_submit(int buf)
         if (!game_static_draw_force() &&
             !game_dirty_touches(x / TILE, y / TILE,
                                 (x + STONE_SIZE - 1) / TILE + 1,
-                                (y + STONE_SIZE - 1) / TILE + 1) &&
-            !stone_dynamic_touches(x, y)) continue;
+                                (y + STONE_SIZE - 1) / TILE + 1)) {
+            if (!dynamic_ready) { stone_dynamic_build(room); dynamic_ready = 1; }
+            if (!dirty_get(s_stone_dynamic, x / TILE, y / TILE)) continue;
+        }
 #endif
         rl_push(ACTOR_Z(y + STONE_SIZE), stone_draw_one, i);
     }

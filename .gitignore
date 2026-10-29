@@ -28,6 +28,29 @@ res/pic/character/_preview
 tools/img2hex/output/
 # ── 仿真：TB 源码要入库，只忽略 ModelSim 的生成物和临时目录 ─────────────────
 sim
+# Keep the clock-domain regression sources reviewable; generated work stays local.
+!sim/
+sim/*
+!sim/tb/
+sim/tb/*
+!sim/tb/ClockDomains/
+sim/tb/ClockDomains/*
+!sim/tb/ClockDomains/tb_clock_domains.v
+!sim/tb/ImageCombine/
+sim/tb/ImageCombine/*
+!sim/tb/ImageCombine/tb_imageCombine.v
+!sim/tb/TintAlpha/
+sim/tb/TintAlpha/*
+!sim/tb/TintAlpha/tb_tintAlpha.v
+!sim/tb/AlphaPipeline/
+sim/tb/AlphaPipeline/*
+!sim/tb/AlphaPipeline/tb_alpha_pipeline.v
+!sim/tb/AsyncFIFO/
+sim/tb/AsyncFIFO/*
+!sim/tb/AsyncFIFO/tb_async_fifo.v
+!sim/tb/PaletteContext/
+sim/tb/PaletteContext/*
+!sim/tb/PaletteContext/tb_palette_context.v
 
 # ── Python 环境（uv 建的虚拟环境 + 缓存；pyproject.toml / uv.lock 入库）──────
 .venv/

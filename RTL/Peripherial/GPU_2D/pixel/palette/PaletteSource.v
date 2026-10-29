@@ -24,7 +24,7 @@
 //
 //  三条路（按 flags 自己判，同一个出口）
 //      ① 普通两趟（图一 + 图二）：S_IDLE → S_READ → S_WAIT →（switched）S_READ → S_WAIT → S_IDLE
-//      ② 90° 旋转（flags[7]=ROT90 且是 PRAM 源、且不是纯色层）：S_IDLE → R_REQ → R_WAIT ⇄ R_OUT → S_WAIT
+//      ② 90° 旋转（flags[7]=ROT90 且是 PRAM 源、且不是纯色层）：R_MUL/R_ADDR 准备起点，R_REQ 首读，R_WAIT 流水收发，R_OUT 交四索引
 //         旋转时【一条行任务 = 输出一行 = 素材的一整列】：地址高 2 位 addr[31:30] 是"列号"，
 //         每取一个像素只抽 1 个字节（一拍只取 1 个索引 ⇒ 吞吐约 1/4，适合小图如子弹）。
 //      ③ 第 2 趟是【纯色层】（flags[2:0]=3，颜色合成）：本模块【一个字节都不读】——
@@ -94,7 +94,9 @@ localparam  S_IDLE = 4'd0,     // 等行任务
             S_WAIT = 4'd2,     // 等手上最后一个字被取走 + Decoder 排空（两趟之间的切换也在这）
             R_REQ  = 4'd3,     // 【旋转路】发"这一列当前落在的那个字"
             R_WAIT = 4'd4,     // 【旋转路】收字 → 只抽 1 个索引 → 攒够 4 个成一拍
-            R_OUT  = 4'd5;     // 【旋转路】把攒好的一拍喂给 Decoder
+            R_OUT  = 4'd5,     // 【旋转路】把攒好的一拍喂给 Decoder
+            R_MUL  = 4'd6,     // 锁存几何的 MX 偏移乘法
+            R_ADDR = 4'd7;     // 将偏移加到列起点，完成后才允许 BRAM 首读
 
 //==============================================================================
 // 函数
@@ -140,6 +142,7 @@ reg  [31:0]                                         index_address_r;        // �
 reg  [31:0]                                         row_src_addr_0_r;       // 第 1 趟（图一）的行首字地址（锁存）
 reg  [31:0]                                         row_src_addr_1_r;       // 第 2 趟（图二）的行首字地址（锁存）
 reg  [31:0]                                         needed_bytes_r;         // 本行要覆盖多少字节（写侧口径，两趟一样）
+reg  [15:0]                                         line_w_r;               // 锁存后的本行像素宽度，隔离旋转热路径
 reg  [31:0]                                         sent_bytes_r;           // 本趟已发出的字折合多少字节
 reg  [7:0]                                          flags_r;                // 本趟的模式位（8 位：MX 在 [5]、ROT90 在 [7]）
 reg  [23:0]                                         param_r;                // 本趟的参数（[11:0] = 源行跨距）
@@ -148,6 +151,14 @@ reg                                                 pass_r;                 // 0
 //   ---- 旋转路径的上下文（只有 ROT90 那一趟用）----
 reg                                                 rot_active_r;           // 本趟走不走旋转路
 reg  [31:0]                                         rot_row_addr_r;         // 这一列当前读到的【行】地址（每取一个像素 ± 跨距）
+reg  [31:0]                                         rot_base_addr_r;
+reg  [15:0]                                         rot_last_row_r;
+reg  [15:0]                                         rot_chain_limit_r;
+reg                                                 rot_more_r;
+reg                                                 rot_more_after_sample_r;
+reg  [15:0]                                         rot_beat_limit_r;
+reg                                                 rot_more_beats_r;
+reg  [31:0]                                         rot_offset_r;
 reg  [1:0]                                          rot_lane_r;             // 取字里的第几个字节（= 列号 0~3）
 reg  [15:0]                                         rot_stride_r;           // 源行跨距（走一行加一次）
 reg  [15:0]                                         rot_valid_count_r;      // 本行已经取到几个有效像素（对 line_w）
@@ -228,8 +239,15 @@ assign in_pass2              = pass_r & (state != S_IDLE);
 //   ★ 给 Decoder 的模式位：组合按趟选。【旋转生效时屏蔽 MX（清 bit5）】：旋转已经用
 //     rot_row_addr_r 决定了列内方向，再让 Decoder 翻一次就打架。
 wire [7:0]                                          dec_flags;
-assign dec_flags             = (in_pass2 ? flags_1 : flags_0) &
-                               ((in_pass2 ? rot_active_r : task_rot) ? 8'hdf : 8'hff);
+wire                                                decoder_context_start;
+wire                                                switched;
+// Both passes have drained before switched. Re-latch the second pass's MX
+// context without restarting the source or clearing the image row buffer.
+assign decoder_context_start = line_start | switched;
+assign dec_flags             = switched
+                             ? (flags_1 & (task_rot_1 ? 8'hdf : 8'hff))
+                             : ((in_pass2 ? flags_1 : flags_0) &
+                                ((in_pass2 ? rot_active_r : task_rot) ? 8'hdf : 8'hff));
 
 //   还能不能再发一笔读（普通路）：手上有货就先让下游取走
 wire [31:0]                                         normal_needed;
@@ -246,6 +264,24 @@ wire                                                normal_index_take;
 assign normal_index_take     = index_valid & decoder_ready;
 wire                                                rot_sample_take;
 assign rot_sample_take       = (state == R_WAIT) & index_valid;
+
+// While collecting a four-index word, request the next column pixel on the
+// same cycle that the previous synchronous RAM result is consumed. Stop at a
+// full/partial word so rot_pack_r remains stable until the decoder accepts it.
+wire [31:0]                                         rot_next_row_addr;
+assign rot_next_row_addr     = flags_r[5] ? (rot_row_addr_r - rot_stride_r)
+                                                        : (rot_row_addr_r + rot_stride_r);
+wire                                                rot_chain_request;
+wire                                                rot_more_after_sample;
+// Registered look-ahead flags keep the wide sample counter/comparator out of
+// the RAM read-enable path. They advance only when a sample is consumed.
+assign rot_more_after_sample = rot_more_after_sample_r;
+assign rot_chain_request     = rot_sample_take & (rot_pack_count_r != 2'd3)
+                               & rot_more_after_sample;
+wire                                                rot_output_request;
+assign rot_output_request    = (state == R_OUT) & decoder_ready
+                               & rot_more_beats_r
+                               & rot_more_r;
 
 //   ★★ 送给 Decoder 的那一拍：普通路是素材 RAM 出来的字；旋转路是我们攒好的字
 //      ⇒ 旋转【绕开】素材 RAM 的正常出口，Decoder 完全不知道有旋转这回事。
@@ -264,7 +300,6 @@ assign drained               = ~decoder_input_valid & ~decoder_busy;
 
 //   第 1 趟排空之后，这一拍换到第 2 趟（同时也是给下游的 line_image_next 脉冲）
 //   ★ 有第 2 层就发（第 2 层是纯色时本模块不读它，但合成级要靠这一拍进 S_COMBINE）
-wire                                                switched;
 assign switched              = (state == S_WAIT) & drained & ~pass_r & line_fx_en;
 
 //==============================================================================
@@ -274,9 +309,11 @@ assign line_image_next       = switched;
 //   ★ 两趟都排空才回 S_IDLE ⇒ 才报"能接下一行"（下一行会重装上下文）
 assign line_src1_free        = (state == S_IDLE);
 
-//   素材 RAM 读口的两个握手：普通路发读请求 / 旋转路（R_REQ 发、R_WAIT 收）
+//   素材 RAM 读口：普通路发读；旋转首读由 R_REQ 发起，后续在收数据或交包时预取。
 wire                                                ram_read_request;
-assign ram_read_request      = normal_do_read | ((state == R_REQ) & index_read_accept);
+assign ram_read_request      = normal_do_read |
+                               (((state == R_REQ) | rot_chain_request | rot_output_request)
+                                & index_read_accept);
 wire                                                ram_read_ready;
 assign ram_read_ready        = normal_index_take | (state == R_WAIT);
 
@@ -302,24 +339,26 @@ always @(*) begin
     case (state)
         //   w = 0 这种退化情况直接进等待，别在 S_READ 里空转
         //   ★ 旋转那一趟不回 S_READ，直接进 R_REQ
-        S_IDLE : if (take_task)  next_state = (needed_bytes == 32'd0) ? S_WAIT : (task_rot ? R_REQ : S_READ);
+        S_IDLE : if (take_task)  next_state = (needed_bytes == 32'd0) ? S_WAIT : (task_rot ? R_MUL : S_READ);
         S_READ : if (normal_last) next_state = S_WAIT;
         //   ---- 旋转路：一个字一个字地"沿列往下"取样，攒够 4 个就出一拍 ----
+        R_MUL  : next_state = R_ADDR;
+        R_ADDR : next_state = R_REQ;
         R_REQ  : if (index_read_accept) next_state = R_WAIT;
         R_WAIT : if (rot_sample_take) begin
-                     if ((rot_pack_count_r == 2'd3) || (rot_valid_count_r + 16'd1 >= line_w))
+                     if ((rot_pack_count_r == 2'd3) || !rot_more_after_sample)
                          next_state = R_OUT;
                      else
-                         next_state = R_REQ;
+                         next_state = index_read_accept ? R_WAIT : R_REQ;
                  end
         R_OUT  : if (decoder_ready) begin
-                     if (rot_beat_count_r + 16'd1 >= rot_total_beats_r) next_state = S_WAIT;
-                     else if (rot_valid_count_r >= line_w)              next_state = R_OUT;
-                     else                                              next_state = R_REQ;
+                     if (!rot_more_beats_r)                              next_state = S_WAIT;
+                     else if (!rot_more_r)                               next_state = R_OUT;
+                     else                                              next_state = index_read_accept ? R_WAIT : R_REQ;
                  end
         //   ---- 排空后：这一行还有图二 ⇒ 接着读第 2 趟（要读；旋转同理）；否则这一行完了 ----
         S_WAIT : if (drained)    next_state = switched
-                                             ? (my_line_1 ? (task_rot_1 ? R_REQ : S_READ) : S_IDLE)
+                                             ? (my_line_1 ? (task_rot_1 ? R_MUL : S_READ) : S_IDLE)
                                              : S_IDLE;
         default:                 next_state = S_IDLE;
     endcase
@@ -334,12 +373,21 @@ always @(posedge clk or negedge rst_n) begin
         row_src_addr_0_r    <= 32'd0;
         row_src_addr_1_r    <= 32'd0;
         needed_bytes_r      <= 32'd0;
+        line_w_r            <= 16'd0;
         sent_bytes_r        <= 32'd0;
         flags_r             <= 8'd0;
         param_r             <= 24'd0;
         pass_r              <= 1'b0;
         rot_active_r        <= 1'b0;
         rot_row_addr_r      <= 32'd0;
+        rot_base_addr_r     <= 32'd0;
+        rot_last_row_r      <= 16'd0;
+        rot_chain_limit_r   <= 16'd0;
+        rot_more_r          <= 1'b0;
+        rot_more_after_sample_r <= 1'b0;
+        rot_beat_limit_r    <= 16'd0;
+        rot_more_beats_r    <= 1'b0;
+        rot_offset_r        <= 32'd0;
         rot_lane_r          <= 2'd0;
         rot_stride_r        <= 16'd0;
         rot_valid_count_r   <= 16'd0;
@@ -361,6 +409,8 @@ always @(posedge clk or negedge rst_n) begin
                          flags_r             <= flags_0;
                          param_r             <= param_0;
                          needed_bytes_r      <= needed_bytes;
+                         line_w_r            <= line_w;
+                         rot_last_row_r      <= line_w - 16'd1;
                          sent_bytes_r        <= 32'd0;
                          pass_r              <= 1'b0;
                          rot_active_r        <= task_rot;
@@ -368,14 +418,15 @@ always @(posedge clk or negedge rst_n) begin
                          rot_stride_r        <= param_0[11:0];
                          rot_valid_count_r   <= 16'd0;
                          rot_beat_count_r    <= 16'd0;
-                         rot_total_beats_r   <= rot_total_beats_calc[15:0];
+                         // The rotated beat count is filled in R_MUL from the
+                         // registered row geometry; do not put line_w's wide
+                         // arithmetic on the line_start -> rot counter path.
+                         rot_total_beats_r   <= 16'd0;
                          rot_pack_count_r    <= 2'd0;
                          rot_pack_r          <= 32'd0;
                          //   旋转路的起点：MX 时从【这一列的下端】往上取（= 转出来的图上下翻）
                          if (task_rot)
-                             rot_row_addr_r <= flags_0[5]
-                                             ? ({2'd0, src_addr_0[29:0]} + ({16'd0, line_w - 16'd1} * param_0[11:0]))
-                                             : {2'd0, src_addr_0[29:0]};
+                             rot_base_addr_r <= {2'd0, src_addr_0[29:0]};
                      end
 
             // ---- 普通路：按拍发读地址（★ 素材 RAM 读口受理了 read_accept 才算数）----
@@ -385,8 +436,32 @@ always @(posedge clk or negedge rst_n) begin
                          sent_bytes_r    <= sent_bytes_r + WORD_BYTES;
                      end
 
+            // The source/context, DSP product, and final address each cross a
+            // register. No address bypass from this arithmetic to the BRAM.
+            R_MUL : begin
+                         rot_offset_r <= rot_last_row_r * rot_stride_r;
+                         rot_total_beats_r <= ((needed_bytes_r + 32'd11) / WORD_BYTES);
+                         rot_chain_limit_r <= line_w_r - 16'd2;
+                         rot_more_r <= (line_w_r != 0);
+                         rot_more_after_sample_r <= (line_w_r > 16'd1);
+                    end
+            R_ADDR : begin
+                         rot_row_addr_r <= flags_r[5]
+                                      ? (rot_base_addr_r + rot_offset_r)
+                                      : rot_base_addr_r;
+                         // The total was registered in R_MUL. Cache whether
+                         // another beat follows, including zero-padded tails.
+                         rot_beat_limit_r <= rot_total_beats_r - 16'd2;
+                         rot_more_beats_r <= (rot_total_beats_r > 16'd1);
+                     end
+
             // ---- 旋转路：收一个字 ⇒ 只抽 1 个字节（这一列当前那个像素）⇒ 攒 4 个成一拍 ----
             R_WAIT : if (rot_sample_take) begin
+                         rot_more_r <= rot_more_after_sample_r;
+                         // For cnt < w, cnt+2 < w is cnt < w-2. The held flag
+                         // guards w=0/1, where the limit intentionally wraps.
+                         rot_more_after_sample_r <= rot_more_after_sample_r
+                                                & (rot_valid_count_r < rot_chain_limit_r);
                          case (rot_pack_count_r)
                              2'd0    : rot_pack_r <= {24'd0, index_data[(rot_lane_r*8)+:8]};
                              2'd1    : rot_pack_r <= {16'd0, index_data[(rot_lane_r*8)+:8], rot_pack_r[7:0]};
@@ -397,17 +472,18 @@ always @(posedge clk or negedge rst_n) begin
                          if (rot_pack_count_r == 2'd3) rot_pack_count_r <= 2'd0;
                          else                          rot_pack_count_r <= rot_pack_count_r + 1'b1;
                          //   ★ 沿【列】往下走一行：这正是"旋转"和"普通按行走"的分界
-                         rot_row_addr_r <= flags_r[5] ? (rot_row_addr_r - rot_stride_r)
-                                                      : (rot_row_addr_r + rot_stride_r);
+                         rot_row_addr_r <= rot_next_row_addr;
                      end
 
             // ---- 旋转路：交出一拍给 Decoder ----
             R_OUT : if (decoder_ready) begin
-                        if (rot_beat_count_r + 16'd1 < rot_total_beats_r) begin
+                        rot_more_beats_r <= rot_more_beats_r
+                                         & (rot_beat_count_r < rot_beat_limit_r);
+                        if (rot_more_beats_r) begin
                             rot_beat_count_r <= rot_beat_count_r + 1'b1;
                             rot_pack_count_r <= 2'd0;
                             //   已经取够 line_w 个 ⇒ 后面几拍补 0（行尾多出来的那些会被写侧丢掉）
-                            if (rot_valid_count_r >= line_w) rot_pack_r <= 32'd0;
+                            if (!rot_more_r) rot_pack_r <= 32'd0;
                         end
                     end
 
@@ -420,17 +496,15 @@ always @(posedge clk or negedge rst_n) begin
                          sent_bytes_r        <= 32'd0;
                          pass_r              <= 1'b1;
                          rot_active_r        <= task_rot_1;
-                         rot_lane_r          <= src_addr_1[31:30];
+                         rot_lane_r          <= row_src_addr_1_r[31:30];
                          rot_stride_r        <= param_1[11:0];
                          rot_valid_count_r   <= 16'd0;
                          rot_beat_count_r    <= 16'd0;
-                         rot_total_beats_r   <= rot_total_beats_calc[15:0];
+                         rot_total_beats_r   <= 16'd0;
                          rot_pack_count_r    <= 2'd0;
                          rot_pack_r          <= 32'd0;
                          if (task_rot_1)
-                             rot_row_addr_r <= flags_1[5]
-                                             ? ({2'd0, src_addr_1[29:0]} + ({16'd0, line_w - 16'd1} * param_1[11:0]))
-                                             : {2'd0, src_addr_1[29:0]};
+                             rot_base_addr_r <= {2'd0, row_src_addr_1_r[29:0]};
                      end
             default: ;
         endcase
@@ -453,8 +527,9 @@ PaletteRAM #(
     .clear                                      (line_start),               // 行边界：丢掉上一行可能残留的那个字
     .read_request                               (ram_read_request),
     .read_accept                                (index_read_accept),
-    .read_address                               ((state == R_REQ) || (state == R_WAIT)
-                                                 ? rot_row_addr_r[RAM_ADDRESS_WIDTH-1:0]
+    .read_address                               ((state == R_REQ) || (state == R_WAIT) || (state == R_OUT)
+                                                 ? (rot_chain_request ? rot_next_row_addr[RAM_ADDRESS_WIDTH-1:0]
+                                                                      : rot_row_addr_r[RAM_ADDRESS_WIDTH-1:0])
                                                  : index_address_r[RAM_ADDRESS_WIDTH-1:0]),
     .read_data                                  (index_data),
     .read_valid                                 (index_valid),
@@ -474,7 +549,7 @@ PaletteDecoder #(
 ) u_PaletteDecoder (
     .clk                                        (clk),
     .rst_n                                      (rst_n),
-    .line_start                                 (line_start),
+    .line_start                                 (decoder_context_start),
     .index_data                                 (decoder_input_data),
     .index_valid                                (decoder_input_valid),
     .index_ready                                (decoder_ready),

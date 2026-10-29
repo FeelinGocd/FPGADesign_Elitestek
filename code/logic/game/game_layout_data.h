@@ -1,6 +1,6 @@
 /* 自动生成，别手改 —— 源：tools/map_designer/output/<房间名>.json
  * 生成：python tools/map_designer/serve.py --emit-layouts --apply
- * sha256:e5140c94af43dac5a5d3c5dbaeb9808e5971c43b34ef13822f70ef82ac9bafa7
+ * sha256:6dccc9ca247bf253d5537483072f32c24008089449d3777e557b3917063520c8
  *
  *  1x1_000              40×23  map=0          0 个对象
  *  1x1_001              40×23  map=0          37 个对象
@@ -8,8 +8,8 @@
  *  L_001                45×35  共享地形=3         66 个对象
  *  map_1x1_type0        40×23  map=0          37 个对象
  *  map_L                45×35  共享地形=3         0 个对象
- *  map_hidden_normal    40×23  map=2          0 个对象
- *  room_2x2             45×35  map=1          0 个对象
+ *  map_hidden_normal    40×23  共享地形=6         0 个对象
+ *  room_2x2             45×35  共享地形=7         0 个对象
  */
 #ifndef GAME_LAYOUT_DATA_H
 #define GAME_LAYOUT_DATA_H
@@ -39,6 +39,8 @@ extern const obj_place_t L_map_1x1_type0[];
 extern const obj_place_t L_map_L[];
 #define T_map_L T_L_001
 extern const obj_place_t L_map_hidden_normal[];
+extern const layout_terrain_t T_map_hidden_normal;
 extern const obj_place_t L_room_2x2[];
+extern const layout_terrain_t T_room_2x2;
 
 #endif /* GAME_LAYOUT_DATA_H */

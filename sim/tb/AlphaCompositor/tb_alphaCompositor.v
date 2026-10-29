@@ -35,7 +35,7 @@ always #5 clk = ~clk;
 //==============================================================================
 // DUT 信号
 //==============================================================================
-reg  [6:0]      line_flags;                      // ★ 模式就在这里面（flags[2:0]），不再有 line_src_en
+reg  [7:0]      line_flags;                      // flags[2:0] mode; [5] MX; [7] ROT90
 reg             line_done;                       // 写侧完成（单拍脉冲）：源手上的尾巴靠它放开
 reg  [23:0]     line_param;
 reg             line_start;
@@ -68,6 +68,7 @@ Compositor #(
     .line_flags     (line_flags),
     .line_done      (line_done),
     .line_param     (line_param),
+    .line_src_addr_last (32'd0),
     .line_fx_en     (line_fx_en),       // ★ 新端口：0 = 合成级旁路（本 TB 单路）
     .line_image_next     (line_image_next),       // ★ 新端口：合成级切趟用，本 TB 恒 0
     .src0_data      (src0_data),
@@ -107,7 +108,7 @@ function [7:0] blend_ch;
     begin
         d = (fg > bg) ? (fg - bg) : (bg - fg);
         p = d * al;
-        q = (p + 16'd1 + (p >> 8)) >> 8;
+        q = p / 255; // Independent integer division, not the RTL shift/add formula.
         blend_ch = (fg > bg) ? (bg + q[7:0]) : (bg - q[7:0]);
     end
 endfunction
@@ -167,7 +168,9 @@ task do_line;
     input [3:0] doff;
     begin
         @(negedge clk);
-        line_flags    = {2'b00, ck, pal, mode};     // [6:5]=镜像（本 TB 不开）, [4]=ck, [3]=src, [2:0]=模式
+        line_flags    = {3'b000, ck, pal, mode};
+        src0_valid = 1'b0;
+        src1_valid = 1'b0;
         line_done     = 1'b0;
         //   ★ 目的地址这根线本模块不要了（拍内相位归 DDRPacker），doff 只是保留参数
         line_param    = 24'h336699;
@@ -178,7 +181,9 @@ task do_line;
     end
 endtask
 
-//   摆一拍数据（组合逻辑，稳定后就能查输出）
+// Hold identical source words while the elastic alpha path fills. For bypass
+// modes the original combinational checks remain valid; alpha checks wait for
+// a valid output word rather than assuming zero-cycle arithmetic latency.
 task beat;
     input [95:0] bg;
     input [95:0] fg;
@@ -186,11 +191,23 @@ task beat;
     input [11:0] fm;
     input        v0;
     input        v1;
+    integer timeout;
     begin
         @(negedge clk);
         src0_data = bg;   src0_valid = v0;
         src1_data = fg;   src1_alpha = al;   src1_mask = fm;   src1_valid = v1;
         #1;
+        if ((line_flags[2:0] == 3'd2 || line_flags[2:0] == 3'd4) && v0 && v1) begin
+            timeout = 0;
+            while (!pixel_valid && timeout < 100) begin
+                @(negedge clk); #1;
+                timeout = timeout + 1;
+            end
+            if (!pixel_valid) begin
+                err_cnt = err_cnt + 1;
+                $display("FAIL: alpha compositor output handshake timeout");
+            end
+        end
     end
 endtask
 
@@ -236,8 +253,8 @@ endtask
 //   ★ 字节序：像素 i 占 [i*24 +: 24]，【低字节 = B】
 `define PX(r,g,b) {r, g, b}
 
-localparam [95:0] BG_A = { `PX(100,110,120), `PX(70,80,90), `PX(40,50,60), `PX(10,20,30) };
-localparam [95:0] FG_A = { `PX(130,140,150), `PX(255,255,255), `PX(0,0,0), `PX(200,210,220) };
+localparam [95:0] BG_A = 96'h646e78_46505a_28323c_0a141e;
+localparam [95:0] FG_A = 96'h828c96_ffffff_000000_c8d2dc;
 
 //==============================================================================
 // 主流程
@@ -248,7 +265,7 @@ reg [11:0] ck_win;
 
 initial begin
     clk = 1'b0; rst_n = 1'b0; err_cnt = 0; case_no = 0;
-    line_start = 1'b0; line_flags = 7'd0; line_done = 1'b0;
+    line_start = 1'b0; line_flags = 8'd0; line_done = 1'b0;
     line_fx_en = 1'b0; line_image_next = 1'b0;
     line_param = 24'd0;
     src0_data = 96'd0; src0_valid = 1'b0;
@@ -319,7 +336,7 @@ initial begin
     chk(FG_A, 12'hfff, 1'b1, "v=11");
 
     //------------------------------------------------------------------
-    $display("---- 6) 取数节奏 : rd_en = 本行用到那一路 & pixel_ready ----");
+    $display("---- 6) elastic source pairing, bounded backpressure and selected source ----");
     case_no = 6;
     do_line(3'd2, 1'b1, 1'b0, 4'd0);
     beat(BG_A, FG_A, 32'hFFFFFFFF, 12'hfff, 1'b1, 1'b1);
@@ -328,13 +345,18 @@ initial begin
         err_cnt = err_cnt + 1;
         $display("  [FAIL] rd_en : 两路都该取 (got %b/%b)", src0_rd_en, src1_rd_en);
     end
-    pixel_ready = 1'b0; #1;
+    // Elastic slots may legally absorb more input after downstream stops.
+    // Once every slot is occupied, both paired sources must be stopped.
+    pixel_ready = 1'b0;
+    repeat (20) @(negedge clk);
+    #1;
     if (src0_rd_en !== 1'b0 || src1_rd_en !== 1'b0) begin
         err_cnt = err_cnt + 1;
-        $display("  [FAIL] rd_en : 下游不要就不该取 (got %b/%b)", src0_rd_en, src1_rd_en);
+        $display("  [FAIL] rd_en : full elastic path did not stop sources (got %b/%b)", src0_rd_en, src1_rd_en);
     end
     pixel_ready = 1'b1;
     do_line(3'd1, 1'b1, 1'b0, 4'd0);                              // 只用源② ⇒ 源① 一根都不取
+    beat(BG_A, FG_A, 32'hFFFFFFFF, 12'hfff, 1'b1, 1'b1);
     pixel_ready = 1'b1; #1;
     if (src0_rd_en !== 1'b0 || src1_rd_en !== 1'b1) begin
         err_cnt = err_cnt + 1;
@@ -349,6 +371,22 @@ initial begin
     if (line_buf_free !== 1'b1) begin
         err_cnt = err_cnt + 1;
         $display("  [FAIL] line_buf_free : 两路都 free 应该是 1");
+    end
+    // The two sources can report free while accepted pixels are still waiting
+    // inside the elastic alpha pipeline. That pending payload also owns the row.
+    pixel_ready = 1'b0;
+    beat(BG_A, FG_A, 32'hFF80_4000, 12'hfff, 1'b1, 1'b1);
+    @(negedge clk); src0_valid = 1'b0; src1_valid = 1'b0; #1;
+    if (line_buf_free !== 1'b0) begin
+        err_cnt = err_cnt + 1;
+        $display("  [FAIL] line_buf_free ignored queued alpha pixels");
+    end
+    pixel_ready = 1'b1;
+    repeat (24) @(negedge clk);
+    #1;
+    if (line_buf_free !== 1'b1) begin
+        err_cnt = err_cnt + 1;
+        $display("  [FAIL] line_buf_free did not recover after pipeline drained");
     end
     line_src0_free = 1'b0; line_src1_free = 1'b1; #1;
     if (line_buf_free !== 1'b0) begin

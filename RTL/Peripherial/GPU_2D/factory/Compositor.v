@@ -33,15 +33,16 @@
 //  为什么 bank 不在这里
 //      bank 的唯一理由是吸收 DDR 读的突发与空隙，而"谁去读 DDR"是各源自己的事；
 //      同理每路源的数据【格式也归它自己】（帧缓存读回是 RGB888，调色板译码是 ARGB）。
-//      合成器只管"几路已经对齐好、格式统一的像素流怎么合"，自己不存数据。
+//      合成器只管"几路已经对齐好、格式统一的像素流怎么合"；alpha 前的弹性寄存器
+//      保存配对后的前景、背景和旁路位，隔开 tint 与 alpha 的组合长路径。
 //      ⇒ 加一路源 = 加一个 pixel/ 模块 + 加一路输入端口，本模块只多一行选路。
 //
 //  为什么这里不管"本行几拍"
 //      ★ 拍数（16 字节一拍）只由 WriteController 算一份：它按行几何决定"本行取几拍"。
 //        合成器只管一路一路地合；多读回来的那点尾巴由 DDRPacker 在行边界丢掉。
 //        同一件事只算一遍，就不会出现两个模块各算一套、边界对不上的情况。
-//      ★ 合成器自己是【无状态】的（只有行任务那几个锁存），所以它对发送节奏
-//        没有任何要求 —— 要表态 free 的是"有缓冲的那几级"（各源 + 写侧）。
+//      ★ 合成寄存器按 valid/ready 握手；行尾清掉预取的尾拍后才允许下一行。
+//        本行拍数仍由写侧统一计算，合成器不另算几何。
 //
 //  常数色的相位：本模块【完全不管】，也不需要管（★ 为什么）
 //      本模块只保证一件事：这一拍 4 个像素按 B,G,R 原样铺，流的第 0 个字节
@@ -153,6 +154,9 @@ wire                                line_imgRow_free;      // 合成级缓冲空
 // ---- alphaBlending inst：前景 = 合成结果，背景 = 源① ----
 wire [PIXEL_WIDTH-1:0]              blend_data;
 wire [PIXEL_BYTES-1:0]              blend_mask;
+wire                                blend_in_ready;
+wire                                blend_out_valid;
+wire                                blend_pipeline_free;
 
 //==============================================================================
 // wire / reg：本模块内部
@@ -169,6 +173,7 @@ reg  [2:0]                          fx_tone_r;      // 色调模式 line_param[2
 reg  [7:0]                          fx_strength_r;  // 强度     line_param[19:12]
 reg                                 fx_over_r;      // 1 = 只上层在上（默认）；bit20=0 时为 1
 reg                                 row_done_r;     // 本行写侧已完成（line_done 锁一拍用）
+reg                                 line_active_r;  // 行边界过寄存器，隔离 CmdExec 到源读使能路径
 
 // ---- 选路 ----
 wire [PIXEL_WIDTH-1:0]              fill_data;      // 常数色源的"一拍 4 个像素"
@@ -176,11 +181,26 @@ wire                                src_used;       // 本行要不要源（任�
 wire                                sel_src1;       // 本行选的是源②（调色板）
 wire                                alpha_mode;     // 两路同时用 ⇒ 走混合
 
+// An elastic register separates tint from alpha arithmetic. Capture foreground
+// and background on the same handshake, then hold every sideband under stalls.
+reg  [PIXEL_WIDTH-1:0]              blend_fg_r;
+reg  [PIXEL_WIDTH-1:0]              blend_bg_r;
+reg  [PIXELS*ALPHA_WIDTH-1:0]       blend_alpha_r;
+reg  [PIXEL_BYTES-1:0]              blend_fg_mask_r;
+reg                                 blend_valid_r;
+wire                                blend_slot_ready;
+wire                                blend_input_take;
+
 //==============================================================================
 // assign：子模块 ↔ 本模块的连线（★ 一行一条；左边永远是【被驱动】的那一侧）
 //==============================================================================
-//   ★ 本模块取前景一拍 = 合成级的 imgCombine_ready；理由见下面"取数门控"那段
-assign  imgCombine_ready    = src_en_r[1] & ((pixel_ready & pixel_valid) | row_done_r);
+//   Alpha consumes both inputs into the same elastic slot; bypass modes keep
+//   their original direct handshake. A full slot only advances with downstream.
+assign  blend_slot_ready    = ~blend_valid_r | blend_in_ready;
+assign  blend_input_take    = alpha_mode & imgCombine_valid & src0_valid
+                            & blend_slot_ready & line_active_r & ~row_done_r;
+assign  imgCombine_ready    = src_en_r[1] & ((alpha_mode ? blend_input_take
+                                                                       : (pixel_ready & pixel_valid)) | row_done_r);
 //   ★ 合成级回给素材源的取数（它内部就是 source_ready）
 assign  src1_rd_en          = imgCombine_srcReady;
 
@@ -221,8 +241,8 @@ assign  pixel_data          = alpha_mode      ? blend_data          // 混合：
                             : src_en_r[1]     ? imgCombine_data     // 源②（单图 = 那一张；合成 = 合成结果）
                             : src_en_r[0]     ? src0_data           // 源①
                             :                   fill_data;
-//   混合模式下两路都要有货才算一拍有效
-assign  pixel_valid         = alpha_mode      ? (imgCombine_valid & src0_valid)
+//   Alpha outputs only a registered pair; other modes retain their bypass.
+assign  pixel_valid         = alpha_mode      ? (blend_out_valid & line_active_r & ~row_done_r)
                             : src_en_r[1]     ? imgCombine_valid
                             : src_en_r[0]     ? src0_valid
                             :                   1'b1;               // 常数色要多少有多少
@@ -232,21 +252,22 @@ assign  pixel_valid         = alpha_mode      ? (imgCombine_valid & src0_valid)
 //     ② 只有源②：用源给的掩码（ck 判在源里 / 合成级按 line_colorKey_en 一处 gate）
 //     ③ 其余（FILL / BLIT）：全 1（每个字节都写）
 assign  pixel_mask          = alpha_mode
-                            ? (blend_mask & (src_en_r[1] ? imgCombine_mask : {PIXEL_BYTES{1'b1}}))
+                            ? blend_mask
                             : (src_en_r[1] ? imgCombine_mask : {PIXEL_BYTES{1'b1}});
 
 //==============================================================================
 // ★★ 取数门控：什么时候才把源手上那一拍取走（两路同时用时踩过，上板卡死）
 //------------------------------------------------------------------------------
-//   下游【确实收下】这一拍的条件 = pixel_valid & pixel_ready —— 打包器就是这么算的。
-//   ⇒ pop 必须用【同一个条件】。少一路都不能 pop：
+//   alpha 的两路 pop 以 blend_input_take 为准，配对存进寄存器；
+//   非 alpha 模式以打包器 pixel_valid & pixel_ready 为准。少一路都不能 pop：
 //      alpha 时 PRAM 源 2 拍就到、DDR 背景还在等 AXI 读回来 —— 中间这几拍
 //      如果"只要下游想收就 pop"，先到的那一路就被取走但没人要地丢掉了 ⇒ 整条链卡死。
 //   + row_done_r：本行写侧完成之后，源手上剩的都是写侧不要的尾巴 ⇒ 各取各的丢掉，
 //     好让 line_src0_free / line_src1_free 拉高（谁多出一拍谁的 free 就永远不回来）。
 //     ★ line_start 清 row_done_r；line_done 是单拍脉冲，所以锁一下。
 //==============================================================================
-assign  src0_rd_en          = src_en_r[0] & ((pixel_ready & pixel_valid) | row_done_r);
+assign  src0_rd_en          = src_en_r[0] & ((alpha_mode ? blend_input_take
+                                                                      : (pixel_ready & pixel_valid)) | row_done_r);
 
 //==============================================================================
 // assign：各源 free 汇总（→ CmdExec 的发送节奏）
@@ -257,8 +278,36 @@ assign  src0_rd_en          = src_en_r[0] & ((pixel_ready & pixel_valid) | row_d
 //     单图 / FILL 命令合成级是旁路的 ⇒ line_imgRow_free 恒 1 ⇒ 和以前一样。
 //==============================================================================
 assign  line_buf_free       = ~src_used
-                            | (alpha_mode ? (line_src0_free & line_src1_free & line_imgRow_free)
+                            | (alpha_mode ? (line_src0_free & line_src1_free & line_imgRow_free
+                                             & ~blend_valid_r & blend_pipeline_free)
                                           : (sel_src1 ? (line_src1_free & line_imgRow_free) : line_src0_free));
+
+//==============================================================================
+// The writer's line_done ends the useful payload. Discard a prefetched tail
+// beat there; row_done_r separately drains each source until the next line.
+// line_start also flushes the stage so no prior-row payload can escape.
+//==============================================================================
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        blend_fg_r      <= {PIXEL_WIDTH{1'b0}};
+        blend_bg_r      <= {PIXEL_WIDTH{1'b0}};
+        blend_alpha_r   <= {(PIXELS*ALPHA_WIDTH){1'b0}};
+        blend_fg_mask_r <= {PIXEL_BYTES{1'b0}};
+        blend_valid_r   <= 1'b0;
+    end
+    else if (line_start || line_done || row_done_r || !alpha_mode) begin
+        blend_valid_r <= 1'b0;
+    end
+    else if (blend_slot_ready) begin
+        blend_valid_r <= blend_input_take;
+        if (blend_input_take) begin
+            blend_fg_r      <= imgCombine_data;
+            blend_bg_r      <= src0_data;
+            blend_alpha_r   <= imgCombine_alpha;
+            blend_fg_mask_r <= imgCombine_mask;
+        end
+    end
+end
 
 //==============================================================================
 // 时序逻辑：只在行开始采一次上下文
@@ -273,6 +322,7 @@ always @(posedge clk or negedge rst_n) begin
         fx_strength_r <= 8'd0;
         fx_over_r     <= 1'b1;
         row_done_r <= 1'b0;
+        line_active_r <= 1'b0;
     end
     else if (line_start) begin
         flags_r    <= line_flags;
@@ -283,9 +333,11 @@ always @(posedge clk or negedge rst_n) begin
         fx_strength_r <= line_param[19:12];
         fx_over_r     <= ~line_param[20];   // bit=0(默认) = 特效层在上 = 老行为
         row_done_r <= 1'b0;                     // 新的一行：写完了重新算
+        line_active_r <= 1'b1;
     end
     else if (line_done) begin
         row_done_r <= 1'b1;                     // 单拍脉冲 ⇒ 锁住给取数门控用
+        line_active_r <= 1'b0;
     end
 end
 
@@ -330,11 +382,21 @@ alphaBlending #(
     .BYTES_PER_PIXEL                    (BYTES_PER_PIXEL    ),
     .ALPHA_WIDTH                        (ALPHA_WIDTH        )
 ) u_alphaBlending (
-    .fg_data                            (imgCombine_data    ),   // 前景 = 合成结果（单图时 = 源② 那张图）
-    .fg_alpha                           (imgCombine_alpha   ),   // 它的 α（旁路，不并进像素流）
-    .bg_data                            (src0_data          ),   // 背景 = 源①（DDR 读回的目的像素）
+    .clk                                (clk                ),
+    .rst_n                              (rst_n              ),
+    .line_start                         (line_start         ),
+    .line_done                          (line_done          ),
+    .fg_data                            (blend_fg_r         ),
+    .fg_alpha                           (blend_alpha_r      ),
+    .bg_data                            (blend_bg_r         ),
+    .fg_mask                            (blend_fg_mask_r    ),
+    .in_valid                           (blend_valid_r & line_active_r & ~row_done_r),
+    .in_ready                           (blend_in_ready      ),
     .blend_data                         (blend_data         ),
-    .blend_mask                         (blend_mask         )
+    .blend_mask                         (blend_mask         ),
+    .out_valid                          (blend_out_valid    ),
+    .out_ready                          (pixel_ready        ),
+    .pipeline_free                      (blend_pipeline_free)
 );
 
 endmodule

@@ -124,12 +124,22 @@ wire [BEAT_W-1:0]                               base_beat;      // 从缓冲里�
 wire [ADDR_W-1:0]                               rd_addr_go;     // 这一拍要发的读地址
 wire                                            rd_en_go;       // 这一拍发读
 wire                                            base_ok;        // 这个读地址还在写过的范围里
+wire [BEAT_W-1:0]                               raw_cur_beat;
+wire [BEAT_W-1:0]                               raw_base_beat;
+wire                                            raw_mix_valid;
+wire                                            mix_ready;
+reg [BEAT_W-1:0]                                cur_beat_r, base_beat_r;
+reg                                             mix_valid_r;
+wire                                            operand_ready;
+reg                                             operand_valid_r;
+wire                                            product_ready;
+reg                                             product_valid_r;
 
 //==============================================================================
 // 判断组合条件
 //==============================================================================
 assign comb_on              = line_fx_en;                                  // 有第二张图才走合成
-assign line_imgRow_free     = ~comb_on | (state == S_EMPTY);               // 缓冲空着才允许接下一行
+assign line_imgRow_free     = ~comb_on | ((state == S_EMPTY) & ~mix_valid_r & ~operand_valid_r & ~product_valid_r);
 
 //   写缓冲那一拍：在 S_FILL 里取到一拍就往里写（这一段本来也不出数）
 assign fill_take            = (state == S_FILL) & source_valid;
@@ -141,7 +151,11 @@ assign fill_take            = (state == S_FILL) & source_valid;
 //   ★★ imgCombine_valid 【绝不能】看 imgCombine_ready：下游（Compositor）的取数条件
 //      （老代码的 src1_valid 来自源里寄存的一拍，所以没这个环；这里必须照做）
 //   ★ 合成这一拍真的往前走一步（纯色层自己造货 ⇒ 不看 source_valid）
-assign mix_step             = (state == S_COMBINE) & (line_solid_en ? 1'b1 : source_valid) & imgCombine_ready;
+assign raw_mix_valid        = (state == S_COMBINE) & (line_solid_en ? base_ok : source_valid);
+assign product_ready        = (~product_valid_r | imgCombine_ready) & ~line_start;
+assign operand_ready        = (~operand_valid_r | product_ready) & ~line_start;
+assign mix_ready            = (~mix_valid_r | operand_ready) & ~line_start;
+assign mix_step             = raw_mix_valid & mix_ready;
 assign take_in              = (state == S_FILL) ? source_valid : mix_step;
 //   ★★ S_FILL 那一趟【永远】要把图一收下来（不管上层是不是纯色层）：
 //      写成"纯色就一律不取"的话，图一那一趟会卡死在第一拍上 —— source_valid 一直有效、
@@ -149,7 +163,7 @@ assign take_in              = (state == S_FILL) ? source_valid : mix_step;
 //      也等不到 line_image_next ⇒ 这一行永远完不成（板上就是"整块卡住"）。
 //      纯色层要挡的只是【S_COMBINE 那一趟】：那一趟没有上游，全靠自己数拍数。
 assign source_ready         = comb_on ? ((state == S_FILL)    ? 1'b1
-                                       : (state == S_COMBINE) ? (line_solid_en ? 1'b0 : imgCombine_ready)
+                                       : (state == S_COMBINE) ? (line_solid_en ? 1'b0 : mix_ready)
                                        :                        1'b0)
                                       : imgCombine_ready;
 
@@ -163,8 +177,9 @@ assign solid_beat           = {line_solid_alpha, {PIXEL_BYTES{1'b0}}, line_solid
 //   ★★ 纯色层只在【合成那一趟（S_COMBINE）】顶上来：填充那一趟（S_FILL）必须存【图一】的真身，
 //      否则缓冲里存的全是"纯色 + 掩码 0"⇒ 出口掩码恒 0 ⇒ 一个字节都写不进去
 //      （症状：闪红那一段画完但屏幕上一个字节都没变，行照样 line_done）。
-assign cur_beat             = (line_solid_en & (state == S_COMBINE))
+assign raw_cur_beat         = (line_solid_en & (state == S_COMBINE))
                             ? solid_beat : {source_alpha, source_mask, source_data};
+assign cur_beat             = cur_beat_r;
 
 //   ★★ 缓冲读：发读是【组合】的（不是寄存器发出）
 //      读是同步的 ⇒ 这一拍发的读，数据下一个沿到。而下一拍的"底图"必须下一拍一来就能用，
@@ -178,7 +193,8 @@ assign rd_addr_go           = line_image_next ? {ADDR_W{1'b0}} : (rd_ptr_r + 1'b
 assign rd_en_go             = line_image_next | (mix_step & base_ok);
 assign base_ok              = (rd_ptr_r < wr_ptr_r);
 //   底图：正常就用读出来的那一拍；越界就当成"什么都没有"（颜色全由上面那张决定）
-assign base_beat            = (state == S_COMBINE) ? rd_beat_r : {BEAT_W{1'b0}};
+assign raw_base_beat        = (state == S_COMBINE) ? rd_beat_r : {BEAT_W{1'b0}};
+assign base_beat            = base_beat_r;
 
 //==============================================================================
 // 合成：逐字节选颜色 + 掩码相或 + 逐像素选 α（见文件头"掩码"那段）
@@ -198,10 +214,14 @@ for (gi = 0; gi < PIXEL_BYTES; gi = gi + 1) begin : g_byte
     assign base_wr_en = line_colorKey_en ? base_beat[PIXEL_WIDTH + gi] : 1'b1;
     //   ★ 逐字节 tint 一级（只在"上面那层是纯色 + 开了色调模式"时生效）：
     //       下层 lo = 行缓冲里那张图，上层 C = 纯色层（cur_beat），k = 浓度
-    wire [7:0]  lo_b = base_beat[gi*8 +: 8];
-    wire [7:0]  up_b = cur_beat[gi*8 +: 8];
-    wire [7:0]  k_b  = line_solid_alpha[7:0];
-    wire [7:0]  d_abs   = (up_b >= lo_b) ? (up_b - lo_b) : (lo_b - up_b);
+    wire [7:0]  lo_b;
+    wire [7:0]  up_b;
+    wire [7:0]  k_b;
+    wire [7:0]  d_abs;
+    assign lo_b = base_beat[gi*8 +: 8];
+    assign up_b = cur_beat[gi*8 +: 8];
+    assign k_b = line_solid_alpha[7:0];
+    assign d_abs = (up_b >= lo_b) ? (up_b - lo_b) : (lo_b - up_b);
     //   ★★ 四种色调【共用一级乘法器】：把"被乘数 / 乘数"按模式 mux 好再乘一次 ——
     //        插值   = |C − p| · k     加光 = C · k
     //        乘系数 = p · k           正片叠底 = p · C
@@ -210,31 +230,71 @@ for (gi = 0; gi < PIXEL_BYTES; gi = gi + 1) begin : g_byte
     //      mux 之后一拍只有 12 个，和 α 那一级一个量级（12 个）。
     //   ★ 乘积必须先落到 16 位再取高位：Verilog 里移位【不】把上下文宽度传给左操作数，
     //     写成 (a*b)>>8 会先把乘积截成 8 位（老代码用 wire [15:0] 也是这个道理）。
-    wire [7:0]  mul_a   = (line_tint == 3'd1) ? d_abs :
-                          (line_tint == 3'd2) ? up_b  : lo_b;
-    wire [7:0]  mul_b   = (line_tint == 3'd4) ? up_b  : k_b;
-    wire [15:0] q_tint  = mul_a * mul_b;
-    wire [7:0]  q_t8    = q_tint[15:8];                                 // ÷255 用 >>8 近似（全工程口径）
-    wire [7:0]  t_dye   = (up_b >= lo_b) ? (lo_b + q_t8) : (lo_b - q_t8); // 插值：往 C 偏
-    wire [8:0]  t_add_s = lo_b + q_t8;
-    wire [7:0]  t_add   = t_add_s[8] ? 8'hFF : t_add_s[7:0];           // ★ 饱和，别回绕
-    wire [7:0]  t_out   = (line_tint == 3'd1) ? t_dye  :
+    wire [7:0]  mul_a;
+    wire [7:0]  mul_b;
+    wire [15:0] q_tint;
+    reg [7:0] mul_a_r, mul_b_r;
+    reg [7:0] lo_operand_r, mix_sel_operand_r;
+    reg up_ge_lo_operand_r, mask_operand_r;
+    reg [15:0] q_tint_r;
+    reg [7:0] lo_r, mix_sel_r;
+    reg up_ge_lo_r, mask_r;
+    wire [7:0]  q_t8;
+    wire [7:0]  t_dye;
+    wire [8:0]  t_add_s;
+    wire [7:0]  t_add;
+    wire [7:0]  t_out;
+    wire [7:0]  mix_sel;
+    assign mul_a = (line_tint == 3'd1) ? d_abs :
+                   (line_tint == 3'd2) ? up_b : lo_b;
+    assign mul_b = (line_tint == 3'd4) ? up_b : k_b;
+    assign q_tint = mul_a_r * mul_b_r;
+    assign q_t8 = q_tint_r[15:8];                                  // same >>8 rounding
+    assign t_dye = up_ge_lo_r ? (lo_r + q_t8) : (lo_r - q_t8);
+    assign t_add_s = {1'b0,lo_r} + {1'b0,q_t8};
+    assign t_add = t_add_s[8] ? 8'hFF : t_add_s[7:0];                // ★ 饱和，别回绕
+    assign t_out = (line_tint == 3'd1) ? t_dye  :
                           (line_tint == 3'd2) ? t_add  :
                           (line_tint == 3'd3) ? q_t8   :      // 乘系数  = p·k
                           (line_tint == 3'd4) ? q_t8   :      // 正片叠底 = p·C
-                                                up_b;
-    wire [7:0]  mix_sel = line_fx_over ? (cur_wr_en ? up_b : lo_b)
+                                                mix_sel_r;
+    assign mix_sel = line_fx_over ? (cur_wr_en ? up_b : lo_b)
                                        : (base_wr_en ? lo_b : up_b);
-    assign mix_beat[gi*8 +: 8] = (line_solid_en & (line_tint != 3'd0)) ? t_out : mix_sel;
+    // Register the absolute difference and mode selection before the DSP.
+    // Every sideband moves with the operands through the same elastic slot.
+    always @(posedge clk) begin
+        if (operand_ready && mix_valid_r) begin
+            mul_a_r <= mul_a;
+            mul_b_r <= mul_b;
+            lo_operand_r <= lo_b;
+            up_ge_lo_operand_r <= (up_b >= lo_b);
+            mix_sel_operand_r <= mix_sel;
+            mask_operand_r <= cur_wr_en | base_wr_en;
+        end
+        if (product_ready && operand_valid_r) begin
+            q_tint_r <= q_tint;
+            lo_r <= lo_operand_r;
+            up_ge_lo_r <= up_ge_lo_operand_r;
+            mix_sel_r <= mix_sel_operand_r;
+            mask_r <= mask_operand_r;
+        end
+    end
+    assign mix_beat[gi*8 +: 8] = (line_solid_en & (line_tint != 3'd0)) ? t_out : mix_sel_r;
     //   出口掩码 = 两张图掩码相或（ck 关时恒全 1）
-    assign mix_beat[PIXEL_WIDTH + gi] = cur_wr_en | base_wr_en;
+    assign mix_beat[PIXEL_WIDTH + gi] = mask_r;
 end
 for (gi = 0; gi < PIXELS; gi = gi + 1) begin : g_pixel
     //   α 跟着"这个像素最终取了谁"走（判据用该像素第一个字节的掩码：一个像素 3 字节同生同死）
-    assign mix_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH]
-         = (line_colorKey_en ? cur_beat[PIXEL_WIDTH + gi*BYTES_PER_PIXEL] : 1'b1)
-         ? cur_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH]
-         : base_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH];
+    reg [ALPHA_WIDTH-1:0] alpha_operand_r, alpha_r;
+    always @(posedge clk) begin
+        if (operand_ready && mix_valid_r)
+            alpha_operand_r <= (line_colorKey_en ? cur_beat[PIXEL_WIDTH + gi*BYTES_PER_PIXEL] : 1'b1)
+                     ? cur_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH]
+                     : base_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH];
+        if (product_ready && operand_valid_r)
+            alpha_r <= alpha_operand_r;
+    end
+    assign mix_beat[PIXEL_WIDTH + PIXEL_BYTES + gi*ALPHA_WIDTH +: ALPHA_WIDTH] = alpha_r;
 end
 endgenerate
 
@@ -248,8 +308,41 @@ assign imgCombine_mask             = comb_on ? mix_beat[PIXEL_WIDTH +: PIXEL_BYT
                                              : (line_colorKey_en ? source_mask : {PIXEL_BYTES{1'b1}});
 assign imgCombine_alpha            = comb_on ? mix_beat[PIXEL_WIDTH + PIXEL_BYTES +: PIXELS*ALPHA_WIDTH]   : source_alpha;
 //   ★ 合成时 valid = "输入这一拍有效"（和上游同拍）；★ 纯色层自己数拍数：缓冲吐完就不出数
-assign imgCombine_valid            = comb_on ? ((state == S_COMBINE) & (line_solid_en ? (rd_ptr_r < wr_ptr_r) : source_valid))
+assign imgCombine_valid            = comb_on ? product_valid_r
                                              : source_valid;
+
+// Operand preparation, multiplication and final add/saturation are separated.
+// Sidebands share their stage enable, retaining pairing through stalls.
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) operand_valid_r <= 1'b0;
+    else if (line_start || !comb_on) operand_valid_r <= 1'b0;
+    else if (operand_ready) operand_valid_r <= mix_valid_r;
+end
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) product_valid_r <= 1'b0;
+    else if (line_start || !comb_on) product_valid_r <= 1'b0;
+    else if (product_ready) product_valid_r <= operand_valid_r;
+end
+
+// Pair the BRAM foreground/background and every mask/alpha sideband BEFORE
+// the tint arithmetic. One held elastic slot decouples RAM tCO from multiply
+// and saturation; a stall holds the exact same pair until it is consumed.
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        cur_beat_r <= 0;
+        base_beat_r <= 0;
+        mix_valid_r <= 1'b0;
+    end else if (line_start || !comb_on) begin
+        mix_valid_r <= 1'b0;
+    end else if (mix_ready) begin
+        mix_valid_r <= raw_mix_valid;
+        if (raw_mix_valid) begin
+            cur_beat_r <= raw_cur_beat;
+            base_beat_r <= raw_base_beat;
+        end
+    end
+end
 
 //==============================================================================
 // 状态机（三段式：状态寄存器 / 次态组合逻辑 / 数据通路时序逻辑）
@@ -305,7 +398,7 @@ always @(posedge clk or negedge rst_n) begin
 
             // ---- 图一那一趟：写缓冲，读指针原地不动 ----
             S_FILL  : if (fill_take) begin
-                          row_buf[wr_ptr_r] <= cur_beat;
+                          row_buf[wr_ptr_r] <= raw_cur_beat;
                           wr_ptr_r          <= wr_ptr_r + 1'b1;
                       end
 

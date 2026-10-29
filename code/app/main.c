@@ -39,7 +39,12 @@
  *   ★ 2026-10-17：老的 demo_anim（动图）/ demo_combine（图片合成）已删除 —— 它们的功能
  *     都被游戏 demo 覆盖（动图→游戏动画、合成→道具/角色叠层），留着只占 flash。
  *----------------------------------------------------------------------------*/
-#define DEMO_RUN_SEL     2       /* 1 = 分屏对比；2 = 游戏 demo */
+#ifndef DEMO_RUN_SEL
+#define DEMO_RUN_SEL     2       /* make DEMO_RUN_SEL=1 可单独构建分屏对比 */
+#endif
+#if DEMO_RUN_SEL != 1 && DEMO_RUN_SEL != 2
+#error "DEMO_RUN_SEL must be 1 (compare) or 2 (game)"
+#endif
 
 /* LED 点亮极性: 0 = 高电平点亮(写 1 亮) / 1 = 低电平点亮(写 0 亮) */
 #define LED_ACTIVE_LOW   0
@@ -138,7 +143,8 @@ void main(){
          *   且【不透明区里没有纯白】(转换时会自检并打印)。 */
         lineBuffer_setCkeyColor(0x00FFFFFFu);
 
-        /* 底图: C / D 都铺背景色(动图 Demo 自己往上画); 分屏四块也备好,
+#if DEMO_RUN_SEL == 1
+        /* 底图: C / D 都铺背景色; 分屏四块也备好,
          *   这样按 KEY0 切到分屏时不会看到花屏 */
         bsp_printf("HDMI: C/D 铺底色 + 分屏四块 ...\r\n");
         lineBuffer_fillSolid(LB_FRAME_C, LB_TEST_LINES, 0u, 0u, 0u);
@@ -158,6 +164,9 @@ void main(){
                    lineBuffer_isEnabled(), lineBuffer_isSplit());
         bsp_printf("CKEY: 键色=0x%06x (相等 = 不写)  [0x2078]\r\n", lineBuffer_getCkeyColor());
         bsp_uDelay(2000000);
+#endif
+        /* 游戏入口在 game_init 中用 GPU 初始化实际使用的帧缓冲。
+         * 分屏演示的 CPU 铺底和启动延时仅由 DEMO_RUN_SEL=1 执行。 */
 
         /* --- 开"帧起始"中断: 通知主循环显示边界 -------------------
          *   ISR 只清事件并计数；游戏逻辑按独立时间步更新，绘制和交帧留在主循环。
@@ -172,11 +181,8 @@ void main(){
                 bsp_printf("     重新综合并烧好 FPGA 之后, 把 IRQ_frame.h 里的 IRQ_FRAME_USE 改成 1。\r\n");
         #endif
 
-                /* --- Demo(见文件头的 DEMO_RUN_SEL 开关) ---------------------------
-                *   0) 全屏动图: 双缓冲 + 脏区"局部重放"(规范 docs/spec/软件_驱动与API.md §6)
-                *   1) 分屏对比: 左半硬件/右半 CPU(基础要求 3c) —— 它会自己切到 split
-                *   2) alpha 玻璃背景: 玻璃用 alpha 平铺满屏, 最左一条用 ck 做对照
-                *   ★ 演示期间别按 KEY0(切分屏会换翻页几何) / KEY3(会把显示关掉) */
+        /* Demo owns display setup and controls after this point:
+         * 1 = GPU/CPU split-screen comparison; 2 = game main loop. */
         #if (DEMO_RUN_SEL == 1)
                 compare_demo_run();
         #else

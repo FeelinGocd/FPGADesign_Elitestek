@@ -10,6 +10,10 @@
 #define DDR_FB_B_RIGHT 0x09C00000u
 #define DDR_FB_BG      0x0A000000u
 #define DDR_FB_THIRD   0x0A800000u
+/* Seven clean geometry images: original BG plus six slots above the third
+ * framebuffer. These do not overlap the comparison demo's half-frame slots. */
+#define DDR_BG_CACHE_FIRST 0x0B000000u
+#define DDR_BG_CACHE_COUNT 7u
 
 #define DDR_FULL_SLOT_BYTES 0x00800000u
 #define DDR_HALF_SLOT_BYTES 0x00400000u
@@ -25,6 +29,7 @@
     DDR_FB_B_LEFT + DDR_HALF_SLOT_BYTES > DDR_FB_B_RIGHT || \
     DDR_FB_B_RIGHT + DDR_HALF_SLOT_BYTES > DDR_FB_BG || \
     DDR_FB_BG + DDR_FULL_SLOT_BYTES > DDR_FB_THIRD || \
-    DDR_FB_THIRD + DDR_FULL_SLOT_BYTES > 0x10000000u
+    DDR_FB_THIRD + DDR_FULL_SLOT_BYTES > DDR_BG_CACHE_FIRST || \
+    DDR_BG_CACHE_FIRST + (DDR_BG_CACHE_COUNT - 1u) * DDR_FULL_SLOT_BYTES > 0x10000000u
 #error "DDR framebuffer slots overlap or exceed the GPU 28-bit address window"
 #endif

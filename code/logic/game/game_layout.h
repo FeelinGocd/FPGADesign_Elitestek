@@ -40,7 +40,14 @@ typedef struct {
     short ax0, ay0, ax1, ay1;           /* 竞技场格坐标（含边界） */
     short world_w, world_h;             /* 世界像素尺寸（相机范围） */
     unsigned char mirror_x, mirror_y;   /* 内容外接框 min+max，与地形镜像轴一致 */
+    const unsigned short *tile_rows;    /* shared row indexes; 0 = direct legacy rows */
+    const unsigned short *rot_rows;
 } layout_terrain_t;
+
+static inline char game_layout_tile_at(const layout_terrain_t *t, int x, int y)
+{
+    return t->tiles[t->tile_rows ? t->tile_rows[y] : y][x];
+}
 
 typedef struct {
     const char        *name;

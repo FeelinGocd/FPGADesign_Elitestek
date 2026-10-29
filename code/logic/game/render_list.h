@@ -21,21 +21,30 @@
 #pragma once
 
 #include "type.h"
+#include "game_limits.h"
 
-/* 一帧最多登记多少个元素：192 发子弹 + 56 金币 + 16 怪 + 石头/网/场景/HUD ≈ 350。
+/* 一帧最多登记多少个元素：整个弹幕池 + 金币/怪物/场景/HUD。
  * ★ 余量要留够：满员时 rl_push 丢后来的元素，虽然 HUD 现在最先入队，
  *   但子弹/金币被丢会造成实体闪烁。  */
-#define RL_MAX   512
+#define RL_MAX (GAME_BULLET_POOL_CAP + GAME_RENDER_EXTRA_SLOTS)
+#define RL_ARG_BITS 11
+#define RL_ARG_MAX ((1u << RL_ARG_BITS) - 1u)
 
-/* 画法：fb = 后台帧缓存, now = 毫秒时钟, buf = 0/1（双缓冲下标）, arg = 元素下标 */
+/* 画法：fb = 后台帧缓存, now = 毫秒时钟, buf = 缓冲下标, arg = 元素下标 */
 typedef void (*rl_draw_fn)(u32 fb, u32 now, int buf, int arg);
 
 /** @brief 开始一帧：清空队列（必须在所有 rl_push 之前调一次） */
 void rl_begin(void);
 
-/** @brief 登记一个元素。z 范围 -32768..32767；同 z 时先 push 的在下面。
+/** @brief 登记一个元素。z=-32768..32767，arg=0..2047；同 z 时先 push 的在下面。
  *  @return 1 = 收下, 0 = 队列满（这一帧这个元素不画，计数 +1） */
 int  rl_push(int z, rl_draw_fn fn, int arg);
+
+/** @brief 为同一画法的一组元素查询一次 ID。ID 跨 rl_begin 保持有效；失败返回 -1。 */
+int  rl_register_draw(rl_draw_fn fn);
+
+/** @brief 用已注册 ID 登记元素，避免每颗弹重复扫描画法表。失败计入 dropped。 */
+int  rl_push_id(int z, int draw_id, int arg);
 
 /** @brief 这一帧登记了几个元素（诊断用） */
 int  rl_count(void);

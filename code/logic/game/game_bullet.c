@@ -19,22 +19,41 @@
 #include "game.h"
 #include "CI_gpu2d.h"
 
+#ifndef GAME_BULLET_FAST_DRAW
+#define GAME_BULLET_FAST_DRAW 1
+#endif
+#if GAME_BULLET_FAST_DRAW && defined(__GNUC__)
+#define BULLET_DRAW_OPT __attribute__((optimize("O3")))
+#else
+#define BULLET_DRAW_OPT
+#endif
+#ifndef GAME_BULLET_FAST_SIM
+#define GAME_BULLET_FAST_SIM 1
+#endif
+#if GAME_BULLET_FAST_SIM && defined(__GNUC__)
+#define BULLET_SIM_OPT __attribute__((optimize("O3")))
+#else
+#define BULLET_SIM_OPT
+#endif
+
 /*  池子管理：分配时不扫描整池。
  *    · s_alive / s_enemy_alive 是权威计数，生成/释放时维护；
  *    · s_free 是空闲槽栈，生成 O(1)，释放时压回去。  */
 static int s_alive;
 static int s_enemy_alive;
+static int s_split_alive;
+static unsigned short s_chili_ids[PLAYER_RESERVE];
+static int s_chili_n;
 #if GAME_BOSS_SKILL_DIAG
 static u32 s_enemy_spawn_rejects;
 u32 game_enemy_spawn_rejects(void) { return s_enemy_spawn_rejects; }
 #endif
 static int s_free_n;
-static unsigned short s_free[N_BULLETS];
+static unsigned short s_free_head;
 #if GAME_BULLET_DIRTY_BOUNDS
-/* Sprite kind (0=A, 1=B, 2=C) and axis (bit 2=90-degree rotation) for the
+/* Sprite kind (0=A, 1=B, 2=C) and axis (bit 0=90-degree rotation) for the
  * pixels retained in each framebuffer. Stored at draw time so a reused slot
  * cannot make the old footprint depend on its new bullet type or direction. */
-static unsigned char s_old_dirty_kind[GAME_FB_COUNT][N_BULLETS];
 static const unsigned char s_dirty_bounds[6][4] = {
     {4, 4, 24, 25}, {3, 4, 26, 24}, /* A: horizontal / vertical */
     {7, 8, 18, 21}, {7, 8, 18, 21}, /* B never rotates */
@@ -47,10 +66,43 @@ static u32 s_draw_tint_player;
 
 static int magic_owned(void);
 
+static int uranus_enemy_slow_active(void)
+{
+    return game_item_has(ITEM_URANUS) && g.boss_slow_until &&
+           (int)(game_ms() - g.boss_slow_until) < 0;
+}
+
 static int bullet_alloc(void)
 {
+    int i;
     if (s_free_n <= 0) return -1;
-    return (int)s_free[--s_free_n];
+    i = s_free_head;
+    s_free_head = g.bullets[i].age;
+    --s_free_n;
+    return i;
+}
+
+static void bullet_untrack_chili(int i)
+{
+    int k;
+
+    for (k = 0; k < s_chili_n; ++k) {
+        if (s_chili_ids[k] == (unsigned short)i) {
+            s_chili_ids[k] = s_chili_ids[--s_chili_n];
+            break;
+        }
+    }
+}
+
+/* An inactive slot lends its age field to the free list. Active ages remain
+ * independent; allocation initializes age before the bullet becomes active. */
+static void bullet_free_tail(int first)
+{
+    int i;
+    s_free_n = N_BULLETS - first;
+    s_free_head = s_free_n ? (unsigned short)(N_BULLETS - 1) : 65535u;
+    for (i = first; i < N_BULLETS; ++i)
+        g.bullets[i].age = i == first ? 65535u : (unsigned short)(i - 1);
 }
 
 static void bullet_release(int i)
@@ -61,7 +113,13 @@ static void bullet_release(int i)
     b->active = 0;
     --s_alive;
     if (b->enemy) --s_enemy_alive;
-    if (s_free_n < N_BULLETS) s_free[s_free_n++] = (unsigned short)i;
+    else {
+        if (b->split_color) --s_split_alive;
+        if (b->type == BULLET_CHILI) bullet_untrack_chili(i);
+    }
+    b->age = s_free_head;
+    s_free_head = (unsigned short)i;
+    ++s_free_n;
 }
 
 /* 朝向 → 翻转位（朝右是原图）。辣椒那张美术要求"不转"，单独一套。 */
@@ -143,7 +201,7 @@ static int bullet_find_target(const bullet_t *b, int *tx, int *ty, int *kind, in
         }
     }
 
-    if (g.phase == PHASE_FIGHT && g.boss_hp > 0) {
+    if (g.phase == PHASE_FIGHT && g.boss_hp > 0 && !g.boss_locked) {
         int dx = (g.boss_x + BOSS_W / 2) - bx;
         int dy = (g.boss_y + BOSS_H / 2) - by;
         int d2 = dx * dx + dy * dy;
@@ -179,7 +237,7 @@ static void bullet_magic_homing(bullet_t *b)
     if (b->home_kind == 1) {
         const mob_t *m;
 
-        if (b->home_idx < 0 || b->home_idx >= N_MOBS) return;
+        if ((unsigned)b->home_idx >= N_MOBS) return;
         m = &g.mobs[b->home_idx];
         if (!m->active) return;
         tx = m->x + 16;
@@ -245,13 +303,18 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
 
     /* 敌弹占用达到上限后保留 PLAYER_RESERVE 槽给玩家。 */
     if (enemy) {
-        if (s_alive >= ENEMY_CAP) {
+        if (s_enemy_alive >= ENEMY_CAP) {
 #if GAME_BOSS_SKILL_DIAG
             ++s_enemy_spawn_rejects;
 #endif
             return -1;
         }
     }
+
+    /* Player reserve is also the upper bound for active flame projectiles;
+     * keeping their indices compact avoids scanning all 612 slots per enemy. */
+    if (!enemy && type == BULLET_CHILI && s_chili_n >= PLAYER_RESERVE)
+        return -1;
 
     i = bullet_alloc();
     if (i < 0) {
@@ -277,6 +340,9 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
     if (enemy) {
         b->range = 0;
         b->life  = BOSS_BULLET_LIFE;
+    } else if (type == BULLET_CHILI) {
+        b->range = 0;
+        b->life  = CHILI_FLAME_LIFE_FRAMES;
     } else if (magic_owned()) {
         b->range = 0;
         b->life  = (unsigned short)(g.stats.range * RANGE_FRAMES_PER_UNIT);
@@ -285,14 +351,23 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
         b->life  = 0;
     }
     b->enemy = enemy;
+    if (enemy && uranus_enemy_slow_active()) {
+        if (b->vx > 0) b->vx = (b->vx + 1) / 2;
+        else if (b->vx < 0) b->vx = -((-b->vx + 1) / 2);
+        if (b->vy > 0) b->vy = (b->vy + 1) / 2;
+        else if (b->vy < 0) b->vy = -((-b->vy + 1) / 2);
+    }
     b->home_kind = 0;
     b->home_idx = 0;
+    b->chili_blocks = (!enemy && type == BULLET_CHILI) ? CHILI_FLAME_BLOCKS : 0u;
+    b->split_color = 0;
     b->use8 = 0;
     b->vx8 = 0; b->vy8 = 0; b->rx = 0; b->ry = 0;
     b->active = 1;
     bullet_lock_target(b);
     ++s_alive;
     if (enemy) ++s_enemy_alive;
+    else if (type == BULLET_CHILI) s_chili_ids[s_chili_n++] = (unsigned short)i;
     return i;
 }
 
@@ -305,6 +380,12 @@ int game_bullet_spawn8(int x, int y, int vx8, int vy8, int mode, int type, int e
     if (i < 0) return -1;
     g.bullets[i].vx8 = vx8;
     g.bullets[i].vy8 = vy8;
+    if (enemy && uranus_enemy_slow_active()) {
+        g.bullets[i].vx8 /= 2;
+        g.bullets[i].vy8 /= 2;
+        g.bullets[i].vx = g.bullets[i].vx8 / 8;
+        g.bullets[i].vy = g.bullets[i].vy8 / 8;
+    }
     g.bullets[i].use8 = 1;
     return i;
 }
@@ -323,6 +404,11 @@ void game_bullet_fire_enemy(int x, int y, int dir)
 /*  压测：撞墙/命中都挪回网格里，维持恒定的在飞数量。  */
 static void bullet_recycle(bullet_t *b, int i)
 {
+    if (!b->enemy && b->split_color) {
+        --s_split_alive;
+        b->split_color = 0;
+    }
+    if (!b->enemy && b->type == BULLET_CHILI) bullet_untrack_chili(i);
     b->x = 16 + (i % 24) * 40;
     b->y = 40 + (i / 24) * 80;
     b->vx = (i % 3) - 1;
@@ -335,6 +421,9 @@ static void bullet_recycle(bullet_t *b, int i)
     if (b->enemy) {
         b->range = 0;
         b->life = BOSS_BULLET_LIFE;
+    } else if (b->type == BULLET_CHILI) {
+        b->range = 0;
+        b->life = CHILI_FLAME_LIFE_FRAMES;
     } else if (magic_owned()) {
         b->range = 0;
         b->life = (unsigned short)(g.stats.range * RANGE_FRAMES_PER_UNIT);
@@ -344,6 +433,7 @@ static void bullet_recycle(bullet_t *b, int i)
     }
     b->home_kind = 0;
     b->home_idx = 0;
+    b->chili_blocks = (!b->enemy && b->type == BULLET_CHILI) ? CHILI_FLAME_BLOCKS : 0u;
     b->use8 = 0;
     b->vx8 = 0;
     b->vy8 = 0;
@@ -351,9 +441,51 @@ static void bullet_recycle(bullet_t *b, int i)
     b->ry = 0;
 }
 
+/* A player projectile crossing a TriPrism is consumed and becomes a four-way
+ * colored fan. Split projectiles carry split_color and therefore cannot split
+ * again when multiple prisms overlap the same path. */
+static int triprism_try_split(int i, u32 now, int cx, int cy)
+{
+    bullet_t *b = &g.bullets[i];
+    static const signed char fan[GAME_TRIPRISM_SPLIT_COUNT] = { -12, -4, 4, 12 };
+    int angle, speed8, color;
+    int type, vx8, vy8;
+
+    if (!b->active || b->enemy || b->split_color) return 0;
+    if (!game_triprism_hit_test(cx, cy, now)) return 0;
+    if (s_split_alive + GAME_TRIPRISM_SPLIT_COUNT > GAME_TRIPRISM_SPLIT_LIMIT)
+        return 0;
+    if (game_perf_pinned()) return 0;
+
+    vx8 = b->use8 ? b->vx8 : b->vx * 8;
+    vy8 = b->use8 ? b->vy8 : b->vy * 8;
+    if ((vx8 < 0 ? -vx8 : vx8) >= (vy8 < 0 ? -vy8 : vy8))
+        angle = vx8 < 0 ? 32 : 0;
+    else
+        angle = vy8 < 0 ? 48 : 16;
+    speed8 = int_sqrt(vx8 * vx8 + vy8 * vy8);
+    if (speed8 < 8) speed8 = 8;
+    if (speed8 > 96) speed8 = 96;
+    type = b->type;
+
+    bullet_release(i);
+    for (color = 0; color < GAME_TRIPRISM_SPLIT_COUNT; ++color) {
+        int a = (angle + fan[color]) & (ANGLE_STEPS - 1);
+        int sx8 = (g_sin_tab[(a + ANGLE_STEPS / 4) & 63] * speed8) >> 6;
+        int sy8 = (g_sin_tab[a] * speed8) >> 6;
+        int ni = game_bullet_spawn8(cx - BW / 2, cy - BH / 2,
+                                    sx8, sy8, MOTION_LINE, type, 0);
+
+        if (ni < 0) continue;
+        g.bullets[ni].split_color = (unsigned char)(color + 1);
+        ++s_split_alive;
+    }
+    return 1;
+}
+
 /*----------------------------------------------------------------------------*/
 /*  按弹道推进  */
-static void bullet_move(bullet_t *b)
+static BULLET_SIM_OPT void bullet_move(bullet_t *b)
 {
     switch (b->mode) {
     case MOTION_SINE:
@@ -438,8 +570,34 @@ static void bullet_move(bullet_t *b)
                        : 8 * ((b->vx < 0 ? -b->vx : b->vx) + (b->vy < 0 ? -b->vy : b->vy));
 }
 
+/* A Chili flame is a player projectile with a small, local shield. It absorbs
+ * one enemy projectile at a time and disappears after the third interception.
+ * The scan is only entered for enemy bullets while Chili is owned, preserving
+ * the normal enemy-cap path when the item is absent. */
+static int chili_block_enemy(int enemy_i, int cx, int cy)
+{
+    int i;
+
+    if (!game_item_has(ITEM_CHILI) || s_chili_n <= 0) return 0;
+    for (i = 0; i < s_chili_n; ++i) {
+        int flame_i = s_chili_ids[i];
+        bullet_t *f = &g.bullets[flame_i];
+        int fx, fy;
+
+        if (!f->active || f->chili_blocks == 0u) continue;
+        fx = f->x + BW / 2;
+        fy = f->y + BH / 2;
+        if (cx < fx - BW || cx >= fx + BW || cy < fy - BH || cy >= fy + BH)
+            continue;
+        bullet_release(enemy_i);
+        if (--f->chili_blocks == 0u) bullet_release(flame_i);
+        return 1;
+    }
+    return 0;
+}
+
 /*----------------------------------------------------------------------------*/
-void game_bullets_step(u32 now)
+BULLET_SIM_OPT void game_bullets_step(u32 now)
 {
     int i;
     int stone_collision = game_stone_has_blockers();
@@ -461,15 +619,23 @@ void game_bullets_step(u32 now)
         /*  ★ 寿命（射程 / 存活帧）：
          *    自机弹按【距离】熄火 —— 不用飞到屏幕外才消失，打出去有"射程"感；
          *    敌方弹按【时间】退休 —— 免得追踪/加速弹在场上赖着不走把池子占满。  */
-        if (b->range > 0 && b->dist >= b->range * 8) { bullet_release(i); continue; }
-        if (b->life > 0 && --b->life <= 0)           { bullet_release(i); continue; }
+        if ((b->range > 0 && b->dist >= b->range * 8) ||
+            (b->life > 0 && --b->life <= 0)) {
+            if (game_perf_pinned()) bullet_recycle(b, i);
+            else bullet_release(i);
+            continue;
+        }
 
         cx = b->x + BW / 2;             /* 判定点 = 子弹中心 */
         cy = b->y + BH / 2;
 
+        if (b->enemy && chili_block_enemy(i, cx, cy)) continue;
+        if (!b->enemy && triprism_try_split(i, now, cx, cy)) continue;
+
         /*  可交互石头：玩家弹 / Boss 弹撞上都直接消失；石头本身不可破坏  */
         if (stone_collision && game_stone_hit_at(cx, cy)) {
-            bullet_release(i);
+            if (game_perf_pinned()) bullet_recycle(b, i);
+            else bullet_release(i);
             continue;
         }
 
@@ -491,13 +657,15 @@ void game_bullets_step(u32 now)
 
             if (hit) {
                 game_boss_hit(now);
-                bullet_release(i);
+                if (game_perf_pinned()) bullet_recycle(b, i);
+                else bullet_release(i);
                 continue;
             }
 
             /*  没打中 Boss：再看当前房间的 slime  */
-            if (game_mobs_try_hit(cx, cy)) {
-                bullet_release(i);
+            if (game_mobs_try_hit_ex(cx, cy, b->type)) {
+                if (game_perf_pinned()) bullet_recycle(b, i);
+                else bullet_release(i);
                 continue;
             }
         }
@@ -511,52 +679,158 @@ void game_bullets_step(u32 now)
 }
 
 /*----------------------------------------------------------------------------*/
+/* History belongs to the framebuffer, not to the current bullet occupants. */
+void game_bullets_clear_history(int buf)
+{
+    if ((unsigned)buf >= GAME_FB_COUNT) return;
+#if !GAME_BULLET_TILE_HISTORY
+    {
+        int i;
+        for (i = 0; i < N_BULLETS; ++i) g.old_bullets[buf][i].active = 0;
+    }
+#else
+    dirty_clear(g.old_bullet_tiles[buf]);
+#endif
+}
+
+#if GAME_BULLET_TILE_HISTORY
+/* Match game_mark_dirty's clipping and C integer-division semantics, but only
+ * write the saved bitmap. Updating the current frame's dirty queue here would
+ * corrupt its already-completed restore/HUD decisions. */
+static inline __attribute__((always_inline)) void bullet_history_rect(dirty_map_t tiles, int x, int y, int w, int h)
+{
+    int tx0 = x / TILE, ty0 = y / TILE;
+    int tx1 = (x + w - 1) / TILE, ty1 = (y + h - 1) / TILE;
+    int tx, ty;
+
+    if (tx0 < 0) tx0 = 0;
+    if (ty0 < 0) ty0 = 0;
+    if (tx1 >= GRID_W) tx1 = GRID_W - 1;
+    if (ty1 >= GRID_H) ty1 = GRID_H - 1;
+    for (ty = ty0; ty <= ty1; ++ty)
+        for (tx = tx0; tx <= tx1; ++tx)
+            dirty_set(tiles, tx, ty);
+}
+#endif
+
+/* Called after the sprite command is queued. Tile history then overlaps GPU
+ * execution and records only sprites actually drawn into this framebuffer. */
+BULLET_DRAW_OPT void game_bullets_record_history(int buf, int i)
+{
+#if GAME_BULLET_TILE_HISTORY
+    const bullet_t *b;
+    if ((unsigned)buf >= GAME_FB_COUNT || (unsigned)i >= N_BULLETS) return;
+    b = &g.bullets[i];
+    if (!b->active) return;
+#if GAME_BULLET_DIRTY_BOUNDS
+    {
+        int ai = bullet_asset(b);
+        int ax = b->vx < 0 ? -b->vx : b->vx;
+        int ay = b->vy < 0 ? -b->vy : b->vy;
+        int kind = ai == ASSET_bullet_type_C_Uranus ? 2 :
+                   ai == ASSET_bullet_type_B_chili_NOTROT90 ? 1 : 0;
+        const unsigned char *r;
+        kind = kind * 2 + (ay > ax && kind != 1);
+        r = s_dirty_bounds[kind];
+        bullet_history_rect(g.old_bullet_tiles[buf], b->x + r[0], b->y + r[1], r[2], r[3]);
+    }
+#else
+    bullet_history_rect(g.old_bullet_tiles[buf], b->x, b->y, BW, BH);
+#endif
+#else
+    (void)buf; (void)i;
+#endif
+}
+
 /*  记下"这块缓冲里每颗弹这次画在哪"（脏区用）；每帧只调一次  */
 void game_bullets_sync(int buf)
 {
+#if GAME_BULLET_TILE_HISTORY
+    game_bullets_clear_history(buf);
+#else
     int i;
-
     for (i = 0; i < N_BULLETS; ++i) {
         g.old_bullets[buf][i].active = g.bullets[i].active;
         g.old_bullets[buf][i].x = g.bullets[i].x;
         g.old_bullets[buf][i].y = g.bullets[i].y;
-#if GAME_BULLET_DIRTY_BOUNDS
         if (g.bullets[i].active) {
+#if GAME_BULLET_DIRTY_BOUNDS
             const bullet_t *b = &g.bullets[i];
             int ai = bullet_asset(b);
             int ax = b->vx < 0 ? -b->vx : b->vx;
             int ay = b->vy < 0 ? -b->vy : b->vy;
             int kind = ai == ASSET_bullet_type_C_Uranus ? 2 :
                        ai == ASSET_bullet_type_B_chili_NOTROT90 ? 1 : 0;
-            s_old_dirty_kind[buf][i] = (unsigned char)(kind * 2 + (ay > ax && kind != 1));
-        }
+            kind = kind * 2 + (ay > ax && kind != 1);
+            g.old_bullets[buf][i].kind = (unsigned)kind;
 #endif
+        }
     }
+#endif
 }
 
 void game_bullets_mark_old(dirty_map_t dirty, int buf)
 {
     int i;
+#if !GAME_BULLET_TILE_HISTORY
     for (i = 0; i < N_BULLETS; ++i) {
         const old_t *b = &g.old_bullets[buf][i];
         if (!b->active) continue;
 #if GAME_BULLET_DIRTY_BOUNDS
         {
-            const unsigned char *r = s_dirty_bounds[s_old_dirty_kind[buf][i]];
+            const unsigned char *r = s_dirty_bounds[b->kind];
             game_mark_dirty(dirty, b->x + r[0], b->y + r[1], r[2], r[3]);
         }
 #else
         game_mark_dirty(dirty, b->x, b->y, BW, BH);
 #endif
     }
+#else
+#if GAME_BULLET_MERGE_TILES
+    game_dirty_merge_tiles(dirty, g.old_bullet_tiles[buf]);
+#else
+    for (i = 0; i < DIRTY_BYTES; ++i) {
+        unsigned bits = g.old_bullet_tiles[buf][i];
+        int bit;
+        for (bit = 0; bits; ++bit, bits >>= 1) {
+            if (bits & 1u) {
+                int cell = i * 8 + bit;
+                game_mark_dirty(dirty, (cell % GRID_W) * TILE,
+                                (cell / GRID_W) * TILE, TILE, TILE);
+            }
+        }
+    }
+#endif
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
 /*  一颗弹的画法：由渲染队列排好序之后按槽号调用  */
-static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
+static BULLET_DRAW_OPT void bullet_draw_one(u32 fb, u32 now, int buf, int i)
 {
     const bullet_t *b = &g.bullets[i];
     int ai = bullet_asset(b);
+    u32 flip = bullet_flip(b, ai);
+    u32 src = g_assets[ai].base_word;
+    u32 dx = (u32)b->x, dy = (u32)b->y, w = BW, h = BH;
+#if GAME_BULLET_ALPHA_CROP
+    {
+        u32 sx = 4u, sy = 4u;
+        w = 24u; h = 25u;
+        if (ai == ASSET_bullet_type_C_Uranus) { sx = 0u; sy = 6u; w = 32u; h = 21u; }
+        else if (ai == ASSET_bullet_type_B_chili_NOTROT90) { sy = 8u; h = 21u; }
+        src += sy * g_assets[ai].stride_word + sx / 4u;
+        /* Hardware ROT90 transposes source axes. MX/MY flip output x/y;
+         * compensate crop origins in the same coordinates as CmdExec. */
+        if (flip & GPU2D_ROT90) {
+            dx += (flip & GPU2D_FLIP_X) ? BH - sy - h : sy;
+            dy += (flip & GPU2D_FLIP_Y) ? BW - sx - w : sx;
+        } else {
+            dx += (flip & GPU2D_FLIP_X) ? BW - sx - w : sx;
+            dy += (flip & GPU2D_FLIP_Y) ? BH - sy - h : sy;
+        }
+    }
+#endif
 
     (void)now; (void)buf;
 
@@ -569,27 +843,14 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
         CI_gpu2d_spriteFlipCK(g_assets[ai].base_word,
                               g_assets[ai].stride_word,
                               fb, (u32)b->x, (u32)b->y, BW, BH,
-                              bullet_flip(b, ai));
+                              flip);
 #elif (GAME_BOSS_BULLET_SWEEP && GAME_BOSS_SWEEP_OPAQUE == 2) || GAME_BULLET_FAST_CKEY
         CI_gpu2d_spriteTintCKRect(g_assets[ai].base_word,
                                   g_assets[ai].stride_word,
                                   fb, (u32)b->x, (u32)b->y, BW, BH,
                                   0x00FF2020u, 170u, 1u,
-                                  bullet_flip(b, ai));
+                                  flip);
 #elif GAME_BULLET_TINT
-        u32 src = g_assets[ai].base_word;
-        u32 dx = (u32)b->x, dy = (u32)b->y;
-        u32 w = BW, h = BH;
-#if GAME_BULLET_ALPHA_CROP
-        /* A_base has alpha only in source [4,28) x [4,29).  Its four
-         * directions keep the visible region anchored at sprite (4,4),
-         * including the ROT90 paths.  Keep the 32x32 collision/dirty box. */
-        src += 4u * g_assets[ai].stride_word + 1u; /* 4 rows + 4 pixels */
-        dx += 4u;
-        dy += 4u;
-        w = 24u;
-        h = 25u;
-#endif
         ++s_draw_tint_enemy;
         CI_gpu2d_spriteAlphaTintRect(
             src,
@@ -598,38 +859,45 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
             0x00FF2020u,   /* 柔和红：= 旧预染弹 bullet_type_A_enemy 的配色 */
             170u,          /* 浓度 170/255：保留 base 的明暗层次，不会糊成一片纯红 */
             1u,            /* 插值染色 */
-            bullet_flip(b, ai));
+            flip);
     #else
-        u32 src = g_assets[ai].base_word;
-        u32 dx = (u32)b->x, dy = (u32)b->y;
-        u32 w = BW, h = BH;
-#if GAME_BULLET_ALPHA_CROP
-        src += 4u * g_assets[ai].stride_word + 1u;
-        dx += 4u;
-        dy += 4u;
-        w = 24u;
-        h = 25u;
-#endif
         ++s_draw_alpha;
         CI_gpu2d_spriteAlphaRect(src, g_assets[ai].stride_word,
-            fb, dx, dy, w, h, bullet_flip(b, ai));
+            fb, dx, dy, w, h, flip);
 #endif
+    } else if (b->split_color) {
+        static const u32 split_rgb[GAME_TRIPRISM_SPLIT_COUNT] = {
+            0x00FF4848u, 0x00FFD040u, 0x0048E868u, 0x004888FFu
+        };
+        unsigned color = b->split_color - 1u;
+
+        if (color >= GAME_TRIPRISM_SPLIT_COUNT) color = 0u;
+        ++s_draw_tint_player;
+        CI_gpu2d_spriteAlphaTintRect(
+            src, g_assets[ai].stride_word,
+            fb, dx, dy, w, h,
+            split_rgb[color],
+            190u,
+            1u,
+            flip);
     } else if (magic_owned()) {
         ++s_draw_tint_player;
         /*  MagicCard：所有玩家弹幕统一淡紫色。  */
         CI_gpu2d_spriteAlphaTintRect(
-            g_assets[ai].base_word,
-            g_assets[ai].stride_word,
-            fb, (u32)b->x, (u32)b->y, BW, BH,
+            src, g_assets[ai].stride_word,
+            fb, dx, dy, w, h,
             0x00A050D0u,   /* 更深的紫 */
             160u,
             1u,
-            bullet_flip(b, ai));
+            flip);
     } else {
         ++s_draw_alpha;
-        CI_gpu2d_spriteAlphaRect(g_assets[ai].base_word, g_assets[ai].stride_word,
-            fb, (u32)b->x, (u32)b->y, BW, BH, bullet_flip(b, ai));
+        CI_gpu2d_spriteAlphaRect(src, g_assets[ai].stride_word,
+            fb, dx, dy, w, h, flip);
     }
+#if GAME_BULLET_TILE_HISTORY
+    game_bullets_record_history(buf, i);
+#endif
 }
 
 /*----------------------------------------------------------------------------*/
@@ -639,6 +907,7 @@ static void bullet_draw_one(u32 fb, u32 now, int buf, int i)
 void game_bullets_submit(void)
 {
     int i;
+    int draw_id = -1;
 
     for (i = 0; i < N_BULLETS; ++i) {
         const bullet_t *b = &g.bullets[i];
@@ -646,7 +915,8 @@ void game_bullets_submit(void)
         if (!b->active) continue;
         if (!game_visible_world(b->x, b->y, BW, BH)) continue;   /* 屏外不占队列 */
 
-        rl_push(ACTOR_Z(b->y + BH), bullet_draw_one, i);
+        if (draw_id < 0) draw_id = rl_register_draw(bullet_draw_one);
+        rl_push_id(ACTOR_Z(b->y + BH), draw_id, i);
     }
 }
 
@@ -686,6 +956,13 @@ int game_enemy_bullets_visible(void)
 #endif
 
 /*----------------------------------------------------------------------------*/
+void game_enemy_bullets_clear(void)
+{
+    int i;
+    for (i = 0; i < N_BULLETS; ++i)
+        if (g.bullets[i].active && g.bullets[i].enemy) bullet_release(i);
+}
+
 void game_bullets_clear(void)
 {
     int i;
@@ -694,8 +971,9 @@ void game_bullets_clear(void)
     for (i = 0; i < N_BULLETS; ++i) g.bullets[i].active = 0;
     s_alive = 0;
     s_enemy_alive = 0;
-    s_free_n = 0;
-    for (i = 0; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
+    s_split_alive = 0;
+    s_chili_n = 0;
+    bullet_free_tail(0);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -719,6 +997,8 @@ void game_bullets_perf_fill(int count)
         b->base_x = b->x;
         b->type = BULLET_URANUS;
         b->enemy = (i & 1) ? 1 : 0;
+        b->chili_blocks = 0u;
+        b->split_color = 0;
         b->home_kind = 0;
         b->home_idx = 0;
         b->dist = 0;
@@ -737,8 +1017,7 @@ void game_bullets_perf_fill(int count)
     }
 
     /* active 是 0..n-1，空闲槽从 n 开始 */
-    s_free_n = 0;
-    for (i = n; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
+    bullet_free_tail(n);
 }
 
 #if GAME_BOSS_BULLET_SWEEP
@@ -747,18 +1026,31 @@ void game_bullets_perf_fill(int count)
 void game_bullets_stress_fill(int count)
 {
     int i;
+#if GAME_CAPACITY_AUDIT
+    int cols;
+#endif
     if (count < 0) count = 0;
     if (count > N_BULLETS) count = N_BULLETS;
     game_bullets_clear();
+#if GAME_CAPACITY_AUDIT
+    cols = (count + 19) / 20;
+#endif
     for (i = 0; i < count; ++i) {
         bullet_t *b = &g.bullets[i];
+#if GAME_CAPACITY_AUDIT
+        b->x = g.cam_x + 24 + (cols > 1 ? (i % cols) * (SCR_W - BW - 48) / (cols - 1) : 0);
+        b->y = g.cam_y + 56 + (i / cols) * (SCR_H - BH - 80) / 19;
+#else
         b->x = g.cam_x + 48 + (i % 16) * 72;
         b->y = g.cam_y + 72 + (i / 16) * 36;
+#endif
         b->vx = (i & 1) ? 2 : -2;
         b->vy = (i & 2) ? 1 : -1;
         b->mode = MOTION_LINE;
         b->type = BULLET_A;
         b->enemy = 1;
+        b->chili_blocks = 0;
+        b->split_color = 0;
         b->use8 = 0;
         b->age = 0;
         b->life = 0;
@@ -767,8 +1059,7 @@ void game_bullets_stress_fill(int count)
     }
     s_alive = count;
     s_enemy_alive = count;
-    s_free_n = 0;
-    for (i = count; i < N_BULLETS; ++i) s_free[s_free_n++] = (unsigned short)i;
+    bullet_free_tail(count);
 }
 
 void game_bullets_stress_step(void)

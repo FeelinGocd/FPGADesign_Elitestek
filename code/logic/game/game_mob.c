@@ -60,7 +60,8 @@ static int mob_body_walkable(int x, int y)
 {
     int fx, fy, fw, fh;
     game_creature_foot_rect(x, y, MOB_W, MOB_H, &fx, &fy, &fw, &fh);
-    return game_room_rect_walkable(fx, fy, fw, fh);
+    return game_room_rect_walkable(fx, fy, fw, fh) &&
+           (!game_stone_has_blockers() || !game_stone_overlap(fx,fy,fw,fh));
 }
 
 /* 逐像素检查怪物脚底矩形从旧位置到新位置的路径，避免跨墙/斜切墙角。 */
@@ -81,6 +82,143 @@ static int mob_path_walkable(int old_x, int old_y, int new_x, int new_y)
         if (!mob_body_walkable(x, y)) return 0;
     }
     return 1;
+}
+
+/* One reverse BFS is shared by all mobs. Byte parent directions plus two
+ * bitset frontiers avoid a full index queue. Open ground uses direct steering. */
+#define NAV_ROOT 5u
+#define NAV_WALL 7u
+static unsigned char s_nav[GRID_W*GRID_H];
+static dirty_map_t s_frontier[2];
+static int s_nav_valid, s_nav_room;
+static u32 s_nav_until;
+static const signed char nav_dx[4] = {-1,1,0,0};
+static const signed char nav_dy[4] = {0,0,-1,1};
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST
+static u32 s_nav_max_ticks;
+u32 game_mobs_nav_max_us(void) { return s_nav_max_ticks/(BSP_CLINT_HZ/1000000u); }
+#endif
+
+static int abs_i(int x) { return x < 0 ? -x : x; }
+static int clamp_step(int x,int step) { return x>step ? step : x < -step ? -step : x; }
+
+static void nav_build(u32 now)
+{
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST
+    u32 started=clint_getTimeLow(BSP_CLINT);
+#endif
+    int x,y,i,goal=-1,best=0x7fffffff,layer=0,have=1;
+    int gx=(g.x+PW/2)/TILE, gy=(g.y+PH-8)/TILE;
+    int x0=ARENA_X0/TILE-2, y0=ARENA_Y0/TILE-2;
+    int x1=(ARENA_X1-1)/TILE+2, y1=(ARENA_Y1-1)/TILE+2;
+    int blockers=game_stone_has_blockers();
+    if(x0<0) x0=0;
+    if(y0<0) y0=0;
+    if(x1>=GRID_W) x1=GRID_W-1;
+    if(y1>=GRID_H) y1=GRID_H-1;
+    /* Only the arena and its two-cell door band can be walkable. Avoid
+     * expensive geometry/door queries for the unused 45x35 world margins. */
+    for(i=0;i<GRID_W*GRID_H;++i) s_nav[i]=NAV_WALL;
+    for(y=y0;y<=y1;++y) for(x=x0;x<=x1;++x) {
+        int d=abs_i(x-gx)+abs_i(y-gy);
+        i=y*GRID_W+x;
+        /* At this aligned waypoint the 24x16 feet lie inside exactly one
+         * tile: x+4..27, y+8..23. Use the same terrain/stone occupancy rules
+         * directly instead of recomputing a rectangle for every map cell. */
+        s_nav[i]=game_room_cell_walkable(x,y) &&
+            (!blockers || !game_stone_hit_at(x*TILE+16,y*TILE+16)) ? 0 : NAV_WALL;
+        if(!s_nav[i] && d<best) { best=d;goal=i; }
+    }
+    dirty_clear(s_frontier[0]);dirty_clear(s_frontier[1]);
+    if(goal>=0) {
+        s_nav[goal]=NAV_ROOT;
+        dirty_set(s_frontier[0],goal%GRID_W,goal/GRID_W);
+        while(have) {
+            int byte;have=0;
+            for(byte=0;byte<DIRTY_BYTES;++byte) {
+                unsigned bits=s_frontier[layer][byte];int bit;
+                s_frontier[layer][byte]=0;
+                for(bit=0;bits;++bit,bits>>=1) if(bits&1u) {
+                    int k,cur=byte*8+bit;
+                    x=cur%GRID_W;y=cur/GRID_W;
+                    for(k=0;k<4;++k) {
+                        int nx=x+nav_dx[k],ny=y+nav_dy[k],n;
+                        if(nx<0 || nx>=GRID_W || ny<0 || ny>=GRID_H) continue;
+                        n=ny*GRID_W+nx;
+                        if(s_nav[n]) continue;
+                        s_nav[n]=(unsigned char)((k^1)+1);
+                        dirty_set(s_frontier[layer^1],nx,ny);have=1;
+                    }
+                }
+            }
+            layer^=1;
+        }
+    }
+    s_nav_room=game_room_id();s_nav_until=now+200u;s_nav_valid=1;
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST
+    { u32 elapsed=clint_getTimeLow(BSP_CLINT)-started;
+      if(elapsed>s_nav_max_ticks) s_nav_max_ticks=elapsed; }
+#endif
+}
+
+static void nav_target(mob_t *m,int *tx,int *ty,u32 now)
+{
+    int x=(m->x+16)/TILE,y=(m->y+24)/TILE,dir;
+    if(!s_nav_valid || s_nav_room!=game_room_id() || (int)(now-s_nav_until)>=0) nav_build(now);
+    if(x<0 || x>=GRID_W || y<0 || y>=GRID_H) return;
+    dir=s_nav[y*GRID_W+x];
+    if(dir==5) { m->nav_follow=0;return; }
+    if(dir<1 || dir>4) return; /* Disconnected target: remain collision safe. */
+    *tx=x*TILE;*ty=y*TILE-8;
+    if(nav_dx[dir-1]) {
+        if(abs_i(m->y-*ty)>2) *tx=m->x;
+        else *tx+=nav_dx[dir-1]*TILE;
+    } else {
+        if(abs_i(m->x-*tx)>2) *ty=m->y;
+        else *ty+=nav_dy[dir-1]*TILE;
+    }
+}
+
+static int mob_try_move(mob_t *m,int tx,int ty,int speed)
+{
+    int dx=tx-m->x,dy=ty-m->y,nx,ny;
+    int step=(abs_i(dx)>speed && abs_i(dy)>speed) ? (speed*181)/256 : speed;
+    if(step<1) step=1;
+    nx=m->x+clamp_step(dx,step);ny=m->y+clamp_step(dy,step);
+    if(nx==m->x && ny==m->y) return 0;
+    if(!mob_path_walkable(m->x,m->y,nx,ny)) return 0;
+    m->x=(short)nx;m->y=(short)ny;return 1;
+}
+
+static void mob_advance(int index,int speed,u32 now)
+{
+    mob_t *m=&g.mobs[index];
+    int tx=g.x+PW/2-16,ty=g.y+PH-8-24,i,rx=0,ry=0;
+    if(m->nav_follow) nav_target(m,&tx,&ty,now);
+    if(!m->nav_follow) {
+        /* Bugs lead a moving target slightly; per-slot flank offsets keep
+         * a wave from becoming one stack. Near contact they close directly. */
+        if(abs_i(tx-m->x)+abs_i(ty-m->y)>96) {
+            if(m->type==MOB_BUG) { tx+=g.vx8*6/8;ty+=g.vy8*6/8; }
+            tx+=g_sin_tab[(index*11+16)&63]*24/64;
+            ty+=g_sin_tab[(index*11)&63]*24/64;
+        }
+        for(i=0;i<N_MOBS;++i) if(i!=index && g.mobs[i].active) {
+            int dx=m->x-g.mobs[i].x,dy=m->y-g.mobs[i].y;
+            if(abs_i(dx)<36 && abs_i(dy)<36) {
+                if(!dx && !dy) dx=(index>i)?1:-1;
+                rx+=(dx>0?1:dx<0?-1:0)*(36-abs_i(dx));
+                ry+=(dy>0?1:dy<0?-1:0)*(36-abs_i(dy));
+            }
+        }
+        tx+=clamp_step(rx,24);ty+=clamp_step(ry,24);
+    }
+    if((tx==m->x && ty==m->y) || mob_try_move(m,tx,ty,speed)) return;
+    m->nav_follow=1;tx=g.x+PW/2-16;ty=g.y+PH-32;
+    nav_target(m,&tx,&ty,now);
+    if(mob_try_move(m,tx,ty,speed)) return;
+    /* Align with the passage before making its next turn. */
+    if(!mob_try_move(m,tx,m->y,speed)) (void)mob_try_move(m,m->x,ty,speed);
 }
 
 /*  随机挑一个【能站人】的格子当出生点（格左上角对齐，正好 32×32 一格）。
@@ -113,9 +251,26 @@ static int mob_spawn_pos(int *ox, int *oy)
     return 0;
 }
 
+void game_mobs_dismiss(void)
+{
+    int i;
+    for (i = 0; i < N_MOBS; ++i) g.mobs[i].active = 0;
+    s_spawned = 0; /* Boss support waves never consume the room-clear reward. */
+}
+
+void game_mobs_sync(int buf)
+{
+    int i;
+    for (i = 0; i < N_MOBS; ++i) g.old_mob[buf][i].active = 0;
+}
+
 void game_mobs_reset(void)
 {
     int i, b;
+    s_nav_valid=0;
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST
+    s_nav_max_ticks=0;
+#endif
 
     for (i = 0; i < N_MOBS; ++i) {
         g.mobs[i].active = 0;
@@ -132,6 +287,7 @@ static void mob_init(mob_t *m, int x, int y, int type)
     m->type = (unsigned char)((type == MOB_BUG) ? MOB_BUG : MOB_SLIME);
     m->hp = (m->type == MOB_BUG) ? BUG_HP : MOB_HP;
     m->frame = 0;
+    m->hop_left=0;m->nav_follow=0;
     m->x = (short)x;
     m->y = (short)y;
     if (m->type == MOB_BUG) {
@@ -186,7 +342,7 @@ int game_mobs_alive(void)
 }
 
 /*  玩家子弹中心点 (cx,cy) 是否打中某只 slime；命中返回 1  */
-int game_mobs_try_hit(int cx, int cy)
+int game_mobs_try_hit_ex(int cx, int cy, int bullet_type)
 {
     int i;
 
@@ -196,10 +352,19 @@ int game_mobs_try_hit(int cx, int cy)
         if (!m->active) continue;
         if (!pt_in(cx, cy, m->x + MOB_BODY_X, m->y + MOB_BODY_Y, MOB_BODY_W, MOB_BODY_H))
             continue;
-        if (--m->hp == 0) {
+        if (bullet_type == BULLET_CHILI) {
+            m->burn_until = game_ms() + CHILI_BURN_MS;
+            m->burn_next = game_ms() + CHILI_BURN_TICK_MS;
+        }
+        if (bullet_type == BULLET_URANUS && ++m->elemental_hits >= 3u) {
+            m->freeze_until = game_ms() + URANUS_FREEZE_MS;
+            m->elemental_hits = 0u;
+        }
+        if (m->hp <= game_player_hit_damage(1)) {
             m->active = 0;
             g.score += 10;
         } else {
+            m->hp = (unsigned char)(m->hp - game_player_hit_damage(1));
             /*  命中闪红：和玩家/Boss 一样按【时间】算，不按帧数。  */
             m->hit_until = game_ms() + HIT_FLASH_MS;
         }
@@ -208,82 +373,54 @@ int game_mobs_try_hit(int cx, int cy)
     return 0;
 }
 
+int game_mobs_try_hit(int cx, int cy)
+{
+    return game_mobs_try_hit_ex(cx, cy, BULLET_A);
+}
+
 void game_mobs_step(u32 now)
 {
     int i;
+#if GAME_PROFILE && GAME_BOSS_STAGE_TEST == 1
+    /* Diagnostic stress: measure a full field even in the open Boss arena. */
+    if(g.boss_locked && game_mobs_alive() && !s_nav_valid) nav_build(now);
+#endif
 
     for (i = 0; i < N_MOBS; ++i) {
         mob_t *m = &g.mobs[i];
-        int px, py, mx, my, dx, dy;
-        int ox, oy;
-
         if (!m->active) continue;
-        ox = m->x;                                  /* 这一步之前在哪（撞墙回退用） */
-        oy = m->y;
-
-        if (m->type == MOB_BUG) {
-            /*  bug：每 30 ms 朝玩家走 1 px；4 步动画 0, 1, 对称1, 0 */
-            if ((int)(now - m->move_next) >= 0) {
-                px = g.x + PW / 2;
-                py = g.y + PH / 2;
-                mx = m->x + MOB_W / 2;
-                my = m->y + MOB_H / 2;
-                dx = px - mx;
-                dy = py - my;
-
-                if (dx < -2) m->x -= 1;
-                else if (dx > 2) m->x += 1;
-                if (dy < -2) m->y -= 1;
-                else if (dy > 2) m->y += 1;
-
-                if (m->x < ARENA_X0) m->x = ARENA_X0;
-                if (m->x > ARENA_X1 - MOB_W) m->x = ARENA_X1 - MOB_W;
-                if (m->y < ARENA_Y0) m->y = ARENA_Y0;
-                if (m->y > ARENA_Y1 - MOB_H) m->y = ARENA_Y1 - MOB_H;
-
-                m->move_next = now + BUG_MOVE_MS;
+        if (m->burn_until && (int)(now - m->burn_until) >= 0)
+            m->burn_until = m->burn_next = 0u;
+        if (m->burn_until && (int)(now - m->burn_next) >= 0) {
+            m->burn_next += CHILI_BURN_TICK_MS;
+            if (m->hp <= game_player_hit_damage(1)) {
+                m->active = 0;
+                g.score += 10;
+                continue;
             }
-            if ((int)(now - m->hop_until) >= 0) {
-                m->frame = (unsigned char)((m->frame + 1u) & 3u);
-                m->hop_until = now + BUG_FRAME_MS;
+            m->hp = (unsigned char)(m->hp - game_player_hit_damage(1));
+        }
+        if (m->freeze_until && (int)(now - m->freeze_until) < 0)
+            goto mob_contact;
+        if (m->type == MOB_BUG) {
+            if ((int)(now-m->move_next)>=0) {
+                mob_advance(i,2,now);
+                m->move_next=now+BUG_MOVE_MS;
+            }
+            if ((int)(now-m->hop_until)>=0) {
+                m->frame=(unsigned char)((m->frame+1u)&3u);
+                m->hop_until=now+BUG_FRAME_MS;
             }
         } else {
-            /*  一跳：起跳瞬间真正位移 12 px，然后 180 ms 腾空（帧 1 + 抬升 6 px），
-             *    再落回帧 0 蹲 520~840 ms。2 帧因此是"蹲 → 跳"而不是原地蠕动。  */
-            if ((int)(now - m->move_next) >= 0) {
-                px = g.x + PW / 2;
-                py = g.y + PH / 2;
-                mx = m->x + MOB_W / 2;
-                my = m->y + MOB_H / 2;
-                dx = px - mx;
-                dy = py - my;
-
-                if (dx < 0) m->x -= 12;
-                else if (dx > 0) m->x += 12;
-                if (dy < 0) m->y -= 12;
-                else if (dy > 0) m->y += 12;
-
-                if (m->x < ARENA_X0) m->x = ARENA_X0;
-                if (m->x > ARENA_X1 - MOB_W) m->x = ARENA_X1 - MOB_W;
-                if (m->y < ARENA_Y0) m->y = ARENA_Y0;
-                if (m->y > ARENA_Y1 - MOB_H) m->y = ARENA_Y1 - MOB_H;
-
-                m->hop_until = now + 180u;
-                m->move_next = now + 520u + (mob_rand() % 320u);
+            if (!m->hop_left && (int)(now-m->move_next)>=0) {
+                m->hop_left=6;m->hop_until=now+180u;
+                m->move_next=now+360u+(mob_rand()%200u);
             }
-        }
-
-        /* 只认脚底矩形：先走 X，再走 Y；两个轴分别扫掠，禁止斜切墙角。 */
-        {
-            int try_x = m->x;
-            int try_y = m->y;
-            if (!mob_path_walkable(ox, oy, try_x, oy)) try_x = ox;
-            if (!mob_path_walkable(try_x, oy, try_x, try_y)) try_y = oy;
-            m->x = (short)try_x;
-            m->y = (short)try_y;
+            if(m->hop_left) { mob_advance(i,3,now);--m->hop_left; }
         }
 
         /*  接触伤害：玩家【脚到眼睛】矩形 vs 小怪【大方块】  */
+mob_contact:
         if (!game_vital_dead(now) &&
             rect_hit(g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H,
                      m->x + MOB_BODY_X, m->y + MOB_BODY_Y,
@@ -293,6 +430,7 @@ void game_mobs_step(u32 now)
     }
 
     /*  最后一只死掉的当帧：发清理奖励 + 恢复门的传送  */
+    if (s_spawned && game_mobs_alive() == 0 && game_world_is_boss()) s_spawned = 0;
     if (s_spawned && game_mobs_alive() == 0) {
         int n = game_room_take_reward();
 
@@ -348,7 +486,11 @@ static void mob_draw_one(u32 fb, u32 now, int buf, int i)
 
         /*  命中闪红：用 MODE=4（tint + alpha），保留小怪贴图的软边；
          *    duration 由 game_mobs_try_hit() 按 HIT_FLASH_MS 写入。  */
-        if ((int)(now - m->hit_until) < 0)
+        if (m->freeze_until && (int)(now - m->freeze_until) < 0)
+            CI_gpu2d_spriteAlphaTintRect(a->base_word, a->stride_word, fb,
+                                         (u32)dx, (u32)dy, MOB_W, MOB_H,
+                                         URANUS_TINT_RGB, URANUS_TINT_K, 1u, flip);
+        else if ((int)(now - m->hit_until) < 0)
             CI_gpu2d_spriteAlphaTintRect(a->base_word, a->stride_word, fb,
                                          (u32)dx, (u32)dy, MOB_W, MOB_H,
                                          0x00FF2828u, 180u, 1u, flip);

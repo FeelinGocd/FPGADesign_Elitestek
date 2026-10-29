@@ -36,11 +36,14 @@
 //    vlog tb_m2loopback.v
 //    vsim -c tb_m2loopback -do "run -all; quit -f"
 //==============================================================================
-`timescale 1ns/100ps
+`timescale 1ns/1ps
 
-module tb_m2loopback;
+module tb_m2loopback #(parameter ASYNC_MEMORY_TEST = 0);
 
-localparam CLK_HALF = 5.0;
+// 0: shared 100 MHz; 1: 200/100 MHz; 2: 300/100 MHz.
+// All nonzero modes retain the same independent 100 MHz memory clock.
+localparam real CLK_HALF = (ASYNC_MEMORY_TEST == 2) ? (5.0/3.0)
+                                                        : (ASYNC_MEMORY_TEST ? 2.5 : 5.0);
 
 // ---- 几何：全屏跨距，源和目的都故意让它不整齐 ----
 //   板上 mode 8 的真实参数（用来复现上板卡住）：C(600,300) -> D(1200,700)，600x300
@@ -210,6 +213,10 @@ assign m_AXI_RVALID = m_AXI_RVALID_r;
 assign m_AXI_BID    = 8'h00;
 assign m_AXI_BRESP  = 2'b00;
 
+reg mem_clock_r = 1'b0;
+wire bus_clk;
+always #5 mem_clock_r = ~mem_clock_r;
+assign bus_clk = ASYNC_MEMORY_TEST ? mem_clock_r : clk;
 initial begin clk = 1'b0; forever #(CLK_HALF) clk = ~clk; end
 
 //==============================================================================
@@ -223,12 +230,15 @@ GPU_2D #(
     .AXI_STRB_WIDTH     (16),
     .AXI_ID_WIDTH       (8),
     .AXI_LEN_WIDTH      (8),
-    .AXI_ID             (8'h00)
+    .AXI_ID             (8'h00),
+    .ASYNC_MEMORY       (ASYNC_MEMORY_TEST)
 ) u_dut (
     .clk_ci             (clk),
     .rst_ci_n           (rst_n),
     .clk_acc            (clk),
     .rst_acc_n          (rst_n),
+    .clk_mem            (bus_clk),
+    .rst_mem_n          (rst_n),
 
     .ci_cmd_valid       (ci_cmd_valid),
     .ci_cmd_ready       (ci_cmd_ready),
@@ -381,7 +391,7 @@ reg                         rd_run_r;
 assign m_AXI_ARREADY = ~rd_run_r;
 assign m_AXI_RID     = 8'h00;
 
-always @(posedge clk or negedge rst_n) begin
+always @(posedge bus_clk or negedge rst_n) begin
     if (!rst_n) begin
         rd_run_r <= 1'b0; rd_left_r <= 9'd0; rd_addr_r <= 32'd0;
         m_AXI_RVALID_r <= 1'b0; m_AXI_RLAST_r <= 1'b0; m_AXI_RDATA_r <= 128'd0;
@@ -422,9 +432,8 @@ integer                     wb;
 
 assign m_AXI_AWREADY = ~wr_run_r & ~b_pend_r;
 assign m_AXI_WREADY  = wr_run_r;
-assign m_AXI_BREADY  = 1'b1;                    // 永远收 B
 
-always @(posedge clk or negedge rst_n) begin
+always @(posedge bus_clk or negedge rst_n) begin
     if (!rst_n) begin
         wr_run_r  <= 1'b0; b_pend_r <= 1'b0;
         wr_left_r <= 9'd0; wr_addr_r <= 32'd0;
@@ -468,7 +477,6 @@ integer             c_wrlow, c_unpw, c_rdw;
 reg                 p_ls, p_ld;
 reg [1:0]           p_ss, p_ws;
 always @(posedge clk) begin
-    if (m_AXI_RVALID_r & m_AXI_RREADY) r_beats = r_beats + 1;
     if (u_dut.rd_ready)                                                          c_rready = c_rready + 1;
     if (!u_dut.u_DDRSource.bank_wr_ready)                                        c_wrlow = c_wrlow + 1;
     if (u_dut.u_DDRSource.unpack_out_valid & ~u_dut.u_DDRSource.unpack_out_ready) c_unpw = c_unpw + 1;
@@ -511,18 +519,6 @@ always @(posedge clk) begin
     end
     if (u_dut.u_Factory.u_DDRPacker.packer_valid       & u_dut.u_Factory.u_DDRPacker.packer_ready)         c_pkout  = c_pkout + 1;
     if (u_dut.wr_valid                    & u_dut.wr_ready)                      c_wbeat  = c_wbeat + 1;
-    if (m_AXI_WVALID & m_AXI_WREADY) begin
-        c_wbus = c_wbus + 1;
-        if (c_wbus <= 3)
-            $display("    [T=%0t] W 总线第 %0d 拍: addr=%08h strb=%04h data=%032h", $time, c_wbus, wr_addr_r, m_AXI_WSTRB, m_AXI_WDATA);
-    end
-    if (m_AXI_AWVALID & m_AXI_AWREADY)
-        $display("    [T=%0t] AW 握手: addr=%08h", $time, m_AXI_AWADDR);
-    if (m_AXI_WVALID & m_AXI_WREADY) begin
-        w_beats = w_beats + 1;
-        if ((w_beats == 1) || (w_beats == 38))
-            $display("    [T=%0t] W 第 %0d 拍", $time, w_beats);
-    end
     if (u_dut.u_DDRSource.state !== p_ss) begin
         p_ss = u_dut.u_DDRSource.state;
         $display("    [T=%0t]   src.state -> %0d  (r=%0d w=%0d)", $time, u_dut.u_DDRSource.state, r_beats, w_beats);
@@ -533,6 +529,15 @@ always @(posedge clk) begin
     end
 end
 
+// AXI events belong to the memory clock; counting at the accelerator clock
+// would double every beat in the 200/100MHz regression.
+always @(posedge bus_clk) begin
+    if (m_AXI_RVALID_r & m_AXI_RREADY) r_beats = r_beats + 1;
+    if (m_AXI_WVALID & m_AXI_WREADY) begin
+        w_beats = w_beats + 1;
+        c_wbus = c_wbus + 1;
+    end
+end
 
 always @(posedge clk) begin
     if (u_dut.line_start & ~p_ls) begin line_start_cnt = line_start_cnt + 1;

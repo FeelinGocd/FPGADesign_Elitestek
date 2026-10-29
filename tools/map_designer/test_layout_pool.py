@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,6 +18,62 @@ import serve
 
 
 class LayoutPoolTest(unittest.TestCase):
+    def shared_terrain_rows(self, source, symbol):
+        tiles_block = re.search(r"LT_rows\[\d+\]\[LAYOUT_MAX_COLS \+ 1\] = \{(.*?)\n\};", source, re.S)
+        self.assertIsNotNone(tiles_block)
+        tiles = re.findall(r'^    "([.BWDCHXYZKSwcxyz]+)",$', tiles_block.group(1), re.M)
+        rotation_block = re.search(r"RT_rows\[\d+\]\[LAYOUT_ROT_COLS\] = \{(.*?)\n\};", source, re.S)
+        self.assertIsNotNone(rotation_block)
+        rotations = [[int(v.strip()) for v in line.split(",") if v.strip()]
+                     for line in re.findall(r"\{([^{}]+)\}", rotation_block.group(1))]
+        def indexes(prefix):
+            block = re.search(prefix + re.escape(symbol) + r"\[\d+\] = \{([^{}]+)\};", source)
+            self.assertIsNotNone(block)
+            return [int(v.strip()) for v in block.group(1).split(",") if v.strip()]
+        return [tiles[i] for i in indexes("LTI_")], [rotations[i] for i in indexes("RTI_")]
+
+    def test_authored_2x2_keeps_eight_doors_and_corner_rotations(self):
+        frames = mapfmt.parse_world_frames(
+            (serve.GAME_DIRS[0] / "game_world.c").read_text(encoding="utf-8"))
+        room = mapfmt.pool_map("2x2")
+        with self.assertRaises(mapfmt.MapError):
+            mapfmt.layout_map_index(room, frames)
+        header, source, _ = mapfmt.emit_layout_data([("room_2x2", room)], frames)
+        self.assertIn("extern const layout_terrain_t T_room_2x2;", header)
+        self.assertIn('&T_room_2x2 }', source)
+        rows, packed = self.shared_terrain_rows(source, "room_2x2")
+        self.assertEqual(rows, ["".join(row) for row in room.rows])
+        self.assertEqual(sum(row.count("D") for row in rows), 8)
+        for y in range(room.height):
+            for x in range(room.cols):
+                self.assertEqual((packed[y][x//4] >> ((x%4)*2)) & 3, room.rot[y][x])
+
+    def test_matching_frame_still_avoids_a_duplicate_terrain_table(self):
+        frames = mapfmt.parse_world_frames(
+            (serve.GAME_DIRS[0] / "game_world.c").read_text(encoding="utf-8"))
+        room = mapfmt.pool_map("1x1")
+        self.assertEqual(mapfmt.layout_map_index(room, frames), 0)
+        _, source, _ = mapfmt.emit_layout_data([("small", room)], frames)
+        self.assertNotIn("LT_small", source)
+
+    def test_shared_rows_preserve_all_authored_maps(self):
+        frames = mapfmt.parse_world_frames(
+            (serve.GAME_DIRS[0] / "game_world.c").read_text(encoding="utf-8"))
+        rooms = [(name, mapfmt.pool_map(name)) for name in ("L", "hidden", "2x2")]
+        _, source, _ = mapfmt.emit_layout_data(rooms, frames)
+        for name, room in rooms:
+            rows, rotations = self.shared_terrain_rows(source, mapfmt.layout_symbol(name))
+            self.assertEqual(rows, ["".join(row) for row in room.rows])
+            for y in range(room.height):
+                for x in range(room.cols):
+                    self.assertEqual((rotations[y][x//4] >> ((x%4)*2)) & 3,
+                                     room.rot[y][x], (name, x, y))
+        unique_tiles = re.search(r"LT_rows\[(\d+)\]", source)
+        unique_rotations = re.search(r"RT_rows\[(\d+)\]", source)
+        full_rows = sum(room.height for _, room in rooms)
+        self.assertLess(int(unique_tiles.group(1)), full_rows // 2)
+        self.assertLess(int(unique_rotations.group(1)), full_rows // 2)
+
     def test_http_save_load_import_and_reject_geometry_change(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(serve, "OUT", Path(temp)):
             server = serve.ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
@@ -197,8 +254,9 @@ class LayoutPoolTest(unittest.TestCase):
         room.objects = [mapfmt.MapObject("stone", 12, 8)]
         items.append(("small_variant", room))
         header, source, _ = mapfmt.emit_layout_data(items, frames)
-        self.assertEqual(source.count("static const char LT_L_001["), 1)
-        self.assertNotIn("static const char LT_variant", source)
+        self.assertEqual(source.count("static const char LT_rows["), 1)
+        self.assertEqual(source.count("static const unsigned short LTI_L_001["), 1)
+        self.assertNotIn("LTI_variant", source)
         self.assertIn("OP(25,9,OBJ_SLIME,10)", source)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -238,7 +296,7 @@ int main(void) {
         game_layout_obj_cell(base, obj, i, &x, &y);
         assert(x == ((i & 1) ? base->terrain->mirror_x - 25 : 25));
         assert(y == ((i & 2) ? base->terrain->mirror_y - 9 : 9));
-        assert(base->terrain->tiles[y][x] == 'B' || i != 0);
+        assert(game_layout_tile_at(base->terrain, x, y) == 'B' || i != 0);
     }
     puts("PASS: 11 L layouts share fixed geometry; deterministic shape pools and object params");
     return 0;

@@ -292,11 +292,11 @@ static void bomb_damage_at(bomb_t *b, u32 now, int idx)
         d2 = (mx - cx) * (mx - cx) + (my - cy) * (my - cy);
         if (d2 > r2) continue;
 
-        if ((int)m->hp <= BOMB_DMG) {
+        if ((int)m->hp <= game_player_hit_damage(BOMB_DMG)) {
             m->active = 0;
             g.score += 10;
         } else {
-            m->hp = (unsigned char)(m->hp - BOMB_DMG);
+            m->hp = (unsigned char)(m->hp - game_player_hit_damage(BOMB_DMG));
             m->hit_until = now + HIT_FLASH_MS;
         }
     }

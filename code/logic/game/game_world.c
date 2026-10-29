@@ -24,10 +24,24 @@
 //  参考        : docs/spec/软件_驱动与API.md §6.2 / §6.5、tools/sandbox
 //==============================================================================
 #include "game.h"
+#include "game_layout_data.h"
 #include "CI_gpu2d.h"
 #if GAME_BOSS_1X1_TEST
 #include "bsp.h"
 #endif
+
+#define PREUPDATE_RESTORE_ENABLED (GAME_BG_PREUPDATE_RESTORE && GAME_BG_COPY && !GAME_BG_EXACT_RECT)
+#if PREUPDATE_RESTORE_ENABLED
+static dirty_map_t s_pre_restored;
+static u32 s_pre_fb;
+static unsigned char s_pre_valid, s_pre_record;
+#endif
+void game_restore_preupdate_cancel(void)
+{
+#if PREUPDATE_RESTORE_ENABLED
+    s_pre_valid = s_pre_record = 0;
+#endif
+}
 
 /*  房间框架不存表：墙 / 地板 / 门 / 角块由 game_frame.c 按参数生成
  *  （见下面 g_maps[] 与 game_frame.h 的规则说明）。
@@ -75,7 +89,7 @@ int game_world_map_key_for_layout(int layout)
     const room_layout_t *L = game_layout(layout);
     if (!L) return 0;              /* 没有布局（商店房）：按 map0 兜底 */
 #if GAME_BOSS_1X1_TEST
-    if (L->map == 1 && !L->terrain) return 3;
+    if (layout == (int)game_kind(ROOM_BOSS)->layouts[0]) return 3;
 #endif
     if (L->terrain) return -1;     /* 异形房（L）：key 不能比，强制重选 */
     if ((int)L->map >= MAP_COUNT) return 0;
@@ -95,6 +109,10 @@ static const world_map_t   *s_mapinfo = &g_maps[0];
 static const char          (*s_map)[MAP_MAX_COLS + 1];   /* 异形表；生成时为 0 */
 static const unsigned char (*s_rot)[MAP_MAX_COLS];
 static const unsigned char (*s_packed_rot)[LAYOUT_ROT_COLS];
+/* Resolve shared row indexes once per room, keeping hot tile/rotation queries
+ * to one row-pointer load. This small cache avoids decoding every lookup. */
+static const char *s_map_rows[MAP_MAX_ROWS];
+static const unsigned char *s_packed_rot_rows[MAP_MAX_ROWS];
 static int                  s_map_w = MAP_COLS;
 static int                  s_map_h = MAP_ROWS;
 static int                  s_world_w = SCR_W;           /* 相机可移动范围 */
@@ -187,6 +205,7 @@ void game_floor_prepare_begin(u32 fb)
 {
     int b = floor_buf(fb), i;
     int large = s_world_w > SCR_W || s_world_h > SCR_H;
+    game_restore_preupdate_cancel();
     if (b < 0) return;
     s_floor_reused = 0u;
     if (s_floor[b].owner != floor_key() && (large || !s_floor[b].large)) {
@@ -219,6 +238,9 @@ static int           s_door_n;
 #endif
 #ifndef GAME_BG_MERGE_MAX_CLEAN_CELLS
 #define GAME_BG_MERGE_MAX_CLEAN_CELLS 2
+#endif
+#ifndef GAME_BG_MERGE_ROWS
+#define GAME_BG_MERGE_ROWS 1
 #endif
 #ifndef GAME_BG_EXACT_RECT
 #define GAME_BG_EXACT_RECT 0
@@ -328,7 +350,7 @@ static void bg_rect_restore(u32 fb)
     s_bg_rect_n = out;
     for (i = 0; i < s_bg_rect_n; ++i) {
         const bg_rect_t *r = &s_bg_rects[i];
-        CI_gpu2d_blitRect(FB_BG, (u32)r->x0, (u32)r->y0,
+        CI_gpu2d_blitRect(game_background_fb(), (u32)r->x0, (u32)r->y0,
                           fb, (u32)r->x0, (u32)r->y0,
                           (u32)(r->x1 - r->x0), (u32)(r->y1 - r->y0));
         ++s_restore_cmds;
@@ -339,12 +361,18 @@ static void bg_rect_restore(u32 fb)
 static unsigned short s_dirty_cells[DIRTY_LIST_MAX];
 static int            s_dirty_overflow;
 static int            s_dirty_ready;
+/* The caller retains this map until the current synchronous draw completes. */
+static const unsigned char *s_dirty_grid;
 static int            s_dirty_min_tx, s_dirty_max_tx;
 static int            s_dirty_min_ty, s_dirty_max_ty;
 static u32            s_restore_direct_frames;
 static u32            s_restore_copy_frames;
 static unsigned char  s_background_valid;
 static unsigned char  s_background_full;
+static unsigned char  s_background_terrain_only;
+static struct { int key; unsigned char valid; } s_bg_cache[DDR_BG_CACHE_COUNT];
+static unsigned s_bg_slot;
+static u32 s_bg_fb = FB_BG;
 static void floor_view_cells(int *tx0, int *ty0, int *tx1, int *ty1);
 static u32 floor_rows(u32 fb, int row0, int row1);
 static u32 floor_draw_doors(u32 fb);
@@ -357,16 +385,51 @@ u32 game_restore_copy_frames(void)   { return s_restore_copy_frames; }
 
 void game_background_invalidate(void)
 {
+    game_restore_preupdate_cancel();
     s_background_valid = 0u;
+    s_bg_cache[s_bg_slot].valid = 0u;
+}
+
+u32 game_background_fb(void) { return s_bg_fb; }
+int game_background_ready(void) { return s_background_valid != 0u; }
+
+int game_background_cached_for_layout(int layout,int flip)
+{
+    const room_layout_t *L=game_layout(layout);
+    int map=game_world_map_key_for_layout(layout),key;
+    unsigned i;
+    if(map<0 && L && L->terrain) key=(1000+(int)L->map)*4+(flip&3)+1;
+    else key=map*4+1;
+    for(i=0;i<DDR_BG_CACHE_COUNT;++i)
+        if(s_bg_cache[i].key==key && s_bg_cache[i].valid) return 1;
+    return 0;
+}
+
+static void background_select(void)
+{
+    unsigned i,empty=DDR_BG_CACHE_COUNT;
+    int key=floor_key();
+    for(i=0;i<DDR_BG_CACHE_COUNT;++i) {
+        if(s_bg_cache[i].key==key) break;
+        if(!s_bg_cache[i].key && empty==DDR_BG_CACHE_COUNT) empty=i;
+    }
+    if(i==DDR_BG_CACHE_COUNT) {
+        i=empty<DDR_BG_CACHE_COUNT?empty:0u;
+        s_bg_cache[i].key=key;s_bg_cache[i].valid=0u;
+    }
+    s_bg_slot=i;
+    s_bg_fb=i?DDR_BG_CACHE_FIRST+(i-1u)*DDR_FULL_SLOT_BYTES:FB_BG;
+    s_background_valid=s_bg_cache[i].valid;
 }
 
 u32 game_background_build(u32 fb)
 {
+    game_restore_preupdate_cancel();
 #if GAME_BG_COPY
     int tx, ty;
     u32 cmds = 1u; /* full-map clear */
     (void)fb;
-    fb = FB_BG;
+    fb = s_bg_fb;
     CI_gpu2d_fillRect(fb, 0u, 0u, (u32)game_world_w(), (u32)game_world_h(), 0u);
     s_background_full = 1u;
     for (ty = 0; ty < s_map_h; ++ty)
@@ -375,6 +438,7 @@ u32 game_background_build(u32 fb)
     cmds += floor_draw_doors(fb);
     s_background_full = 0u;
     s_background_valid = 1u;
+    s_bg_cache[s_bg_slot].valid = 1u;
     return cmds;
 #else
     (void)fb;
@@ -385,6 +449,8 @@ u32 game_background_build(u32 fb)
 
 void game_dirty_begin(void)
 {
+    game_restore_preupdate_cancel();
+
 #if GAME_BG_EXACT_RECT
     s_bg_rect_n = 0;
     s_bg_rect_overflow = 0;
@@ -392,6 +458,7 @@ void game_dirty_begin(void)
     s_dirty_n = 0;
     s_dirty_overflow = 0;
     s_dirty_ready = 1;
+    s_dirty_grid = 0;
     s_dirty_min_tx = GRID_W;
     s_dirty_max_tx = -1;
     s_dirty_min_ty = GRID_H;
@@ -414,26 +481,32 @@ static void dirty_add(int tx, int ty)
         s_dirty_overflow = 1;
 }
 
-void game_world_select(int room)
+static void world_select_layout(const room_layout_t *L,int flip,int boss)
 {
     int tx, ty, idx = 0;
-    const room_layout_t *L;
 
-    (void)room;
-    game_background_invalidate();
+    game_restore_preupdate_cancel();
+    s_background_valid=0u;
     s_cache_valid = 0u;
-    s_is_boss = (game_room_type() == ROOM_BOSS);
+    s_is_boss = boss;
 
     /* 布局里写的是地图下标；没有布局（比如商店房）就用池子第 0 张兜底。
      * ★ 异形房（L 形）自带逐格地形，直接用它，不走框架参数。 */
-    L = game_layout(game_room_layout());
     s_terrain = (L && L->terrain) ? 1 : 0;
+#if GAME_BOSS_1X1_TEST
+    if (s_is_boss) s_terrain = 0;
+#endif
     if (s_terrain) {
         const layout_terrain_t *t = L->terrain;
 
         s_map = t->tiles;
         s_rot = 0;
         s_packed_rot = t->rot;
+        for (ty = 0; ty < t->rows; ++ty) {
+            s_map_rows[ty] = t->tiles[t->tile_rows ? t->tile_rows[ty] : ty];
+            s_packed_rot_rows[ty] = t->rot
+                ? t->rot[t->rot_rows ? t->rot_rows[ty] : ty] : 0;
+        }
         s_map_w = t->cols;
         s_map_h = t->rows;
         g_arena_x0 = (int)t->ax0 * TILE;
@@ -447,13 +520,13 @@ void game_world_select(int room)
         /*  ★ L 房的 4 种形状：地形只存一份，读数时按 flip 翻镜像。
          *    镜像轴取【内容外接框】的中心，不是画布中心：L 的画布 45 宽、内容只有
          *    x6..34，按画布中心翻会把整间房平移 4 格，跑到竞技场外面去。  */
-        s_flip = (unsigned char)(game_room_flip() & 3);
+        s_flip = (unsigned char)(flip & 3);
         if (s_flip) {                        /* 只有要翻的时候才算镜像轴（Boss 房不翻）  */
             int x0 = s_map_w, x1 = -1, y0 = s_map_h, y1 = -1;
 
             for (ty = 0; ty < s_map_h; ++ty)
                 for (tx = 0; tx < s_map_w; ++tx) {
-                    if (s_map[ty][tx] == '.') continue;
+                    if (game_layout_tile_at(t, tx, ty) == '.') continue;
                     if (tx < x0) x0 = tx;
                     if (tx > x1) x1 = tx;
                     if (ty < y0) y0 = ty;
@@ -473,6 +546,9 @@ void game_world_select(int room)
         s_map = s_mapinfo->map;
         s_rot = s_mapinfo->rot;
         s_packed_rot = 0;
+        if (s_map)
+            for (ty = 0; ty < s_mapinfo->frame.rows; ++ty)
+                s_map_rows[ty] = s_map[ty];
         s_map_w = s_mapinfo->frame.cols;
         s_map_h = s_mapinfo->frame.rows;
         s_world_w = s_mapinfo->world_w;
@@ -520,6 +596,37 @@ void game_world_select(int room)
             }
         }
     s_cache_valid = GAME_WORLD_CACHE ? 1u : 0u;
+    background_select();
+}
+
+void game_world_select(int room)
+{
+    (void)room;
+    world_select_layout(game_layout(game_room_layout()),game_room_flip(),
+                        game_room_type()==ROOM_BOSS);
+}
+
+u32 game_background_warmup(void)
+{
+    const room_layout_t *saved=game_layout(game_room_layout());
+    int saved_flip=game_room_flip(),saved_boss=game_room_type()==ROOM_BOSS;
+    int i,f;
+    u32 cmds=0u;
+    /* Only the immutable terrain is cached. Door ownership/skins are patched
+     * for the actual room after restoring its world selection below. */
+    s_background_terrain_only=1u;
+    for(i=0;i<LAYOUT_COUNT;++i) {
+        const room_layout_t *L=game_layout(i);
+        int flips=L->terrain && L->map==3?4:1;
+        for(f=0;f<flips;++f) {
+            world_select_layout(L,f,i==(int)game_kind(ROOM_BOSS)->layouts[0]);
+            if(!s_background_valid) cmds+=game_background_build(FB_BG);
+        }
+    }
+    s_background_terrain_only=0u;
+    world_select_layout(saved,saved_flip,saved_boss);
+    cmds+=game_background_refresh_doors();
+    return cmds;
 }
 
 int game_world_door_count(void)
@@ -575,14 +682,14 @@ char game_world_tile_at(int tx, int ty)
     if (s_flip & 1u) { tx = s_mx - tx; if (tx < 0 || tx >= s_map_w) return '.'; }
     if (s_flip & 2u) { ty = s_my - ty; if (ty < 0 || ty >= s_map_h) return '.'; }
     if (!s_map) return frame_tile(&s_mapinfo->frame, tx, ty);
-    c = s_map[ty][tx];
+    c = s_map_rows[ty][tx];
     return s_flip ? mirror_corner(c, s_flip) : c;
 }
 
 static unsigned char world_source_rot(int tx, int ty)
 {
     if (s_packed_rot)
-        return (unsigned char)((s_packed_rot[ty][tx >> 2] >> ((tx & 3) * 2)) & 3u);
+        return (unsigned char)((s_packed_rot_rows[ty][tx >> 2] >> ((tx & 3) * 2)) & 3u);
     if (s_rot) return (unsigned char)(s_rot[ty][tx] & 3u);
     return frame_rot(&s_mapinfo->frame, tx, ty);
 }
@@ -707,6 +814,7 @@ static int is_door(int tx, int ty)
 {
     char c;
 
+    if (s_background_terrain_only) return 0;
     if (tx < 0 || tx >= s_map_w || ty < 0 || ty >= s_map_h) return 0;
     c = game_world_tile_at(tx, ty);
     if (c != 'D' && c != 'H') return 0;              /* 'H' = 隐藏门，和 'D' 同级 */
@@ -818,7 +926,7 @@ static void blit_cell(u32 fb, int tx, int ty)
         return;
     }
     if (c == 'D' || c == 'H') {                       /* 'H' = 隐藏门（未炸开时当墙） */
-        if (game_room_door_visible(tx, ty)) return;    /* 可见：第二趟画门 */
+        if (!s_background_terrain_only && game_room_door_visible(tx, ty)) return;
         /* 不可见：当墙画。隐藏门背后是【隐藏房墙】，普通门背后是木墙。  */
         ai = (c == 'H') ? ASSET_background_wall_hidden : ASSET_background_wall_wood;
         c = 'W';
@@ -936,7 +1044,8 @@ static u32 blit_floor_cell(u32 fb, int tx, int ty)
     if (ty * TILE >= game_world_h()) return 0u;
     floor_written(fb, tx, ty);
     if (c == '.' && !door_inner_cell(tx, ty, &dtx, &dty)) return 0u;
-    if ((c == 'D' || c == 'H') && game_room_door_visible(tx, ty)) return 0u;
+    if ((c == 'D' || c == 'H') && !s_background_terrain_only &&
+        game_room_door_visible(tx, ty)) return 0u;
     blit_cell(fb, tx, ty);
     return 1u;
 }
@@ -1054,6 +1163,17 @@ void game_floor_prepare_frame(u32 fb)
     int ty0, ty1;
     game_floor_prepare_begin(fb);
     game_floor_view_rows(&ty0, &ty1);
+#if GAME_BG_COPY
+    if(s_background_valid) {
+        int tx0,tx1,tx,ty;
+        floor_view_cells(&tx0,&ty0,&tx1,&ty1);
+        CI_gpu2d_blitRect(s_bg_fb,(u32)g.cam_x,(u32)g.cam_y,
+                         fb,(u32)g.cam_x,(u32)g.cam_y,SCR_W,SCR_H);
+        for(ty=ty0;ty<=ty1;++ty) for(tx=tx0;tx<=tx1;++tx) floor_written(fb,tx,ty);
+        s_floor[floor_buf(fb)].active=floor_key();
+        return;
+    }
+#endif
     game_draw_floor_rows(fb, ty0, ty1);
     floor_draw_doors(fb);
     s_floor[floor_buf(fb)].active = floor_key();
@@ -1133,6 +1253,11 @@ u32 game_background_cmd_count(void)
 void game_floor_damage(int buf, dirty_map_t dirty)
 {
     int k, tx, ty;
+    /* Old actor records are about to be cleared by the room model reset.
+     * Repair this buffer before reuse even if a short return trip selects
+     * the same geometry that it last displayed. The cached clean viewport
+     * also erases overlays whose old records no longer exist. */
+    if ((unsigned)buf < GAME_FB_COUNT) s_floor[buf].active=0;
     if (!s_dirty_ready || s_dirty_overflow) {
         for (ty = 0; ty < GRID_H; ++ty)
             for (tx = 0; tx < GRID_W; ++tx)
@@ -1153,6 +1278,7 @@ void game_mark_dirty(dirty_map_t dirty, int x, int y, int w, int h)
     int tx1 = (x + w - 1) / TILE, ty1 = (y + h - 1) / TILE;
     int tx, ty;
 
+    s_dirty_grid = dirty;
 #if GAME_BG_EXACT_RECT
     bg_rect_add(x, y, w, h);
 #endif
@@ -1170,6 +1296,47 @@ void game_mark_dirty(dirty_map_t dirty, int x, int y, int w, int h)
                 dirty_add(tx, ty);
             }
 }
+
+#if !GAME_BG_EXACT_RECT
+/* Saved tile history already has the same clipping as game_mark_dirty.
+ * Union its new bits directly, retaining the queue/bounds used by all terrain
+ * and static-sprite paths. Exact rectangles require their original pixels. */
+void game_dirty_merge_tiles(dirty_map_t dirty, const dirty_map_t saved)
+{
+    int i, byte_tx = 0, byte_ty = 0;
+    int min_tx = s_dirty_min_tx, max_tx = s_dirty_max_tx;
+    int min_ty = s_dirty_min_ty, max_ty = s_dirty_max_ty;
+    int count = s_dirty_n, overflow = s_dirty_overflow;
+    s_dirty_grid = dirty;
+    for (i = 0; i < DIRTY_BYTES; ++i) {
+        unsigned bits = (unsigned)saved[i] & ~(unsigned)dirty[i];
+        if (i == DIRTY_BYTES - 1 && ((GRID_W * GRID_H) & 7))
+            bits &= (1u << ((GRID_W * GRID_H) & 7)) - 1u;
+        if (bits) {
+            int cell = i * 8, tx = byte_tx, ty = byte_ty;
+            dirty[i] |= (unsigned char)bits;
+            for (; bits; bits >>= 1, ++cell) {
+                if (bits & 1u) {
+                    if (tx < min_tx) min_tx = tx;
+                    if (tx > max_tx) max_tx = tx;
+                    if (ty < min_ty) min_ty = ty;
+                    if (ty > max_ty) max_ty = ty;
+                    if (count < DIRTY_LIST_MAX)
+                        s_dirty_cells[count++] = (unsigned short)cell;
+                    else
+                        overflow = 1;
+                }
+                if (++tx == GRID_W) { tx = 0; ++ty; }
+            }
+        }
+        byte_tx += 8;
+        while (byte_tx >= GRID_W) { byte_tx -= GRID_W; ++byte_ty; }
+    }
+    s_dirty_min_tx = min_tx; s_dirty_max_tx = max_tx;
+    s_dirty_min_ty = min_ty; s_dirty_max_ty = max_ty;
+    s_dirty_n = count; s_dirty_overflow = overflow;
+}
+#endif
 
 /*----------------------------------------------------------------------------*/
 /*  HUD 的脏区：HUD 的 (x,y) 是屏幕坐标，实际画在 fb + cam 处 ⇒ 世界坐标要加相机。 */
@@ -1245,6 +1412,39 @@ static void door_dirty_range(int tx, int ty, int *x0, int *y0, int *x1, int *y1)
     if (*y1 >= GRID_H) *y1 = GRID_H - 1;
 }
 
+u32 game_background_refresh_doors(void)
+{
+    game_restore_preupdate_cancel();
+#if GAME_BG_COPY
+    u32 cmds = 0u;
+    int k;
+    if (!s_background_valid) return game_background_build(FB_BG);
+
+    /* Same terrain, different room graph: only door footprints depend on
+     * neighbors, special-room skins and hidden-link state. Restore the full
+     * tile envelope (including the 4px frame overhang) before drawing any
+     * doors, so closed or smaller doors cannot retain old transparent edges. */
+    s_background_full = 1u;
+    for (k = 0; k < s_door_n; ++k) {
+        int x0, y0, x1, y1, tx, ty;
+        door_dirty_range(s_door_tx[k], s_door_ty[k], &x0, &y0, &x1, &y1);
+        if (x1 >= s_map_w) x1 = s_map_w - 1;
+        if (y1 >= s_map_h) y1 = s_map_h - 1;
+        for (ty = y0; ty <= y1; ++ty)
+            for (tx = x0; tx <= x1; ++tx) {
+                blit_cell(s_bg_fb, tx, ty);
+                if (ty * TILE < s_world_h &&
+                    (!is_door(tx, ty))) ++cmds;
+            }
+    }
+    cmds += floor_draw_doors(s_bg_fb);
+    s_background_full = 0u;
+    return cmds;
+#else
+    return 0u;
+#endif
+}
+
 static void restore_dirty_direct(u32 fb, dirty_map_t dirty)
 {
     int k, tx, ty;
@@ -1270,16 +1470,71 @@ static void restore_dirty_direct(u32 fb, dirty_map_t dirty)
     }
 }
 
+#if GAME_BG_COPY
+/* Keep the exact horizontal-run coverage, only joining identical spans on
+ * consecutive rows. Bit 7 marks a span seen in the current row. Two byte
+ * arrays cost 90 stack bytes at the current maximum 45-column world. */
+typedef char bg_span_columns_fit_byte[(GRID_W < 128) ? 1 : -1];
+typedef char bg_span_rows_fit_byte[(GRID_H < 256) ? 1 : -1];
+typedef char bg_span_height_fits_command[(GRID_H * TILE <= 65535) ? 1 : -1];
+static void restore_span(u32 fb, int x0, int y0, int x1, int y1)
+{
+    CI_gpu2d_blitRect(s_bg_fb, (u32)(x0 * TILE), (u32)(y0 * TILE),
+                      fb, (u32)(x0 * TILE), (u32)(y0 * TILE),
+                      (u32)((x1 - x0) * TILE), (u32)((y1 - y0) * TILE));
+    ++s_restore_cmds;
+#if PREUPDATE_RESTORE_ENABLED
+    if (s_pre_record) {
+        int x, y;
+        for (y = y0; y < y1; ++y)
+            for (x = x0; x < x1; ++x) dirty_set(s_pre_restored, x, y);
+    }
+#endif
+}
+#endif
+
+int game_restore_preupdate_active(u32 fb)
+{
+#if PREUPDATE_RESTORE_ENABLED
+    return s_pre_valid && s_pre_fb == fb;
+#else
+    (void)fb;
+    return 0;
+#endif
+}
+
+static inline int restore_tile_needed(dirty_map_t dirty, int x, int y, int exclude)
+{
+    if (!dirty_get(dirty, x, y)) return 0;
+#if PREUPDATE_RESTORE_ENABLED
+    if (exclude && dirty_get(s_pre_restored, x, y)) return 0;
+#else
+    (void)exclude;
+#endif
+    return 1;
+}
+
+static inline int restore_tile_excluded(int x, int y, int exclude)
+{
+#if PREUPDATE_RESTORE_ENABLED
+    return exclude && dirty_get(s_pre_restored, x, y);
+#else
+    (void)x; (void)y; (void)exclude;
+    return 0;
+#endif
+}
+
 /*----------------------------------------------------------------------------*/
-void game_restore_dirty(u32 fb, dirty_map_t dirty)
+static void restore_dirty(u32 fb, dirty_map_t dirty, int view)
 {
     int tx, ty, k;
 
  #if GAME_BG_COPY
     if (s_background_valid) {
+        int exclude = game_restore_preupdate_active(fb);
         if (s_dirty_ready && !s_dirty_overflow && s_dirty_max_tx < 0)
             return;
-        if (s_dirty_ready && !s_dirty_overflow &&
+        if (!exclude && !view && s_dirty_ready && !s_dirty_overflow &&
             s_dirty_n <= GAME_BG_DIRECT_MAX_CELLS) {
             ++s_restore_direct_frames;
             restore_dirty_direct(fb, dirty);
@@ -1287,7 +1542,7 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
         }
         ++s_restore_copy_frames;
 #if GAME_BG_EXACT_RECT
-        if (s_dirty_ready && !s_bg_rect_overflow) {
+        if (!view && s_dirty_ready && !s_bg_rect_overflow) {
             bg_rect_restore(fb);
             return;
         }
@@ -1298,7 +1553,10 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
         {
             int row0 = 0, row1 = game_world_rows() - 1;
             int col0 = 0, col1 = game_world_cols() - 1;
-            if (s_dirty_ready && !s_dirty_overflow && s_dirty_max_tx >= 0) {
+#if GAME_BG_MERGE_ROWS
+            unsigned char span_end[GRID_W], span_y0[GRID_W];
+#endif
+            if (s_dirty_ready && s_dirty_max_tx >= 0) {
                 row0 = s_dirty_min_ty;
                 row1 = s_dirty_max_ty;
                 col0 = s_dirty_min_tx;
@@ -1308,14 +1566,26 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
                 if (row1 >= game_world_rows()) row1 = game_world_rows() - 1;
                 if (col1 >= game_world_cols()) col1 = game_world_cols() - 1;
             }
+            if (view > 0) {
+                int x0 = g.cam_x / TILE, y0 = g.cam_y / TILE;
+                int x1 = (g.cam_x + SCR_W - 1) / TILE;
+                int y1 = (g.cam_y + SCR_H - 1) / TILE;
+                if (col0 < x0) col0 = x0;
+                if (col1 > x1) col1 = x1;
+                if (row0 < y0) row0 = y0;
+                if (row1 > y1) row1 = y1;
+            }
+#if GAME_BG_MERGE_ROWS
+            for (tx = col0; tx <= col1; ++tx) span_end[tx] = 0;
+#endif
             for (ty = row0; ty <= row1; ++ty) {
                 tx = col0;
                 while (tx <= col1) {
                 int start, copy_end, dirty_cells, gap;
-                while (tx <= col1 && !dirty_get(dirty, tx, ty)) ++tx;
+                while (tx <= col1 && !restore_tile_needed(dirty, tx, ty, exclude)) ++tx;
                 if (tx > col1) break;
                 start = tx;
-                while (tx <= col1 && dirty_get(dirty, tx, ty)) ++tx;
+                while (tx <= col1 && restore_tile_needed(dirty, tx, ty, exclude)) ++tx;
                 copy_end = tx;
                 dirty_cells = copy_end - start;
 
@@ -1324,24 +1594,45 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
                  * reduces command overhead without leaving stale pixels. */
                 for (gap = 0; gap < 2 && copy_end < col1; ++gap) {
                     int q = copy_end;
-                    while (q <= col1 && !dirty_get(dirty, q, ty)) ++q;
-                    if (q > col1 || q - copy_end > GAME_BG_MERGE_MAX_CLEAN_CELLS) break;
+                    while (q <= col1 && !restore_tile_needed(dirty, q, ty, exclude) &&
+                           !restore_tile_excluded(q, ty, exclude)) ++q;
+                    if (q > col1 || q - copy_end > GAME_BG_MERGE_MAX_CLEAN_CELLS ||
+                        restore_tile_excluded(q, ty, exclude)) break;
                     copy_end = q;
-                    while (copy_end <= col1 && dirty_get(dirty, copy_end, ty)) {
+                    while (copy_end <= col1 && restore_tile_needed(dirty, copy_end, ty, exclude)) {
                         ++copy_end;
                         ++dirty_cells;
                     }
                 }
                 tx = copy_end;
-                CI_gpu2d_blitRect(FB_BG,
-                                  (u32)(start * TILE), (u32)(ty * TILE),
-                                  fb,
-                                  (u32)(start * TILE), (u32)(ty * TILE),
-                                  (u32)((copy_end - start) * TILE), TILE);
-                s_restore_cells += (u32)dirty_cells;
-                ++s_restore_cmds;
+#if GAME_BG_MERGE_ROWS
+                if (span_end[start] != copy_end) {
+                    if (span_end[start])
+                        restore_span(fb, start, span_y0[start], span_end[start], ty);
+                    span_y0[start] = (unsigned char)ty;
                 }
+                span_end[start] = (unsigned char)(copy_end | 0x80);
+#else
+                restore_span(fb, start, ty, copy_end, ty + 1);
+#endif
+                s_restore_cells += (u32)dirty_cells;
+                }
+#if GAME_BG_MERGE_ROWS
+                for (tx = col0; tx <= col1; ++tx) {
+                    if (span_end[tx] & 0x80u)
+                        span_end[tx] &= 0x7Fu;
+                    else if (span_end[tx]) {
+                        restore_span(fb, tx, span_y0[tx], span_end[tx], ty);
+                        span_end[tx] = 0;
+                    }
+                }
+#endif
             }
+#if GAME_BG_MERGE_ROWS
+            for (tx = col0; tx <= col1; ++tx)
+                if (span_end[tx])
+                    restore_span(fb, tx, span_y0[tx], span_end[tx], row1 + 1);
+#endif
         }
 
         /* Doors are part of the clean background and need no special pass. */
@@ -1389,35 +1680,74 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
     }
 }
 
+void game_restore_dirty(u32 fb, dirty_map_t dirty)
+{
+    restore_dirty(fb, dirty, 0);
+}
+
+/* The caller has already selected an HDMI-free framebuffer. The next camera
+ * position is unknown, so restore old footprints throughout the world. */
+int game_restore_preupdate(u32 fb, dirty_map_t dirty)
+{
+#if PREUPDATE_RESTORE_ENABLED
+    game_restore_preupdate_cancel();
+    if (!s_background_valid || !s_dirty_ready || floor_buf(fb) < 0 ||
+        game_floor_needs_prepare(fb)) return 0;
+    dirty_clear(s_pre_restored);
+    s_pre_fb = fb;
+    s_pre_record = 1;
+    restore_dirty(fb, dirty, -1); /* force DDR copies, without viewport culling */
+    s_pre_record = 0;
+    s_pre_valid = 1;
+    /* Copies can include clean gaps. Retain their damage for HUD/static
+     * redraw decisions even though the second restore excludes these tiles. */
+    game_dirty_merge_tiles(dirty, s_pre_restored);
+    return 1;
+#else
+    (void)fb; (void)dirty;
+    return 0;
+#endif
+}
+
+/* Only the current viewport is consumed by display. Newly exposed tiles are
+ * marked by game_draw before this call, so deferred offscreen sprite pixels
+ * are cleaned before they can become visible again. Full-map callers keep
+ * game_restore_dirty's original behavior. */
+void game_restore_dirty_view(u32 fb, dirty_map_t dirty)
+{
+    restore_dirty(fb, dirty, GAME_BG_VIEW_CULL);
+}
+
 /* The DDR restore path may copy a short clean gap between two dirty runs.
  * Static sprites on that gap must be redrawn too, even though their own
  * tiles were never marked dirty. Expanding horizontally by the merge limit
  * is conservative and covers every pixel the merged copy can overwrite. */
 int game_dirty_touches(int x0, int y0, int x1, int y1)
 {
-    int k;
-    int reach = 0;
-
-    if (!s_dirty_ready || s_dirty_overflow) return 1;
+    int tx, ty, reach = 0;
+    if (!s_dirty_ready) return 1;
+    if (!s_dirty_grid) return 0;
 #if GAME_BG_COPY
     if (s_background_valid && s_dirty_n > GAME_BG_DIRECT_MAX_CELLS) {
 #if GAME_BG_EXACT_RECT
-        /* The optional rectangle coalescer can cover a much larger gap. */
         return 1;
 #else
         reach = GAME_BG_MERGE_MAX_CLEAN_CELLS;
 #endif
     }
 #endif
-
-    for (k = 0; k < s_dirty_n; ++k) {
-        unsigned short code = s_dirty_cells[k];
-        int tx = code % GRID_W;
-        int ty = code / GRID_W;
-
-        if (tx >= x0 - reach && tx < x1 + reach &&
-            ty >= y0 && ty < y1) return 1;
-    }
+    /* Query the authoritative bits even after the short queue overflows.
+     * A prop usually covers one tile: this avoids scanning 128 entries per
+     * prop, or redrawing every prop when camera/HUD dirties exceed 128. */
+    if (x1 <= x0 || y1 <= y0) return 0;
+    x0 -= reach; x1 += reach;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > GRID_W) x1 = GRID_W;
+    if (y1 > GRID_H) y1 = GRID_H;
+    for (ty = y0; ty < y1; ++ty)
+        for (tx = x0; tx < x1; ++tx)
+            if (dirty_get(s_dirty_grid, tx, ty)) return 1;
     return 0;
 }
 

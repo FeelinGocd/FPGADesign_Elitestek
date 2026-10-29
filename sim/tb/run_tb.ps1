@@ -1,5 +1,5 @@
 
-param([string]$TbDir, [string]$TbTop)
+param([string]$TbDir, [string]$TbTop, [string]$Generic = '')
 $ErrorActionPreference = 'Continue'
 $ROOT = 'E:\project\FPGA_Project\FPGA_Elitestek\FPGADesign_Elitestek'
 #  NOTE (keep this file ASCII-only; PS 5.1 reads BOM-less .ps1 as ANSI):
@@ -19,9 +19,15 @@ foreach ($h in @('palette.hex','assets.hex')) {
   if (!(Test-Path $src)) { $src = Join-Path $ROOT "sim\tb\$h" }
   if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $RUNDIR "hex\$h") -Force }
 }
-if (Test-Path work) { Remove-Item -Recurse -Force work }
+$workPath = [IO.Path]::GetFullPath((Join-Path $RUNDIR 'work'))
+$tbRoot = [IO.Path]::GetFullPath((Join-Path $ROOT 'sim\tb')) + '\'
+if (!$workPath.StartsWith($tbRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe simulation work path' }
+if (Test-Path -LiteralPath $workPath) { Remove-Item -LiteralPath $workPath -Recurse -Force }
 & "$MS\vlib.exe" work | Out-Null
 $F = @(
+  "$R\common\ResetSync.v", "$R\common\CdcStream.v",
+  "$P\GPU_2D\interface\GPU2D_MemoryCDC.v", "$P\GPU_2D\interface\GPU2D_DisplayCDC.v",
+  "$P\GPU_2D\factory\PixelPipeline.v",
   "$P\GPU_2D\GPU_2D.v",
   "$P\GPU_2D\interface\GPU2D_APBHandler.v", "$P\GPU_2D\interface\AXIMastersHandler.v",
   "$P\GPU_2D\factory\Factory.v", "$P\GPU_2D\factory\WriteController.v",
@@ -44,6 +50,8 @@ $F = @(
 & "$MS\vlog.exe" -work work -quiet @F
 Write-Host "=== $TbTop VLOG EXIT $LASTEXITCODE ==="
 if ($LASTEXITCODE -eq 0) {
-  & "$MS\vsim.exe" -c -quiet -do "run -all; quit -f" $TbTop 2>&1 | Tee-Object -FilePath "run_$TbTop.log"
+  $simArgs = @('-c', '-quiet', '-do', 'run -all; quit -f')
+  if ($Generic) { $simArgs += "-g$Generic" }
+  & "$MS\vsim.exe" @simArgs $TbTop 2>&1 | Tee-Object -FilePath "run_$TbTop.log"
   Write-Host "=== $TbTop VSIM EXIT $LASTEXITCODE ==="
 }

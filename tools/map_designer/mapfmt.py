@@ -1164,6 +1164,8 @@ def parse_world_frames(world_src: str) -> List[Dict[str, Any]]:
     if start < 0:
         raise MapError("game_world.c 里找不到 g_maps[]")
     block = world_src[start:world_src.find("};", start)]
+    # Export against the release table, excluding the optional Boss test frame.
+    block = re.sub(r"#if\s+GAME_BOSS_1X1_TEST\b.*?#endif", "", block, flags=re.S)
     block = block.replace("FRAME_DOOR_NONE", "255")
     for macro in sorted(_FRAME_MACROS, key=len, reverse=True):
         block = re.sub(r"\b%s\b" % macro, _FRAME_MACROS[macro], block)
@@ -1203,9 +1205,9 @@ def parse_world_frames(world_src: str) -> List[Dict[str, Any]]:
 
 
 def layout_map_index(room: RoomMap, frames: Optional[Sequence[Dict[str, Any]]] = None) -> int:
-    """按框架尺寸找到 g_maps[] 里的下标（frames 由 parse_world_frames 提供）。
+    """找到完整匹配的 g_maps[] 框架（frames 由 parse_world_frames 提供）。
 
-    ★ 这张图必须正好是标准矩形框架；异形房得单独存地形表，暂不支持自动导出。
+    地形、门位和旋转必须一致；不匹配时由 emit_layout_data 保存逐格地形。
     """
     det = detect_frame(room)
     if det is None:
@@ -1233,6 +1235,14 @@ def layout_map_index(room: RoomMap, frames: Optional[Sequence[Dict[str, Any]]] =
             continue
         if (frame.get("corner_ch") or "C") != want_corner:
             continue
+        # A canvas/skin match must never discard different doors, corners or
+        # rotations. Compact frames are safe only when every source cell agrees.
+        if "arena" in frame and any(
+            room.rows[y][x] != frame_tile(frame, x, y) or
+            (int(room.rot[y][x]) & 3) != frame_rot(frame, x, y)
+            for y in range(room.height) for x in range(room.cols)
+        ):
+            continue
         return index
     sizes = "、".join("%d×%d%s%s%s" % (f["cols"], f["rows"],
                                        " 地板" + f["floor_ch"] if f.get("floor_ch") else "",
@@ -1253,7 +1263,7 @@ def emit_layout_data(
     """把 [(名字, 地图)] 生成 (header, source, warnings)。
 
     · 标准矩形房 -> 只出对象表，地图下标指向 g_maps[]；
-    · 异形房（L 形）-> 额外出逐格地形表（tiles + rot），布局自带地形；
+    · 其余房间（含八门 2×2）-> 额外出逐格地形表（tiles + rot），布局自带地形；
     · 输出稳定：按名字排序、对象按 (y, x) 排序；
     · 有一张图不合法就抛 MapError（整批不生成）；
     · exit 这类固件不认的对象跳过并记 warning。
@@ -1287,17 +1297,15 @@ def emit_layout_data(
             )
 
         terrain: Optional[Dict[str, Any]] = None
-        # The fixed map pool is authoritative.  A standard 2x2/hidden map may
-        # contain skin details that detect_frame() cannot recognize, but it
-        # still must reference g_maps[] instead of duplicating a tile matrix.
         try:
-            fixed_id = pool_map_id(room)
+            map_idx = layout_map_index(room, frames)
         except MapError:
-            fixed_id = None
-        fixed_map_index = {"1x1": 0, "2x2": 1, "hidden": 2}.get(fixed_id)
-        if fixed_map_index is not None:
-            map_idx = fixed_map_index
-        elif detect_frame(room) is None:
+            sizes = {(int(f["cols"]), int(f["rows"])) for f in frames} if frames else {
+                (DEFAULT_COLS, DEFAULT_ROWS), (MAX_COLS, MAX_ROWS)}
+            if detect_frame(room) is not None and (room.cols, room.height) not in sizes:
+                raise
+            # Fixed pool names identify the authored map, not an older frame
+            # with the same dimensions. Preserve all cells and rotations.
             ax0, ay0, ax1, ay1 = arena_rect(room)
             world_w = room.cols * TILE
             world_h = room.height * TILE
@@ -1312,9 +1320,7 @@ def emit_layout_data(
                 "rot": [[int(v) & 3 for v in row] for row in room.rot],
             }
             map_idx = 0
-            warnings.append("布局 %r 使用异形逐格地形表" % name)
-        else:
-            map_idx = layout_map_index(room, frames)
+            warnings.append("布局 %r 使用逐格地形表（未匹配完整固件框架）" % name)
 
         rows.append((name, sym, room, map_idx, objs, terrain))
 
@@ -1331,6 +1337,31 @@ def emit_layout_data(
             owner, map_id = terrain_owners.setdefault(geometry_key(room), (sym, index))
             terrain_refs[sym] = owner
             rows[index] = (name, sym, room, map_id, objs, terrain)
+
+    # Share identical rows across authored terrains, retaining O(1) cell lookup.
+    # Rotation keys include zero padding to match the fixed C row stride.
+    tile_rows: List[str] = []
+    rotation_rows: List[Tuple[int, ...]] = []
+    tile_ids = {}
+    rotation_ids = {}
+    terrain_row_ids = {}
+    for name, sym, room, map_idx, objs, terrain in rows:
+        if not terrain or terrain_refs[sym] != sym:
+            continue
+        ti, ri = [], []
+        for line, rotations in zip(terrain["tiles"], terrain["rot"]):
+            if line not in tile_ids:
+                tile_ids[line] = len(tile_rows)
+                tile_rows.append(line)
+            ti.append(tile_ids[line])
+            packed = tuple(sum(v << (2 * k) for k, v in enumerate(rotations[x:x+4]))
+                           for x in range(0, room.cols, 4))
+            packed += (0,) * (((MAX_COLS + 3) // 4) - len(packed))
+            if packed not in rotation_ids:
+                rotation_ids[packed] = len(rotation_rows)
+                rotation_rows.append(packed)
+            ri.append(rotation_ids[packed])
+        terrain_row_ids[sym] = (ti, ri)
 
     digest = hashlib.sha256()
     for name, sym, room, map_idx, objs, terrain in rows:
@@ -1385,29 +1416,33 @@ def emit_layout_data(
     source.append("#define OP(x, y, k, p) { (unsigned char)(x), (unsigned char)(y), (unsigned char)(k), (unsigned char)(p) }")
     source.append("")
 
+    if tile_rows:
+        source.append("/* Shared rows; per-terrain uint16 indexes preserve every cell/rotation. */")
+        source.append("static const char LT_rows[%d][LAYOUT_MAX_COLS + 1] = {" % len(tile_rows))
+        source.extend('    "%s",' % line for line in tile_rows)
+        source.append("};")
+        source.append("static const unsigned char RT_rows[%d][LAYOUT_ROT_COLS] = {" % len(rotation_rows))
+        source.extend("    { %s }," % ", ".join(str(v) for v in line) for line in rotation_rows)
+        source.append("};")
+        source.append("")
+
     for name, sym, room, map_idx, objs, terrain in rows:
         if terrain and terrain_refs[sym] == sym:
             source.append("/* %s：%d×%d 异形地形 */" % (name, room.cols, room.height))
-            source.append("static const char LT_%s[%d][LAYOUT_MAX_COLS + 1] = {" % (sym, room.height))
-            for line in terrain["tiles"]:
-                source.append('    "%s",' % line)
-            source.append("};")
-            source.append("/* Four rotations per byte; low two bits are the leftmost cell. */")
-            source.append("static const unsigned char RT_%s[%d][LAYOUT_ROT_COLS] = {" % (sym, room.height))
-            for line in terrain["rot"]:
-                packed = [sum(v << (2 * k) for k, v in enumerate(line[x:x+4]))
-                          for x in range(0, room.cols, 4)]
-                source.append("    { %s }," % ", ".join(str(v) for v in packed))
-            source.append("};")
+            ti, ri = terrain_row_ids[sym]
+            source.append("static const unsigned short LTI_%s[%d] = { %s };" %
+                          (sym, room.height, ", ".join(str(v) for v in ti)))
+            source.append("static const unsigned short RTI_%s[%d] = { %s };" %
+                          (sym, room.height, ", ".join(str(v) for v in ri)))
             source.append("const layout_terrain_t T_%s = {" % sym)
             occupied = [(x, y) for y, row in enumerate(room.rows)
                         for x, ch in enumerate(row) if ch != "."]
             mirror_x = min(x for x, y in occupied) + max(x for x, y in occupied)
             mirror_y = min(y for x, y in occupied) + max(y for x, y in occupied)
-            source.append("    LT_%s, RT_%s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d" % (
-                sym, sym, terrain["cols"], terrain["rows"],
+            source.append("    LT_rows, RT_rows, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, LTI_%s, RTI_%s" % (
+                terrain["cols"], terrain["rows"],
                 terrain["arena"][0], terrain["arena"][1], terrain["arena"][2], terrain["arena"][3],
-                terrain["world"][0], terrain["world"][1], mirror_x, mirror_y))
+                terrain["world"][0], terrain["world"][1], mirror_x, mirror_y, sym, sym))
             source.append("};")
             source.append("")
 
