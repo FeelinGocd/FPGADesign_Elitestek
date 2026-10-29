@@ -1,3 +1,14 @@
+//==============================================================================
+//  game_boss_stress.c —— Boss 弹幕容量扫描与保持负载诊断
+//------------------------------------------------------------------------------
+//  干什么      : 按阶梯增加全屏可见弹数，记录帧耗时、IRQ 间隔和 GPU 忙周期。
+//  上一级是谁  : game_update_step()、game_main.c 的诊断帧钩子
+//  启用条件    : GAME_BOSS_BULLET_SWEEP != 0，且 GAME_BOSS_DEBUG=1。
+//  接口契约    :
+//    · 只服务于压测，不影响正式游戏流程；
+//    · game_boss_stress_step() 返回 1 时，本模块接管本帧弹幕负载；
+//    · 每个测量窗口先丢弃 30 帧，等待 UART 和帧缓存历史稳定。
+//==============================================================================
 #include "game.h"
 #include "IRQ_frame.h"
 #include "bsp.h"
@@ -12,8 +23,8 @@
 #error Sweep start/hold levels must be ordered inside the bullet pool
 #endif
 
-/* 120 measured frames per level; the first 30 frames after changing levels
- * are ignored so framebuffer history and the single UART report settle. */
+/* 每档测量 120 帧；换档后的前 30 帧不计入统计，
+ * 让帧缓存历史和 UART 输出先恢复稳定。 */
 #define SWEEP_WARMUP 30
 #define SWEEP_FRAMES 120
 #define SWEEP_STEP 16
@@ -37,7 +48,7 @@ void game_boss_stress_arm(void)
     s_best_once = 0;
 }
 
-/* Return 1 while the synthetic load owns the Boss fight. */
+/* 合成负载接管 Boss 战时返回 1。 */
 int game_boss_stress_step(void)
 {
     if (!s_armed && s_running && g.phase != PHASE_FIGHT) {

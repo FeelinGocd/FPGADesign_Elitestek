@@ -84,8 +84,8 @@ static int mob_path_walkable(int old_x, int old_y, int new_x, int new_y)
     return 1;
 }
 
-/* One reverse BFS is shared by all mobs. Byte parent directions plus two
- * bitset frontiers avoid a full index queue. Open ground uses direct steering. */
+/* 所有小怪共享一次反向 BFS。用字节保存父方向，并用两个位图前沿代替完整索引队列；
+ * 没有阻挡的开阔区域仍使用直接追踪。 */
 #define NAV_ROOT 5u
 #define NAV_WALL 7u
 static unsigned char s_nav[GRID_W*GRID_H];
@@ -116,15 +116,15 @@ static void nav_build(u32 now)
     if(y0<0) y0=0;
     if(x1>=GRID_W) x1=GRID_W-1;
     if(y1>=GRID_H) y1=GRID_H-1;
-    /* Only the arena and its two-cell door band can be walkable. Avoid
-     * expensive geometry/door queries for the unused 45x35 world margins. */
+    /* 只有竞技场和门外两格范围可能可行走，避免对不用的 45×35 世界边缘
+     * 执行昂贵的地形和门查询。 */
     for(i=0;i<GRID_W*GRID_H;++i) s_nav[i]=NAV_WALL;
     for(y=y0;y<=y1;++y) for(x=x0;x<=x1;++x) {
         int d=abs_i(x-gx)+abs_i(y-gy);
         i=y*GRID_W+x;
-        /* At this aligned waypoint the 24x16 feet lie inside exactly one
-         * tile: x+4..27, y+8..23. Use the same terrain/stone occupancy rules
-         * directly instead of recomputing a rectangle for every map cell. */
+        /* 在对齐路点上，24×16 的脚底正好落在一个格子内：
+         * x+4..27、y+8..23。直接复用相同的地形/石头占用规则，
+         * 不为每个地图格重新计算矩形。 */
         s_nav[i]=game_room_cell_walkable(x,y) &&
             (!blockers || !game_stone_hit_at(x*TILE+16,y*TILE+16)) ? 0 : NAV_WALL;
         if(!s_nav[i] && d<best) { best=d;goal=i; }
@@ -168,7 +168,7 @@ static void nav_target(mob_t *m,int *tx,int *ty,u32 now)
     if(x<0 || x>=GRID_W || y<0 || y>=GRID_H) return;
     dir=s_nav[y*GRID_W+x];
     if(dir==5) { m->nav_follow=0;return; }
-    if(dir<1 || dir>4) return; /* Disconnected target: remain collision safe. */
+    if(dir<1 || dir>4) return; /* 目标不可达时保持原地，继续遵守碰撞约束。 */
     *tx=x*TILE;*ty=y*TILE-8;
     if(nav_dx[dir-1]) {
         if(abs_i(m->y-*ty)>2) *tx=m->x;
@@ -196,8 +196,8 @@ static void mob_advance(int index,int speed,u32 now)
     int tx=g.x+PW/2-16,ty=g.y+PH-8-24,i,rx=0,ry=0;
     if(m->nav_follow) nav_target(m,&tx,&ty,now);
     if(!m->nav_follow) {
-        /* Bugs lead a moving target slightly; per-slot flank offsets keep
-         * a wave from becoming one stack. Near contact they close directly. */
+        /* bug 会预判移动目标；每个槽使用不同的侧翼偏移，
+         * 避免整群怪叠成一团。接近玩家后改为直接收拢。 */
         if(abs_i(tx-m->x)+abs_i(ty-m->y)>96) {
             if(m->type==MOB_BUG) { tx+=g.vx8*6/8;ty+=g.vy8*6/8; }
             tx+=g_sin_tab[(index*11+16)&63]*24/64;
@@ -217,7 +217,7 @@ static void mob_advance(int index,int speed,u32 now)
     m->nav_follow=1;tx=g.x+PW/2-16;ty=g.y+PH-32;
     nav_target(m,&tx,&ty,now);
     if(mob_try_move(m,tx,ty,speed)) return;
-    /* Align with the passage before making its next turn. */
+    /* 转向之前先与通道对齐，避免斜切墙角。 */
     if(!mob_try_move(m,tx,m->y,speed)) (void)mob_try_move(m,m->x,ty,speed);
 }
 
@@ -382,7 +382,7 @@ void game_mobs_step(u32 now)
 {
     int i;
 #if GAME_PROFILE && GAME_BOSS_STAGE_TEST == 1
-    /* Diagnostic stress: measure a full field even in the open Boss arena. */
+    /* 诊断压测：即使 Boss 房场地开阔，也构造完整导航负载进行测量。 */
     if(g.boss_locked && game_mobs_alive() && !s_nav_valid) nav_build(now);
 #endif
 

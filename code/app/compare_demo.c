@@ -681,7 +681,7 @@ void compare_demo_run(void)
             left_paint_full(SPLIT_A_L, 0);
             left_paint_full(SPLIT_B_L, 1);
             /* 每条 left_paint_full = 1 条铺底 + N 条方块 (FENCE 不计入 CMD_DONE,
-             * 口径同 game_demo.c) => 两次共 2*(N+1) 条 */
+             * 口径同游戏主循环) => 两次共 2*(N+1) 条 */
             (void)gpu2d_exclusive_end(t + 2u * (g_blk_n + 1u));
             bsp_printf("  左半 A_L/B_L 已画好\r\n");
             g_st = ST_PAINT_R;

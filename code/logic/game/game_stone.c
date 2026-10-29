@@ -16,8 +16,8 @@
 #include "CI_gpu2d.h"
 
 #define STONE_SIZE 32
-/* Absolute map cells avoid duplicating arena-origin conversions and cover
- * all legal 45x35 maps; the previous 24-row bitmap could overflow in L rooms. */
+/* 直接使用绝对地图格，避免重复做竞技场原点换算，并覆盖全部合法 45×35 地图。
+ * 旧的 24 行位图在 L 形房中可能越界。 */
 
 /*  当前房间的石头占用表：32 px 格对齐，碰撞只查 1 个格 / 身体覆盖的几格。
  *  s_grid_room 与当前房间不一致时重建；换房/炸碎后置 -1。  */
@@ -94,7 +94,7 @@ static int stone_block_overlap(int px, int py, int sx, int sy)
            ey < sy + STONE_SIZE && ey + eh > sy;
 }
 
-/* ???????????????????/????????????? */
+/* 玩家当前位置是否与任一有效石头、木箱或板条箱相交。 */
 int game_stone_block(int px, int py)
 {
     const room_layout_t *L = stone_layout();
@@ -116,7 +116,7 @@ int game_stone_block(int px, int py)
     return 0;
 }
 
-/* ??????????????????????????????? */
+/* 判断人物从旧位置移动到新位置时是否穿过阻挡物边界。 */
 int game_stone_block_move(int old_px, int old_py, int px, int py)
 {
     const room_layout_t *L = stone_layout();
@@ -156,9 +156,8 @@ int game_stone_hit_at(int x, int y)
     if (x < ARENA_X0 || x >= ARENA_X1 ||
         y < ARENA_Y0 || y >= ARENA_Y1) return 0;
 
-    /* STONE_SIZE is fixed at 32 and the arena coordinates are non-negative;
-     * use shifts in the 356-bullet collision hot path instead of software
-     * division on the RISC-V core. */
+    /* STONE_SIZE 固定为 32，且竞技场坐标非负；
+     * 碰撞热路径使用移位代替 RISC-V 上的软件除法。 */
     gx = x >> 5;
     gy = y >> 5;
     stone_grid_ensure();
@@ -315,9 +314,8 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
 }
 
 #if GAME_STATIC_CULL
-/* A newly entering actor may cover a retained stone even when none of the
- * old sprite footprints dirtied its tile. Keep that stone in the z-sorted
- * list so the original front/behind relationship remains correct. */
+/* 新进入的实体可能盖住一块保留在地面的石头，即使旧精灵覆盖区没有标脏该格。
+ * 这块石头仍要进入 z 排序列表，才能保持正确的遮挡关系。 */
 static dirty_map_t s_stone_dynamic;
 
 static void stone_dynamic_mark(int x, int y, int w, int h)
@@ -334,8 +332,8 @@ static void stone_dynamic_mark(int x, int y, int w, int h)
         for (tx = x0; tx <= x1; ++tx) dirty_set(s_stone_dynamic, tx, ty);
 }
 
-/* Build once, on demand, instead of scanning all entity pools for each stone.
- * Stones occupy aligned full tiles, so these bits preserve exact overlap. */
+/* 按需构建一次，避免为每块石头扫描全部实体池。
+ * 石头总是占满对齐格，因此位图可以精确保留重叠关系。 */
 static void stone_dynamic_build(signed char room)
 {
     int i;

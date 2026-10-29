@@ -10,7 +10,7 @@
 *
 * @brief 用户 APB 按键外设 —— 对外 API。
 *
-* 实现: project/peripheral/APB0/key/user_key.c
+* 实现: code/peripheral/APB0/key/user_key.c（同步到工程后的路径为 peripheral/APB0/key/user_key.c）
 * 对应 RTL: RTL/Peripherial/APB0/key/APB0_key.v
 *
 * 这个头文件只暴露函数, 不暴露寄存器结构体。
@@ -38,7 +38,7 @@
 
 /*******************************************************************************
 *
-* @brief 读按键状态。key_state 由 key.v 内部维护, 松开自动清零。
+* @brief 读按键状态。key_state 由 RTL 顶层按键模块维护, 松开自动清零。
 *
 * @return bit[3:0], 按下 = 1, 松开 = 0 (已消抖)
 *

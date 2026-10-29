@@ -74,8 +74,8 @@ static const world_map_t g_maps[] = {
       { MAP_COLS, MAP_ROWS, 9, 4, 31, 16, { 20, 10, 20, 10 }, { 0, 1, 2, 3 }, 1, 'K', 'w', 'H', 'c' },
       SCR_W, SCR_H },
 #if GAME_BOSS_1X1_TEST
-    /* Same 1x1 frame as map 0, but a distinct floor identity keeps the
-     * normal-room DDR background from being reused for the Boss room. */
+    /* 与地图 0 使用相同的 1×1 框架，但分配独立地板身份，
+     * 防止 Boss 房误复用普通房的 DDR 背景。 */
     { 0, 0,
       { MAP_COLS, MAP_ROWS, 9, 4, 31, 16, { 20, 10, 20, 10 }, { 0, 1, 2, 3 }, 1 },
       SCR_W, SCR_H },
@@ -109,8 +109,8 @@ static const world_map_t   *s_mapinfo = &g_maps[0];
 static const char          (*s_map)[MAP_MAX_COLS + 1];   /* 异形表；生成时为 0 */
 static const unsigned char (*s_rot)[MAP_MAX_COLS];
 static const unsigned char (*s_packed_rot)[LAYOUT_ROT_COLS];
-/* Resolve shared row indexes once per room, keeping hot tile/rotation queries
- * to one row-pointer load. This small cache avoids decoding every lookup. */
+/* 每次选房只解析一次共享行索引，使热点地形/旋转查询只需加载一次行指针。
+ * 这组小缓存避免每次查询都重新解码索引。 */
 static const char *s_map_rows[MAP_MAX_ROWS];
 static const unsigned char *s_packed_rot_rows[MAP_MAX_ROWS];
 static int                  s_map_w = MAP_COLS;
@@ -145,8 +145,8 @@ static char render_tile_char(unsigned char packed)
                                     'H', 'K', 'S', 'w', 'c', 'x', 'y', 'z' };
     return codes[packed & 0x0Fu];
 }
-/* Reuse the existing DDR pixels, not a separate room image. Keep one large
- * terrain identity per buffer; small rooms only invalidate overwritten cells. */
+/* 复用已有 DDR 像素，不额外保存整张房间图像。
+ * 每块缓冲记录一个大地形身份，小房间只使被覆盖的格失效。 */
 #define FLOOR_BITS ((MAP_MAX_COLS * MAP_MAX_ROWS + 7) / 8)
 typedef struct {
     int owner, active;
@@ -157,7 +157,7 @@ static floor_record_t s_floor[GAME_FB_COUNT];
 static u32 s_floor_reused;
 u32 game_floor_reused_cells(void) { return s_floor_reused; }
 
-/* Zero is invalid, so metadata lives in BSS instead of a stored data image. */
+/* 0 表示无效，因此元数据放在 BSS 中，不需要在固件里保存初始数据镜像。 */
 static int floor_key(void) { return s_map_idx * 4 + (int)s_flip + 1; }
 static int floor_buf(u32 fb)
 {
@@ -361,7 +361,7 @@ static void bg_rect_restore(u32 fb)
 static unsigned short s_dirty_cells[DIRTY_LIST_MAX];
 static int            s_dirty_overflow;
 static int            s_dirty_ready;
-/* The caller retains this map until the current synchronous draw completes. */
+/* 调用方必须保证该映射在当前同步绘制完成前保持有效。 */
 static const unsigned char *s_dirty_grid;
 static int            s_dirty_min_tx, s_dirty_max_tx;
 static int            s_dirty_min_ty, s_dirty_max_ty;
@@ -565,7 +565,7 @@ static void world_select_layout(const room_layout_t *L,int flip,int boss)
 #endif
     }
 
-    /* Read source geometry once while building both render and door indexes. */
+    /* 构建渲染索引和门索引时，只读取一次源几何。 */
     s_door_n = 0;
     for (ty = 0; ty < s_map_h; ++ty)
         for (tx = 0; tx < s_map_w; ++tx) {
@@ -573,10 +573,8 @@ static void world_select_layout(const room_layout_t *L,int flip,int boss)
             unsigned char rot;
 
             if (!s_terrain) {
-                /* Standard rooms are generated from frame parameters. Avoid
-                 * routing every cell through the public query trio; frame_tile
-                 * and frame_rot are pure and the direction is only meaningful
-                 * for D/H cells. */
+                /* 标准房由框架参数生成。这里避免每个格都走三个公开查询函数；
+                 * frame_tile/frame_rot 是纯函数，而方向只对 D/H 格有意义。 */
                 dc = frame_tile(&s_mapinfo->frame, tx, ty);
                 rot = frame_rot(&s_mapinfo->frame, tx, ty);
             } else {
@@ -612,8 +610,8 @@ u32 game_background_warmup(void)
     int saved_flip=game_room_flip(),saved_boss=game_room_type()==ROOM_BOSS;
     int i,f;
     u32 cmds=0u;
-    /* Only the immutable terrain is cached. Door ownership/skins are patched
-     * for the actual room after restoring its world selection below. */
+    /* 这里只缓存不变的地形。恢复实际房间的世界选择后，
+     * 再补画该房间的门归属和贴图皮肤。 */
     s_background_terrain_only=1u;
     for(i=0;i<LAYOUT_COUNT;++i) {
         const room_layout_t *L=game_layout(i);
@@ -840,8 +838,8 @@ static int door_pair_sy(int tx, int ty)
     return (game_world_dir_at(tx, ty) & 1) ? 0 : ((s_flip & 2u) ? -1 : 1);
 }
 
-/* A D footprint is two cells, while its opened hidden entrance sprite is one.
- * Select the member that touches floor, including mirrored L-room footprints. */
+/* D 门占两格，而炸开后使用的隐藏入口精灵只占一格。
+ * 这里选出紧贴地板的那一格，并兼容 L 形房的镜像布局。 */
 void game_world_hidden_cell(int tx, int ty, int *hx, int *hy)
 {
     static const signed char dx[4] = {0, 1, 0, -1};
@@ -1016,9 +1014,8 @@ static void blit_door(u32 fb, int tx, int ty)
     door_rect(tx, ty, &x, &y, 0, 0);
 
     /*  门素材只有硬边透明，没有半透明像素。 */
-    /* Door assets are hard-edged: transparent pixels use the white key color
-     * and opaque pixels are fully opaque. CK preserves the wall underneath
-     * without the destination readback required by alpha blending. */
+    /* 门素材只包含透明和不透明像素：透明像素使用白色键控，不透明像素保持原色。
+     * CK 直接保留下方墙体，不需要 alpha 混合所要求的目的像素回读。 */
     CI_gpu2d_spriteFlipCK(door->base_word, door->stride_word, fb,
         (u32)x, (u32)y, door->width, door->height, drot);
 
@@ -1064,8 +1061,8 @@ static void floor_view_cells(int *tx0, int *ty0, int *tx1, int *ty1)
     *tx0 = x0; *ty0 = y0; *tx1 = x1; *ty1 = y1;
 }
 
-/* Chunk coordinates cover whole tiles intersecting the current viewport.
- * The camera and selected map must remain fixed throughout a build. */
+/* 分块坐标覆盖与当前视口相交的完整格。
+ * 构建期间相机和已选地图必须保持不变。 */
 void game_floor_view_rows(int *ty0, int *ty1)
 {
     int tx0, tx1;
@@ -1107,8 +1104,7 @@ u32 game_draw_floor_rows(u32 fb, int row0, int row1)
             c = game_world_tile_at(tx, ty);
             if (c == '.' && !door_inner_cell(tx, ty, &dtx, &dty)) {
                 int start = tx, y1 = (ty + 1) * TILE;
-                /* Merge invalid black cells, rather than clearing whole rows
-                 * and destroying valid pixels retained from the large room. */
+                /* 合并连续失效黑格，避免整行清空时破坏大招间保留下来的有效像素。 */
                 do {
                     floor_written(fb, tx, ty);
                     ++tx;
@@ -1134,7 +1130,7 @@ static u32 floor_draw_doors(u32 fb)
     int k;
     u32 cmds = 0u;
 
-    /* Doors overlap adjacent cells, so emit them after all terrain chunks. */
+    /* 门会跨入相邻格，因此所有地形分块完成后才能绘制门。 */
     for (k = 0; k < game_world_door_count(); ++k) {
         int dx, dy;
         game_world_door_at(k, &dx, &dy);
@@ -1183,12 +1179,12 @@ void game_draw_floor(u32 fb)
 {
     int ty0, ty1, b = floor_buf(fb), i;
 
-    /* Boot/restart discards retained pixels for this buffer. */
+    /* 启动或重开游戏时丢弃该缓冲保留下来的像素记录。 */
     s_floor[b].owner = s_floor[b].active = 0;
     s_floor[b].large = 0;
     for (i = 0; i < FLOOR_BITS; ++i) s_floor[b].valid[i] = 0;
     game_floor_prepare_begin(fb);
-    /* Boot/restart still initializes both buffers while display is disabled. */
+    /* 启动/重开即使关闭显示，也要初始化两块帧缓存。 */
     CI_gpu2d_fillRect(fb, 0u, 0u, (u32)game_world_w(), (u32)game_world_h(), 0u);
     game_floor_view_rows(&ty0, &ty1);
     floor_rows(fb, ty0, ty1);
@@ -1201,8 +1197,8 @@ u32 game_floor_cmd_count(void)
     int tx, ty, tx0, ty0, tx1, ty1;
     u32 cells = 0u;
 
-    /* Count the actual command stream. Door anchors are drawn in the
-     * dedicated door pass, while their inner '.' cell may draw a wall. */
+    /* 按实际命令流计数。门锚点由独立门绘制阶段产生，
+     * 其内侧 '.' 格仍可能绘制一段墙。 */
     floor_view_cells(&tx0, &ty0, &tx1, &ty1);
     for (ty = ty0; ty <= ty1; ++ty)
         for (tx = tx0; tx <= tx1; ++tx) {
@@ -1248,15 +1244,14 @@ u32 game_background_cmd_count(void)
     return 1u + cells + (u32)doors;
 }
 
-/* Use the existing dirty queue as transition-only scratch. The caller
- * collects footprints while the old room and both old sprite records exist. */
+/* 把已有脏格队列临时当作换房暂存区。
+ * 调用方必须在旧房间和两份旧精灵记录都存在时采集覆盖区。 */
 void game_floor_damage(int buf, dirty_map_t dirty)
 {
     int k, tx, ty;
-    /* Old actor records are about to be cleared by the room model reset.
-     * Repair this buffer before reuse even if a short return trip selects
-     * the same geometry that it last displayed. The cached clean viewport
-     * also erases overlays whose old records no longer exist. */
+    /* 房间模型即将复位并清除旧实体记录。
+     * 即使快速往返后重新选中相同地形，也必须先修复该缓冲；
+     * 缓存中的干净视口还能擦掉已经没有旧记录的叠加层。 */
     if ((unsigned)buf < GAME_FB_COUNT) s_floor[buf].active=0;
     if (!s_dirty_ready || s_dirty_overflow) {
         for (ty = 0; ty < GRID_H; ++ty)
@@ -1298,9 +1293,9 @@ void game_mark_dirty(dirty_map_t dirty, int x, int y, int w, int h)
 }
 
 #if !GAME_BG_EXACT_RECT
-/* Saved tile history already has the same clipping as game_mark_dirty.
- * Union its new bits directly, retaining the queue/bounds used by all terrain
- * and static-sprite paths. Exact rectangles require their original pixels. */
+/* 已保存的历史格与 game_mark_dirty() 使用相同裁剪规则，
+ * 可直接取并集，同时保留地形和静态精灵路径使用的队列/边界。
+ * 精确矩形模式则需要保留各自的原始像素范围。 */
 void game_dirty_merge_tiles(dirty_map_t dirty, const dirty_map_t saved)
 {
     int i, byte_tx = 0, byte_ty = 0;
@@ -1420,10 +1415,9 @@ u32 game_background_refresh_doors(void)
     int k;
     if (!s_background_valid) return game_background_build(FB_BG);
 
-    /* Same terrain, different room graph: only door footprints depend on
-     * neighbors, special-room skins and hidden-link state. Restore the full
-     * tile envelope (including the 4px frame overhang) before drawing any
-     * doors, so closed or smaller doors cannot retain old transparent edges. */
+    /* 地形相同但房间连接图变化时，只有门覆盖区受邻居、特殊房皮肤
+     * 和隐藏连接状态影响。画门前先恢复完整格范围（包括外伸 4 px），
+     * 避免关闭或变小的门残留旧的透明边缘。 */
     s_background_full = 1u;
     for (k = 0; k < s_door_n; ++k) {
         int x0, y0, x1, y1, tx, ty;
@@ -1471,9 +1465,9 @@ static void restore_dirty_direct(u32 fb, dirty_map_t dirty)
 }
 
 #if GAME_BG_COPY
-/* Keep the exact horizontal-run coverage, only joining identical spans on
- * consecutive rows. Bit 7 marks a span seen in the current row. Two byte
- * arrays cost 90 stack bytes at the current maximum 45-column world. */
+/* 保持精确的水平段覆盖，只合并连续行中完全相同的区间。
+ * bit7 标记当前行已经出现的列；在当前最大 45 列世界下，
+ * 两个字节数组共占 90 字节栈空间。 */
 typedef char bg_span_columns_fit_byte[(GRID_W < 128) ? 1 : -1];
 typedef char bg_span_rows_fit_byte[(GRID_H < 256) ? 1 : -1];
 typedef char bg_span_height_fits_command[(GRID_H * TILE <= 65535) ? 1 : -1];
@@ -1547,9 +1541,8 @@ static void restore_dirty(u32 fb, dirty_map_t dirty, int view)
             return;
         }
 #endif
-        /* Restore horizontal runs from the clean DDR background. This keeps
-         * the dirty-cell semantics unchanged while reducing one terrain
-         * sprite command per cell to one DDR copy per run. */
+        /* 从干净 DDR 背景恢复连续水平段。脏格语义保持不变，
+         * 同时把每格一条地形精灵命令压缩成每段一次 DDR 拷贝。 */
         {
             int row0 = 0, row1 = game_world_rows() - 1;
             int col0 = 0, col1 = game_world_cols() - 1;
@@ -1589,9 +1582,8 @@ static void restore_dirty(u32 fb, dirty_map_t dirty, int view)
                 copy_end = tx;
                 dirty_cells = copy_end - start;
 
-                /* A short clean gap may be copied between nearby dirty runs.
-                 * Restoration precedes current-frame actors, so this
-                 * reduces command overhead without leaving stale pixels. */
+                /* 相邻脏段之间可以顺带复制一小段干净间隔。
+                 * 恢复发生在当前帧实体绘制之前，因此可减少命令数且不残留旧像素。 */
                 for (gap = 0; gap < 2 && copy_end < col1; ++gap) {
                     int q = copy_end;
                     while (q <= col1 && !restore_tile_needed(dirty, q, ty, exclude) &&
@@ -1635,7 +1627,7 @@ static void restore_dirty(u32 fb, dirty_map_t dirty, int view)
 #endif
         }
 
-        /* Doors are part of the clean background and need no special pass. */
+        /* 门已包含在干净背景中，不需要额外的门绘制通过。 */
         return;
     }
  #endif
@@ -1685,8 +1677,8 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
     restore_dirty(fb, dirty, 0);
 }
 
-/* The caller has already selected an HDMI-free framebuffer. The next camera
- * position is unknown, so restore old footprints throughout the world. */
+/* 调用方已选择不被 HDMI 使用的帧缓存。下一相机位置未知，
+ * 因此需要在整张世界中恢复旧覆盖区。 */
 int game_restore_preupdate(u32 fb, dirty_map_t dirty)
 {
 #if PREUPDATE_RESTORE_ENABLED
@@ -1699,8 +1691,8 @@ int game_restore_preupdate(u32 fb, dirty_map_t dirty)
     restore_dirty(fb, dirty, -1); /* force DDR copies, without viewport culling */
     s_pre_record = 0;
     s_pre_valid = 1;
-    /* Copies can include clean gaps. Retain their damage for HUD/static
-     * redraw decisions even though the second restore excludes these tiles. */
+    /* 连续拷贝可能包含干净间隔。即使第二次恢复会排除这些格，
+     * 仍要保留其损坏信息供 HUD/静态精灵重画判断。 */
     game_dirty_merge_tiles(dirty, s_pre_restored);
     return 1;
 #else
@@ -1709,19 +1701,17 @@ int game_restore_preupdate(u32 fb, dirty_map_t dirty)
 #endif
 }
 
-/* Only the current viewport is consumed by display. Newly exposed tiles are
- * marked by game_draw before this call, so deferred offscreen sprite pixels
- * are cleaned before they can become visible again. Full-map callers keep
- * game_restore_dirty's original behavior. */
+/* 显示只消费当前视口。新暴露的格会在本次调用前由 game_draw 标脏，
+ * 因而延迟处理的屏外精灵像素在重新可见前已被清理。
+ * 全地图调用方仍使用 game_restore_dirty() 的原行为。 */
 void game_restore_dirty_view(u32 fb, dirty_map_t dirty)
 {
     restore_dirty(fb, dirty, GAME_BG_VIEW_CULL);
 }
 
-/* The DDR restore path may copy a short clean gap between two dirty runs.
- * Static sprites on that gap must be redrawn too, even though their own
- * tiles were never marked dirty. Expanding horizontally by the merge limit
- * is conservative and covers every pixel the merged copy can overwrite. */
+/* DDR 恢复路径可能顺带复制两个脏段之间的短干净间隔。
+ * 间隔上的静态精灵也必须重画，即使其所在格本身没有被标脏。
+ * 按合并上限向水平两侧扩张是保守做法，可覆盖合并拷贝可能覆盖的全部像素。 */
 int game_dirty_touches(int x0, int y0, int x1, int y1)
 {
     int tx, ty, reach = 0;
@@ -1736,9 +1726,9 @@ int game_dirty_touches(int x0, int y0, int x1, int y1)
 #endif
     }
 #endif
-    /* Query the authoritative bits even after the short queue overflows.
-     * A prop usually covers one tile: this avoids scanning 128 entries per
-     * prop, or redrawing every prop when camera/HUD dirties exceed 128. */
+    /* 即使短队列溢出，也要查询权威脏区位图。
+     * 道具通常只覆盖一格，这样无需为每个道具扫描 128 项，
+     * 也无需在相机/HUD 脏格超过 128 时重画全部道具。 */
     if (x1 <= x0 || y1 <= y0) return 0;
     x0 -= reach; x1 += reach;
     if (x0 < 0) x0 = 0;

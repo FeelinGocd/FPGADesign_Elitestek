@@ -23,5 +23,5 @@
 
 #include "type.h"
 
-/* 阻塞跑一局游戏（四方向移动 + 自动开火 + Boss 弹幕 + 道具拾取 + 脏区重画 + HUD） */
+/* 阻塞跑一局游戏（WASD 移动/默认朝向 + 按住小键盘瞄准并连射 + Boss 弹幕 + 道具 + HUD） */
 void game_demo_run(void);

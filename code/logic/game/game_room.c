@@ -21,7 +21,7 @@
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"
 
-/* Keep transition measurements available in IDE builds without custom flags. */
+/* IDE 构建未传自定义宏时也保留换房计时数据。 */
 #ifndef GAME_PROFILE
 #define GAME_PROFILE 1
 #endif
@@ -164,8 +164,8 @@ static int s_entry_dir;         /* < 0 = 落在房间中心 */
 static int s_entry_cell = -1;   /* 从哪一格进来（多格房同方向有多扇门时用来对位） */
 static int s_lock;              /* 刚进过门 ⇒ 不重复触发 */
 static unsigned char s_force_full;
-/* A full transition owns the back buffer until its entry view is complete.
- * The other buffer is repaired on its next ordinary rendering turn. */
+/* 完整换房在入口画面完成前独占后台缓冲。
+ * 另一块缓冲轮到下一次普通渲染时再修复。 */
 static signed char s_rebuild_buf = -1;
 enum { ROOM_BUILD_TILES, ROOM_BUILD_FINISH };
 static unsigned char s_rebuild_phase;
@@ -176,8 +176,8 @@ static int s_rebuild_row, s_rebuild_last;
 #if ROOM_BUILD_ROWS < 1 || ROOM_BUILD_ROWS > 4
 #error ROOM_BUILD_ROWS must be between 1 and 4
 #endif
-/* Process several small batches before yielding. The millisecond clock can
- * round by 1 ms; one already-started row batch may exceed this soft budget. */
+/* 连续处理几个小批次后再让出主循环。毫秒时钟存在 1 ms 取整，
+ * 已经开始的单批行绘制可能略微超过这个软预算。 */
 #ifndef ROOM_BUILD_BUDGET_MS
 #define ROOM_BUILD_BUDGET_MS 6u
 #endif
@@ -1021,8 +1021,8 @@ static void doors_build(void)
         bh = y1 - y0 + 1;
     }
 
-    /* game_world_select() already indexed all D/H cells. Reuse that list:
-     * scanning the whole map again was the dominant doors phase on transitions. */
+    /* game_world_select() 已索引全部 D/H 格，这里直接复用。
+     * 重新扫描整张地图曾是换房阶段的主要耗时。 */
     for (i = 0; i < game_world_door_count() && n < MAX_ROOM_DOORS; ++i) {
             int dir;
             int ix, iy, cgx, cgy, nx, ny, target = -1;
@@ -1135,8 +1135,8 @@ static void doors_build(void)
 
     s_door_count = n;
 
-    /* Eight per-door lines overflow the UART FIFO and can block a Boss-room
-     * transition for tens of milliseconds. Enable them only for telemetry. */
+    /* 每扇门打印一行会产生八行输出，足以塞满 UART FIFO，
+     * 并可能阻塞 Boss 房换房数十毫秒，因此只在遥测开启时输出。 */
 #if GAME_UART_TELEMETRY
     for (i = 0; i < s_door_count; ++i) {
         int t = s_doors[i].room;
@@ -1348,8 +1348,8 @@ int game_room_blast_hidden(int cx, int cy, int r)
 
         if (d->room < 0 || !d->hidden) continue;
         if (game_room_hidden_is_open(me, d->room)) continue;
-        /* Same one-cell entrance as rendering, movement and teleport.
-         * cx/cy is a spawn floor cell for H, not a second door cell. */
+        /* 与渲染、移动和传送共用同一个单格入口。
+         * H 门的 cx/cy 是内侧出生地板格，不是第二个门格。 */
         door_slot(d, &sx, &sy, &sw, &sh);
         if (!hidden_rect_hit(cx, cy, sx, sy, r)) continue;
         if (game_room_hidden_open(me, d->room)) {
@@ -1407,9 +1407,8 @@ int game_room_door_asset_at(int tx, int ty)
     if (s_room < 0 || s_room >= ROOM_COUNT)
         return ASSET_background_door_normal;
 
-    /* Boss occupies four grid records. Always use its canonical anchor when
-     * choosing the current-room door skin; otherwise a covered cell can be
-     * treated as an ordinary room during a transition. */
+    /* Boss 房占四个网格记录。选择当前房间门贴图时必须使用规范锚点，
+     * 否则换房期间可能把被覆盖的格误当成普通房。 */
     cur_room = game_room_id();
     if (cur_room < 0 || cur_room >= ROOM_COUNT)
         cur_room = s_room;
@@ -1778,8 +1777,8 @@ void game_room_reset(void)
 
     room_layout_generate();
     s_room = s_start_room;
-    /* game_init()/game_restart() immediately initialize both framebuffers,
-     * so the first ordinary room transition can use the same-map path. */
+    /* game_init()/game_restart() 会立即初始化两块帧缓存，
+     * 因此第一次普通换房也能走同地图快速路径。 */
     s_force_full = 0;
     s_pending = 0;
 #if GAME_BOSS_SHORTCUT
@@ -1906,8 +1905,8 @@ int game_room_finish_rebuild(void)
         else
             cmds = game_draw_floor_finish(fb[buf]);
 
-        /* Each small batch still waits for completed writes. Consecutive
-         * batches share a work window; they no longer each consume a frame. */
+        /* 每个小批次仍会等待写入完成；连续批次共用一个工作时间窗，
+         * 不再每批都消耗一整帧。 */
         if (gpu2d_waitCmdDone(cmd0 + cmds, 3000000u) != 0) {
             bsp_printf("ROOM BUILD ERROR: GPU timeout\r\n");
             return 0;
@@ -1939,8 +1938,8 @@ int game_room_finish_rebuild(void)
             if (!game_present(fb[buf])) return 0;
             g.front = buf;
             s_rebuild_buf = -1;
-            /* Preserve each buffer's camera history. The inactive one still
-             * contains its old room and will be repaired before its next draw. */
+            /* 保留每块缓冲各自的相机历史。非活动缓冲仍保留旧房间，
+             * 会在下一次绘制前修复。 */
             g.hud_cam_x[buf] = g.cam_x;
             g.hud_cam_y[buf] = g.cam_y;
             game_flow_enter_room();
@@ -1964,8 +1963,8 @@ int game_room_can_overlap_transition(void)
     int target=s_target;
     if(!s_pending || target<0 || target>=ROOM_COUNT) return 0;
     if(s_rooms[target].owner>=0) target=s_rooms[target].owner;
-    /* Cached commits update FB_BG and model/cache metadata only. Uncached
-     * paced rebuilds retain exclusive ownership of their chosen framebuffer. */
+    /* 缓存命中的换房只更新 FB_BG 和模型/缓存元数据。
+     * 未缓存的分批重建则继续独占所选帧缓存。 */
     return game_background_cached_for_layout(s_rooms[target].layout,s_rooms[target].flip);
 }
 
@@ -1980,8 +1979,8 @@ int game_room_commit(void)
     u32 t_select, t_doors, t_flow;
 #endif
 
-    /* Damage must be captured before world selection, content resets, and
-     * clearing old_* records discard the only footprint of existing pixels. */
+    /* 必须在选择新世界、复位内容和清理 old_* 记录前采集损坏区域，
+     * 否则会丢失已有像素唯一的旧覆盖区信息。 */
     game_capture_floor_damage();
     game_static_draw_reset();
     /*  死亡卡：记录“从哪间房来、上一间房往死亡房间开的门”。
@@ -2046,8 +2045,8 @@ int game_room_commit(void)
 
     if (same_layout || game_background_ready()) {
 #if GAME_BG_COPY
-        /* The terrain is shared by normal rooms. Refresh just the door
-         * footprints; a map/background invalidation falls back to a rebuild. */
+        /* 普通房共享地形，只需刷新门覆盖区。
+         * 若地图或背景已失效，则回退到完整重建。 */
         {
             u32 bg0 = gpu2d_getCmdDone();
             u32 bg_cmds;
@@ -2081,8 +2080,8 @@ int game_room_commit(void)
         }
     }
 
-    /* Commit only the data. Build in paced row batches while the old
-     * display base remains untouched until ROOM_BUILD_FINISH. */
+    /* 这里只提交换房数据。随后按行分批绘制，
+     * ROOM_BUILD_FINISH 前旧显示基址始终保持不变。 */
     s_rebuild_buf = (signed char)((g.front + 1) % GAME_FB_COUNT);
     game_floor_prepare_begin(s_rebuild_buf == 0 ? FB_C :
                              (s_rebuild_buf == 1 ? FB_D : FB_THIRD));

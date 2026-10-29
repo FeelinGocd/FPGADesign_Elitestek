@@ -3,7 +3,7 @@
 //------------------------------------------------------------------------------
 //  干什么      :
 //      frame_begin(now)          清脏表、记命令数基线、算 FPS
-//      game_logic_run(keys, now)   按 CLINT 累积 60 Hz 逻辑步，保留不足一步的余数
+//      game_logic_run(keys, aim, now) 按 CLINT 累积 60 Hz 逻辑步，保留不足一步的余数
 //      game_draw(now, buf)       元素各自 push 进渲染队列（带 z）→ 排序后下发
 //      frame_end(now, buf)       交帧 + 统计 + 每秒探针（+ 压测推进）
 //  上一级是谁  : src/main.c（DEMO_RUN_SEL == 2 时调 game_demo_run()）
@@ -151,8 +151,8 @@ void game_static_draw_reset(void)
 int game_static_draw_force(void) { return s_static_force; }
 
 #if GAME_TRIPLE_BUFFER
-/* The base registers are latched at the display boundary. Until that IRQ,
- * both the displayed buffer and the queued buffer are owned by HDMI. */
+/* 显示基址寄存器在帧边界锁存。在对应 IRQ 到来前，
+ * 正在显示的缓冲和已排队等待显示的缓冲都归 HDMI 所有，游戏不能写入。 */
 static int s_pending_fb = -1;
 static u32 s_pending_irq;
 
@@ -168,8 +168,8 @@ static int triple_retire_pending(void)
 {
     triple_poll_pending();
     if (s_pending_fb < 0) return 1;
-    /* Keep the submission's IRQ baseline. A new snapshot inside the wait
-     * would miss a boundary arriving immediately after the poll above. */
+    /* 保留提交时的 IRQ 基准。若等待过程中重新取快照，
+     * 可能错过紧接在上一次轮询之后到达的帧边界。 */
     if (!game_wait_display_after(s_pending_irq)) return 0;
     g.front = s_pending_fb;
     s_pending_fb = -1;
@@ -235,7 +235,7 @@ static void game_logic_reset(void)
 }
 #endif
 
-static int game_logic_run(u32 keys, u32 now)
+static int game_logic_run(u32 keys, u32 aim_keys, u32 now)
 {
     int steps = 0;
 #if GAME_BOSS_SKILL_DIAG
@@ -250,13 +250,13 @@ static int game_logic_run(u32 keys, u32 now)
 #endif
     while (steps < (int)GAME_LOGIC_MAX_STEPS && game_clock_take(&s_sim_clock, BSP_CLINT_HZ)) {
         u32 step_now = now - s_sim_clock.pending_ticks / (BSP_CLINT_HZ / 1000u);
-        game_update_step(keys, step_now);
+        game_update_step(keys, aim_keys, step_now);
         game_room_step();
         ++steps;
         if (game_room_pending() || game_room_rebuild_pending()) break;
     }
 #else
-    game_update_step(keys, now);
+    game_update_step(keys, aim_keys, now);
     game_room_step();
     steps = 1;
 #endif
@@ -601,7 +601,7 @@ static void prof_add(u32 *sum, u32 *max, u32 dt)
 }
 
 #if GAME_BOSS_STAGE_TEST == 2
-/* Manual profiling must not wait for UART transmission in the game loop. */
+/* 手动性能剖析不能在游戏循环里等待 UART 发送完成，先写入内存缓冲区。 */
 static char s_trace_tx[512];
 static unsigned s_trace_len,s_trace_pos,s_trace_drop,s_trace_cam;
 static void trace_text(const char *s)
@@ -792,10 +792,9 @@ static void scene_restore(u32 fb, u32 now, int buf, int arg)
     (void)now; (void)buf; (void)arg;
     if (game_perf_keep_bg()) {
         if (game_floor_needs_prepare(fb)) {
-            /* Transition invalidation already covers the old actors/HUD.
-             * Preparing the entire current viewport cleans those footprints;
-             * restoring the old dirty grid again would redraw it a second time.
-             * Offscreen old pixels remain invalid until exposed. */
+            /* 换房失效已经覆盖旧实体和 HUD。准备整个当前视口会清除这些痕迹；
+             * 再恢复旧脏区会把同一区域重画两次。
+             * 屏幕外旧像素继续保持失效，直到重新进入可见范围。 */
             game_floor_prepare_frame(fb);
         } else {
             game_restore_dirty_view(fb, g_dirty);
@@ -882,8 +881,8 @@ static void hud_submit(void)
 /*----------------------------------------------------------------------------*/
 /*  相机移动后：把【旧相机位置】的 HUD 区域标脏，让脏区恢复把旧字擦掉。
  *  HUD 在屏幕上的位置固定，但它在 framebuffer 里的世界坐标 = cam + 屏幕坐标。  */
-/* Only opaque HUD widgets can replace their overlapping old pixels.
- * Transparent glyphs and item icons must erase their entire old footprint. */
+/* 只有不透明 HUD 控件可以直接覆盖旧像素的相交部分。
+ * 透明字模和道具图标必须擦除完整的旧覆盖范围。 */
 static void mark_exposed_rect(int ox, int oy, int w, int h, int nx, int ny)
 {
     int ix0 = ox > nx ? ox : nx;
@@ -946,7 +945,7 @@ static void mark_hud_rects_at(int camx, int camy)
                         GAMEOVER_W, GAMEOVER_H);
 }
 
-/* Share the existing old-position rectangles with transition invalidation. */
+/* 与换房失效共用已有实体旧位置矩形，避免重复维护一套记录。 */
 static void mark_old_actors(dirty_map_t dirty, int buf)
 {
     int i;
@@ -982,8 +981,8 @@ static void mark_old_actors(dirty_map_t dirty, int buf)
             game_mark_dirty(dirty, g.old_coin[buf][i].x, g.old_coin[buf][i].y, 24, 24);
 }
 
-/* Start independent terrain work only after the loop has selected a buffer
- * owned by neither the display nor the queued display request. */
+/* 主循环选出既不属于显示、也不属于待显示请求的缓冲后，
+ * 才能开始独立的地形恢复工作。 */
 static void game_preupdate_restore(int buf)
 {
 #if GAME_BG_PREUPDATE_RESTORE && GAME_BG_COPY && !GAME_BG_EXACT_RECT
@@ -1022,7 +1021,7 @@ void game_capture_floor_damage(void)
 {
     int buf, x, y, w, h, tx, ty;
     for (buf = 0; buf < GAME_FB_COUNT; ++buf) {
-        /* Reuse the frame dirty grid, not another per-buffer pixel cache. */
+        /* 复用本帧脏区网格，不额外维护一份逐缓冲像素缓存。 */
         dirty_clear(g_dirty);
         game_dirty_begin();
         mark_old_actors(g_dirty, buf);
@@ -1049,8 +1048,8 @@ void game_capture_floor_damage(void)
 /*----------------------------------------------------------------------------*/
 /*  ③ 绘制  */
 #if (GAME_PROFILE && GAME_BOSS_DEBUG && GAME_BOSS_AUTO_DIAG == 2) || GAME_BOSS_CAMERA_PAN
-/* Rendering-only sweep: exercise every viewport even when a test spawn is
- * blocked by an L-shaped wall or a prop. Never enabled in release builds. */
+/* 纯渲染扫视：即使测试生成点被 L 形墙或道具挡住，也遍历每个视口。
+ * 正式发布构建不会启用。 */
 static void room_render_pan(u32 now)
 {
     static int room = -1;
@@ -1095,7 +1094,7 @@ static void game_draw(u32 now, int buf)
     u32 draw_t0 = prof_now(), draw_t1;
 #endif
 
-    /* This consumes one buffered transition count; share it with both uses. */
+    /* 这里消费一次缓冲中的换房标脏计数，后面的两项处理必须共用同一次结果。 */
     prop_dirty = game_room_prop_dirty();
     {
         unsigned char key = (unsigned char)(game_room_id() + 1);
@@ -1113,8 +1112,8 @@ static void game_draw(u32 now, int buf)
      *    连带动不动就 game_vital_invalidate()，把血量行每帧擦一遍。 */
     g_hud_need = 0;
     if (game_floor_needs_prepare(fb)) {
-        /* The other buffer is repaired on its own turn, not in a blocking
-         * post-transition copy. HUD is redrawn after scene restoration. */
+        /* 另一块缓冲轮到绘制时再修复，不在换房后做阻塞式整屏拷贝。
+         * HUD 在地形恢复完成后重新绘制。 */
         g_hud_full = 1;
         game_hud_need_full = 1;
     }
@@ -1139,8 +1138,8 @@ static void game_draw(u32 now, int buf)
         g_hud_need = 1;
         g_hud_full = 1;                 /* 整块面板全画，不留"只画变了的那行"的缝 */
         game_hud_need_full = 1;
-        /* Full drawing below already refreshes this buffer. Invalidating both
-         * buffers here would also dirty all rows again after the camera stops. */
+        /* 下面会完整重画当前缓冲；若此处同时让两块缓冲失效，
+         * 相机停止后还会把所有行再次标脏。 */
     }
 
     /*  ★ 换房后的两帧：把 4 扇门的两格标脏（两块缓冲各重画一次）。
@@ -1161,7 +1160,7 @@ static void game_draw(u32 now, int buf)
     /*  商店：商品按 room 持久；先擦这块缓冲上次画的位置  */
     if (!GAME_BG_PREUPDATE_RESTORE || !game_restore_preupdate_active(fb)) {
         game_shop_mark_old(g_dirty, buf);
-        /* Include old history again after a terrain/background invalidation. */
+        /* 地形或背景失效后，需要重新合并旧实体历史。 */
         mark_old_actors(g_dirty, buf);
     }
     /*  蜘蛛网已经没有实例（位置来自蓝图）：只在换房后的两帧里，
@@ -1201,8 +1200,8 @@ static void game_draw(u32 now, int buf)
 
         game_hud_need_full = 0;
         g_hud_need = g_hud_need || hud_changed || g_hud_full;
-        /* hud_vital redraws the heart row when the panel is touched, without
-         * discarding either buffer's cached HP/lives or dirtying it next frame. */
+        /* 面板被实体压到时，hud_vital 会重画生命行，
+         * 但不丢弃两块缓冲缓存的 HP/命数，也不使下一帧继续脏。 */
     }
 
     /*  ★ 临时文字（拾取字幕 / WIN）的擦除规则：
@@ -1218,9 +1217,8 @@ static void game_draw(u32 now, int buf)
             g_toast_fade = 3;                   /* 之后 3 帧继续擦 */
         }
         if (g_toast_on) {
-            /* Always restore the full fixed band. The next pickup may have a
-             * shorter description, so marking only its current glyphs would
-             * retain the previous description's tail. */
+            /* 始终恢复整块固定字幕带。下一次拾取文案可能更短，
+             * 只标当前字模会残留上一次文案的尾部。 */
             game_mark_hud_dirty(g_dirty, HUD_TOAST_X, HUD_TOAST_Y,
                                 HUD_TOAST_W, HUD_TOAST_H);
             /* 字幕的脏区会按【整瓦片】擦，连带血条所在那行 ⇒ 一起标脏，血条随后重画 */
@@ -1250,10 +1248,9 @@ static void game_draw(u32 now, int buf)
     game_capacity_mark(1);
 #endif
 #if GAME_BG_EARLY_RESTORE
-    /* The dirty grid is now complete. Issue terrain commands before the
-     * history copies, queue construction and sort so the GPU can overlap
-     * that CPU work. All entity/HUD commands still follow terrain in FIFO
-     * order; s_static_force retains the pre-restore invalidation decision. */
+    /* 脏区网格已经完整。先下发地形命令，再处理历史复制、队列构建和排序，
+     * 让 GPU 与这段 CPU 工作重叠。实体/HUD 命令仍按 FIFO 紧跟地形之后；
+     * s_static_force 保留恢复前的失效决策。 */
     scene_restore(fb, now, buf, 0);
 #endif
 
@@ -1384,8 +1381,8 @@ static int frame_end(u32 now, int buf)
     if (!triple_retire_pending()) return 0;
     lineBuffer_setFullBase(game_view_fb(g_fb[buf]), game_view_fb(g_fb[buf]));
     s_pending_fb = buf;
-    /* Read after both APB writes. An IRQ between the writes must not make
-     * the old visible buffer available for drawing prematurely. */
+    /* 两次 APB 写完成后才读取 IRQ 基准。若写入之间发生中断，
+     * 不能让旧的可见缓冲被提前判定为可写。 */
     s_pending_irq = IRQ_frame_count();
 #else
     if (!game_present(g_fb[buf])) return 0;
@@ -1489,7 +1486,8 @@ static int frame_end(u32 now, int buf)
 /*----------------------------------------------------------------------------*/
 void game_demo_run(void)
 {
-    bsp_printf("\r\nGAME: KEY0=left KEY1=right KEY2=down KEY3=up, auto fire\r\n");
+    bsp_printf("\r\nGAME: WASD=move/facing, hold numpad/arrow=aim+fire\r\n");
+    bsp_printf("BOARD: KEY0..3=move/turn, auto fire only when an enemy is ahead\r\n");
     bsp_printf("GAME CONFIG: buffers=%d pool=%d enemy_cap=%d rings=%d logic_hz=%d tint=%d restore_early=%d\r\n",
                GAME_FB_COUNT, N_BULLETS, ENEMY_CAP, GAME_BOSS_DENSE_RINGS,
                GAME_FIXED_UPDATE ? (int)GAME_LOGIC_HZ : 0, GAME_BULLET_TINT,
@@ -1529,6 +1527,7 @@ void game_demo_run(void)
 
     for (;;) {
         u32 keys = game_keys_read();
+        u32 aim_keys = game_aim_read();
         u32 now  = game_ms();
         int back;
 
@@ -1564,8 +1563,8 @@ void game_demo_run(void)
         if (game_take_debug_stats()) game_debug_frame_report();
 #endif
 
-        /* A transition owns the back buffer. Finish it before accepting
-         * another queued request or running ordinary model/render updates. */
+        /* 换房流程独占后台缓冲。必须先完成当前换房，
+         * 再接受下一个排队请求或恢复普通模型/渲染更新。 */
         if (game_room_rebuild_pending()) {
 #if GAME_TRIPLE_BUFFER
             if (!triple_retire_pending()) return;
@@ -1605,7 +1604,7 @@ void game_demo_run(void)
                 t0 = t1;
             }
             {
-                int steps = game_logic_run(keys, now);
+                int steps = game_logic_run(keys, aim_keys, now);
                 s_pf_sim_steps += (u32)steps;
 #if GAME_BOSS_DEBUG && GAME_BOSS_SKILL_DIAG
                 s_skill_steps = steps;
@@ -1637,7 +1636,7 @@ void game_demo_run(void)
 #else
         frame_begin(now);
         game_preupdate_restore(back);
-        game_logic_run(keys, now);
+        game_logic_run(keys, aim_keys, now);
         game_draw(now, back);
 #endif
 #if GAME_CAPACITY_AUDIT

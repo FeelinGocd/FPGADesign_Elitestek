@@ -214,9 +214,9 @@ static void rain_wave(void)
 #if ENEMY_CAP <= 500
     if (emit > budget) emit = budget;
 #else
-    /* Keep the full spatial sampling while clipping actual allocations.
-     * Shrinking emit to one can place that last candidate in the safe lane
-     * every time, leaving the larger trial pool permanently under-filled. */
+    /* 保留完整的空间采样，只截断实际分配数量。
+     * 若把 emit 缩成 1，最后一个候选可能总落在安全通道，
+     * 导致大容量试跑池长期无法填满。 */
     if (budget <= 0) return;
 #endif
     if (emit <= 0 || x1 < x0 || y1 < y0) return;
@@ -224,7 +224,7 @@ static void rain_wave(void)
     vertical = !(side & 1);
     lo = vertical ? x0 : y0;
     span = (vertical ? x1-x0 : y1-y0) + 1;
-    /* A slowly sweeping 96px lane stays open. It does not follow the player. */
+    /* 保留一条缓慢扫动的 96 px 安全通道，通道不跟随玩家。 */
     gap = lo + span/2 + g_sin_tab[((g.boss_tick/phase_def()->rain_every)/4u*2u)&63u]*span/256;
     for (k = 0; k < emit; ++k) {
 #if ENEMY_CAP > 500
@@ -301,7 +301,7 @@ int game_enemy_in_dir(int dir, int *tx, int *ty)
     return nearest_mob(dir, tx, ty) >= 0;
 }
 
-/*  最近的敌人中心（保留给非射击用途；玩家自动开火用 game_enemy_in_dir）。  */
+/*  最近的敌人中心（板载按键模式用它判断当前朝向是否有敌人）。  */
 int game_nearest_enemy(int *tx, int *ty)
 {
     if (boss_center(tx, ty)) return 1;

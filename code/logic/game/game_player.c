@@ -1,15 +1,17 @@
 //==============================================================================
-//  game_player.c —— 角色：移动 / 动画选帧 / 自动开火 / 受伤与拾取表现
+//  game_player.c —— 角色：WASD 移动 / 小键盘瞄准 / 自动开火 / 受伤与拾取表现
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · game_player_step(): 读按键改坐标（一次只走一个方向）、夹到屏内、
-//                          判断是否踩到道具、推进动画节拍、到点自动开火
+//    · game_player_step(): 串口模式 WASD 移动、小键盘瞄准并连射；
+//                          板载模式方向键移动/转向，仅有敌人在前方时自动开火
 //    · game_player_draw(): 选帧（受伤 / 拾取 / 四方向）→ 画精灵，
 //                          拾取时再叠一张道具图标在角色身上
 //    · game_player_fire(): 在空闲槽里放一发玩家子弹
 //  上一级是谁  : game/game_main.c
 //  接口契约    :
 //    · 坐标就是屏幕坐标（不做滚屏）
+//    · 串口：有瞄准输入时朝向由瞄准决定，否则跟随移动
+//    · 板载：朝向始终跟随按键方向，并保留旧的自动索敌开火规则
 //    · 【只存朝右一套素材】：朝左用 FLIP_X；朝下/朝上的个别帧也靠 FLIP_X 复用
 //    · 受伤 / 拾取帧强制不翻面（这两张素材只有朝右的）
 //  为什么这么做:
@@ -51,7 +53,7 @@ static int approach(int cur, int target, int step)
 }
 
 /*----------------------------------------------------------------------------*/
-void game_player_step(u32 keys, u32 now)
+void game_player_step(u32 keys, u32 aim_keys, u32 now)
 {
     int nx = g.x, ny = g.y;
     int mx = 0, my = 0;
@@ -92,11 +94,16 @@ void game_player_step(u32 keys, u32 now)
     g.rx -= (g.rx >> 3) * 8;
     g.ry -= (g.ry >> 3) * 8;
 
-    /* 朝向：人物只有 4 个方向，有水平分量就按"侧身跑"处理（斜走看着最自然） */
-    if (mx < 0)      g.dir = LEFT;
-    else if (mx > 0) g.dir = RIGHT;
-    else if (my < 0) g.dir = UP;
-    else if (my > 0) g.dir = DOWN;
+    /* 有瞄准输入时优先采用瞄准方向；否则人物朝向跟随 WASD。
+     * 人物素材只有 4 个方向，因此斜向移动时优先采用水平方向。 */
+    if (aim_keys & KEY_LEFT)       g.dir = LEFT;
+    else if (aim_keys & KEY_RIGHT) g.dir = RIGHT;
+    else if (aim_keys & KEY_UP)    g.dir = UP;
+    else if (aim_keys & KEY_DOWN)  g.dir = DOWN;
+    else if (mx < 0)               g.dir = LEFT;
+    else if (mx > 0)               g.dir = RIGHT;
+    else if (my < 0)               g.dir = UP;
+    else if (my > 0)               g.dir = DOWN;
 
     /*  ★ 撞墙只看【脚底那一点】贴到场地边界：
      *    以前用整个碰撞盒去贴边界（身体一碰到墙线就停），等于把墙算厚了 31 px，
@@ -165,9 +172,30 @@ void game_player_step(u32 keys, u32 now)
     else g.anim = (g.anim + 1u) % (ANIM_FRAMES * ANIM_HOLD);
     g.anim_step = g.moving ? (g.anim / ANIM_HOLD) : 0u;
 
-    if (++g.fire_tick >= (u32)g.stats.fire_every) {
+    /* fire_tick 是剩余冷却帧。
+     * 串口手柄：按住瞄准键立即首发，之后按 stats.fire_every 连发，松开停火。
+     * 板载按键：沿用旧行为，冷却到点后只在当前朝向存在敌人时开火。 */
+    if (!game_input_is_serial()) {
+        if (g.fire_tick == 0u) {
+            int tx, ty;
+            u32 fire_every = (u32)g.stats.fire_every;
+            if (fire_every == 0u) fire_every = 1u;
+            if (game_enemy_in_dir(g.dir, &tx, &ty)) game_player_fire();
+            g.fire_tick = fire_every - 1u;
+        } else {
+            --g.fire_tick;
+        }
+    } else if (aim_keys & 15u) {
+        if (g.fire_tick == 0u) {
+            u32 fire_every = (u32)g.stats.fire_every;
+            if (fire_every == 0u) fire_every = 1u;
+            game_player_fire();
+            g.fire_tick = fire_every - 1u;
+        } else {
+            --g.fire_tick;
+        }
+    } else {
         g.fire_tick = 0u;
-        game_player_fire();
     }
 
     /* ★ 这一行必须在【用完旧值之后】更新：下一帧的"上一帧有没有在走 / 上一帧朝哪"就是它们。
@@ -205,12 +233,12 @@ static void player_shot(int angle, int speed)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  自动开火：只有【当前朝向方向】里真的有敌人时才发，且沿朝向直射。
- *  · 背对/侧对敌人不开火，必须自己转过去；
- *  · 每个 Inner Eyes 增加一条弹道，以瞄准方向为中心均匀展开。 */
+/*  按当前朝向发射一组玩家弹。
+ * 串口模式由小键盘瞄准输入触发，板载模式由 game_player_step() 先确认敌人在前方后调用。
+ *  每个 Inner Eyes 增加一条弹道，以瞄准方向为中心均匀展开。 */
 void game_player_fire(void)
 {
-    int tx, ty, a;
+    int a;
 
     switch (g.dir) {
     case LEFT:  a = 32; break;
@@ -218,9 +246,6 @@ void game_player_fire(void)
     case UP:    a = 48; break;
     default:    a = 16; break;
     }
-
-    if (!game_enemy_in_dir(g.dir, &tx, &ty)) return;   /* 朝向没怪：不放空枪 */
-    (void)tx; (void)ty;
 
     {
         int paths = game_player_bullet_paths();

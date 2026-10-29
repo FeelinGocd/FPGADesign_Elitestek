@@ -2,29 +2,32 @@
 //  game_input.c —— 输入来源：板载按键 + 串口"虚拟手柄"
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · game_keys_read() 返回本帧的按键掩码（bit0 左 / bit1 右 / bit2 下 / bit3 上）
-//    · 优先用串口：收到 PC 工具发来的两字节帧 {0xA5, mask} 就用它
+//    · game_keys_read() 返回移动/功能掩码，game_aim_read() 返回瞄准方向掩码
+//    · 优先用串口：收到 PC 工具发来的帧就用它
 //    · 超过 PAD_TIMEOUT 没收到就自动回落到板载四个按键（拔了线也能玩）
 //  上一级是谁  : game/game_main.c（每帧读一次）
 //  接口契约    :
-//    · 串口帧固定两字节：0xA5 是帧头，mask 的低 4 位才是按键
-//      （带帧头是为了让板子打印/其它文本不会被我误当成按键）
+//    · 新协议为三字节 {0xA6, move, aim}：move 的低 4 位控制 WASD 移动，
+//      bit4..7 保留 R/E/Y/1 功能；aim 的低 4 位控制小键盘射击方向；
+//    · 兼容旧两字节 {0xA5, mask}：方向同时用于移动和瞄准；
 //    · 只在"有新帧"时刷新，掩码在 PAD_TIMEOUT 内一直有效 ⇒ PC 工具只需在变化时发
 //  为什么这么做:
-//    · 板载只有 4 个按键，玩弹幕太反人类；串口是现成的双向通道，不用改硬件。
+//    · 双摇杆式操作需要区分移动和瞄准；串口是现成的双向通道，不用改硬件。
 //  参考        : tools/GamePad/game_pad.py（PC 端）、docs/spec/软件_驱动与API.md §8.3
 //==============================================================================
 #include "game.h"
 #include "bsp.h"        /* BSP_UART_TERMINAL / uart_readOccupancy / uart_read */
 #include "user_key.h"
 
-#define PAD_MAGIC    0xA5u      /* PC → 板 的帧头 */
+#define PAD_MAGIC    0xA5u      /* 旧协议：后随 1 个移动/瞄准共用掩码 */
+#define PAD_MAGIC_V2 0xA6u      /* 新协议：后随 move、aim 两个掩码 */
 #define PAD_TIMEOUT  500u       /* 这么久没收到就走板载按键 */
 
 /*  ---- 串口【文本命令】----
- *  和"虚拟手柄"的二进制帧共存：帧头 0xA5 不是可打印字符，所以
+ *  和"虚拟手柄"的二进制帧共存：帧头 0xA5/0xA6 不是可打印字符，所以
  *  可打印 ASCII 一律当命令收集，遇到回车执行。
- *      P      → 在玩家脚下生成一个道具（等同按 P）
+ *      Y      → 在玩家脚下生成一个道具
+ *      E      → 在玩家脚下放置炸弹
  *      T      → 切换测试模式（无敌 / GAME_TEST_DAMAGE 伤害）
  */
 #define CMD_MAX 16
@@ -78,8 +81,11 @@ static void cmd_exec(void)
     }
 }
 
-static int s_want_mask;         /* 已经看到帧头，等 mask */
-static u32 s_keys;              /* 最近一次收到的掩码 */
+static int s_pad_wait;          /* 新/旧协议后续还需接收的字节数 */
+static int s_pad_v2;            /* 当前帧是否为新协议 */
+static u32 s_pad_move;          /* 新协议中已收到的移动/功能掩码 */
+static u32 s_keys;              /* 最近一次收到的移动/功能掩码 */
+static u32 s_aim_keys = KEY_DOWN; /* 最近一次收到的瞄准方向 */
 static u32 s_until;             /* 这个掩码的有效期（毫秒时间戳） */
 static int s_restart_req;       /* R 键锁存：一次按下的"按下+松开"可能在同一帧里被吃掉 */
 static u32 s_prev_mask;         /* 上一帧的掩码：用来做 P/B 的上升沿 */
@@ -120,6 +126,41 @@ int game_take_debug_stats(void)
 #endif
 
 /*----------------------------------------------------------------------------*/
+static void pad_accept(u32 move, u32 aim)
+{
+    s_keys = move & 0xFFu;
+    s_aim_keys = aim & 15u;
+
+    /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
+       照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
+    if ((s_keys & KEY_RESTART) && !(s_prev_mask & KEY_RESTART))
+        s_restart_req = 1;
+
+    /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
+    if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
+        s_spawn_req = 1;
+    if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
+        s_bomb_req = 1;
+#if GAME_BOSS_SHORTCUT
+    if ((s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
+        s_boss_req = 1;
+#endif
+    s_prev_mask = s_keys;
+    s_until = game_ms() + PAD_TIMEOUT;
+}
+
+static int pad_live(void)
+{
+    return (int)(game_ms() - s_until) < 0;
+}
+
+/* 主循环据此选择射击策略：串口手柄按瞄准键射击，板载按键沿用自动索敌规则。 */
+int game_input_is_serial(void)
+{
+    return pad_live();
+}
+
+/*----------------------------------------------------------------------------*/
 u32 game_keys_read(void)
 {
     int c;
@@ -128,33 +169,25 @@ u32 game_keys_read(void)
     while (uart_readOccupancy(BSP_UART_TERMINAL) > 0) {
         c = (int)(uart_read(BSP_UART_TERMINAL) & 0xFF);
 
-        /*  ★ 0xA5 后面紧跟的一定是 mask；bit5(E)/bit6(Y) 会到 0x20/0x40，
-         *    不能再按"可打印字符"区分。  */
-        if (s_want_mask) {
-            s_want_mask = 0;
-            s_keys = (u32)c & 0xFFu;        /* bit0..3 方向 / bit4 R / bit5 E / bit6 Y / bit7 1 */
-            /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
-               照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
-            if ((s_keys & KEY_RESTART) && !(s_prev_mask & KEY_RESTART))
-                s_restart_req = 1;
-
-            /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
-            if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
-                s_spawn_req = 1;
-            if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
-                s_bomb_req = 1;
-#if GAME_BOSS_SHORTCUT
-            if ((s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
-                s_boss_req = 1;
-#endif
-            s_prev_mask = s_keys;
-
-            s_until = game_ms() + PAD_TIMEOUT;
+        /* 掩码字节可能是任意值，必须在读取帧头后才能按二进制数据处理。 */
+        if (s_pad_wait > 0) {
+            if (s_pad_wait == 2) {
+                s_pad_move = (u32)c & 0xFFu;
+                s_pad_wait = 1;
+            } else {
+                if (s_pad_v2) pad_accept(s_pad_move, (u32)c);
+                else          pad_accept((u32)c, (u32)c);
+                s_pad_wait = 0;
+            }
             continue;
         }
 
-        if (c == (int)PAD_MAGIC && !s_want_mask) {
-            s_want_mask = 1;
+        if (c == (int)PAD_MAGIC_V2) {
+            s_pad_v2 = 1;
+            s_pad_wait = 2;
+        } else if (c == (int)PAD_MAGIC) {
+            s_pad_v2 = 0;
+            s_pad_wait = 1;
         } else if (c == '\r' || c == '\n') {
             uart_write(BSP_UART_TERMINAL, '\r');
             uart_write(BSP_UART_TERMINAL, '\n');
@@ -167,8 +200,16 @@ u32 game_keys_read(void)
     }
 
     /* 串口还在"保鲜期"内就用串口，否则回落到板载按键 */
-    if ((int)(game_ms() - s_until) < 0) return s_keys;
+    if (pad_live()) return s_keys;
     return key_getData() & 15u;             /* 板载按键没有 R（只能从串口来） */
+}
+
+/*----------------------------------------------------------------------------*/
+/* 取当前瞄准方向。新旧协议都会更新它；无串口帧时板载按键同时充当移动和瞄准。 */
+u32 game_aim_read(void)
+{
+    if (pad_live()) return s_aim_keys;
+    return key_getData() & 15u;
 }
 
 /*----------------------------------------------------------------------------*/

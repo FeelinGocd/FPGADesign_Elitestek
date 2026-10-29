@@ -6,15 +6,15 @@
 //==============================================================================
 #include "game.h"
 
-void game_update_step(u32 keys, u32 now)
+void game_update_step(u32 keys, u32 aim_keys, u32 now)
 {
     if (game_perf_frozen()) return;
 
 #if GAME_BOSS_BULLET_SWEEP
     if (game_boss_stress_step()) {
-        /* The test owns the bullets, but PAD movement and the Boss camera
-         * must keep running so the visible-load test covers scrolling. */
-        game_player_step(keys, now);
+        /* 压测接管弹幕，但手柄移动和 Boss 相机仍需运行，
+         * 这样可见负载测试同时覆盖画面滚动。 */
+        game_player_step(keys, aim_keys, now);
         game_camera_step();
 #if GAME_CAPACITY_AUDIT
         game_capacity_camera(now);
@@ -36,12 +36,11 @@ void game_update_step(u32 keys, u32 now)
         return;
     }
 
-    /* Restart is performed by the main loop, which first releases any
-     * framebuffer still queued for the next display boundary. */
+    /* 重开由主循环执行；主循环会先释放仍在等待下一次显示边界的帧缓存。 */
     if (g.phase == PHASE_GAMEOVER && (int)(now - g.gameover_until) >= 0) return;
 
     if (g.phase != PHASE_GAMEOVER && !game_vital_dead(now))
-        game_player_step(keys, now);
+        game_player_step(keys, aim_keys, now);
     game_camera_step();
     game_boss_step(now);
     game_bullets_step(now);

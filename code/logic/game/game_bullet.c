@@ -51,13 +51,12 @@ u32 game_enemy_spawn_rejects(void) { return s_enemy_spawn_rejects; }
 static int s_free_n;
 static unsigned short s_free_head;
 #if GAME_BULLET_DIRTY_BOUNDS
-/* Sprite kind (0=A, 1=B, 2=C) and axis (bit 0=90-degree rotation) for the
- * pixels retained in each framebuffer. Stored at draw time so a reused slot
- * cannot make the old footprint depend on its new bullet type or direction. */
+/* 每块帧缓存保留的精灵类型（0=A、1=B、2=C）和轴向（bit0=90° 旋转）。
+ * 在绘制时保存，避免槽位复用后旧覆盖区取到新弹的类型或方向。 */
 static const unsigned char s_dirty_bounds[6][4] = {
-    {4, 4, 24, 25}, {3, 4, 26, 24}, /* A: horizontal / vertical */
-    {7, 8, 18, 21}, {7, 8, 18, 21}, /* B never rotates */
-    {1, 6, 30, 21}, {5, 1, 22, 30}  /* C: horizontal / vertical */
+    {4, 4, 24, 25}, {3, 4, 26, 24}, /* A：横向 / 纵向 */
+    {7, 8, 18, 21}, {7, 8, 18, 21}, /* B：不旋转 */
+    {1, 6, 30, 21}, {5, 1, 22, 30}  /* C：横向 / 纵向 */
 };
 #endif
 static u32 s_draw_alpha;
@@ -94,8 +93,8 @@ static void bullet_untrack_chili(int i)
     }
 }
 
-/* An inactive slot lends its age field to the free list. Active ages remain
- * independent; allocation initializes age before the bullet becomes active. */
+/* 空闲槽借用 age 字段组成自由链表，活动弹的 age 仍独立计时。
+ * 分配时会在弹体激活前重新初始化 age。 */
 static void bullet_free_tail(int first)
 {
     int i;
@@ -311,8 +310,8 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
         }
     }
 
-    /* Player reserve is also the upper bound for active flame projectiles;
-     * keeping their indices compact avoids scanning all 612 slots per enemy. */
+    /* 玩家保留槽同时也是活动火焰弹的数量上限；
+     * 火焰弹下标保持紧凑，避免每发敌弹都扫描整个 N_BULLETS 池。 */
     if (!enemy && type == BULLET_CHILI && s_chili_n >= PLAYER_RESERVE)
         return -1;
 
@@ -441,9 +440,8 @@ static void bullet_recycle(bullet_t *b, int i)
     b->ry = 0;
 }
 
-/* A player projectile crossing a TriPrism is consumed and becomes a four-way
- * colored fan. Split projectiles carry split_color and therefore cannot split
- * again when multiple prisms overlap the same path. */
+/* 玩家弹穿过三棱镜后消耗自身，并分裂成四发彩色扇形弹。
+ * 分裂弹带有 split_color 标记，多个棱镜覆盖同一路径时不会再次分裂。 */
 static int triprism_try_split(int i, u32 now, int cx, int cy)
 {
     bullet_t *b = &g.bullets[i];
@@ -516,7 +514,7 @@ static BULLET_SIM_OPT void bullet_move(bullet_t *b)
         break;
 
     case MOTION_PULSE: {
-        /* One 64-step cycle: slow from full speed to half, then accelerate. */
+        /* 64 步为一个周期：从全速逐渐减到半速，再加速回全速。 */
         static const unsigned char scale8[8] = { 8, 7, 6, 5, 4, 5, 6, 7 };
         int scale = scale8[(b->age >> 3) & 7u];
         b->rx += (b->vx8 * scale) / 8;
@@ -570,10 +568,8 @@ static BULLET_SIM_OPT void bullet_move(bullet_t *b)
                        : 8 * ((b->vx < 0 ? -b->vx : b->vx) + (b->vy < 0 ? -b->vy : b->vy));
 }
 
-/* A Chili flame is a player projectile with a small, local shield. It absorbs
- * one enemy projectile at a time and disappears after the third interception.
- * The scan is only entered for enemy bullets while Chili is owned, preserving
- * the normal enemy-cap path when the item is absent. */
+/* 辣椒火焰弹是带局部护盾的玩家弹，每次吸收一发敌弹，拦截三次后消失。
+ * 只有持有辣椒且检查敌弹时才进入这段扫描；未持有道具时仍走普通敌弹上限路径。 */
 static int chili_block_enemy(int enemy_i, int cx, int cy)
 {
     int i;
@@ -679,7 +675,7 @@ BULLET_SIM_OPT void game_bullets_step(u32 now)
 }
 
 /*----------------------------------------------------------------------------*/
-/* History belongs to the framebuffer, not to the current bullet occupants. */
+/* 历史覆盖区属于帧缓存，而不是当前占用槽位的弹体。 */
 void game_bullets_clear_history(int buf)
 {
     if ((unsigned)buf >= GAME_FB_COUNT) return;
@@ -694,9 +690,9 @@ void game_bullets_clear_history(int buf)
 }
 
 #if GAME_BULLET_TILE_HISTORY
-/* Match game_mark_dirty's clipping and C integer-division semantics, but only
- * write the saved bitmap. Updating the current frame's dirty queue here would
- * corrupt its already-completed restore/HUD decisions. */
+/* 边界裁剪和 C 整数除法规则与 game_mark_dirty() 保持一致，
+ * 但这里只写保存的历史位图。若同时修改本帧脏区队列，
+ * 会破坏已经完成的恢复和 HUD 决策。 */
 static inline __attribute__((always_inline)) void bullet_history_rect(dirty_map_t tiles, int x, int y, int w, int h)
 {
     int tx0 = x / TILE, ty0 = y / TILE;
@@ -713,8 +709,8 @@ static inline __attribute__((always_inline)) void bullet_history_rect(dirty_map_
 }
 #endif
 
-/* Called after the sprite command is queued. Tile history then overlaps GPU
- * execution and records only sprites actually drawn into this framebuffer. */
+/* 在精灵命令入队后调用。如此历史记录可与 GPU 执行重叠，
+ * 并且只记录真正画进该帧缓存的精灵。 */
 BULLET_DRAW_OPT void game_bullets_record_history(int buf, int i)
 {
 #if GAME_BULLET_TILE_HISTORY
@@ -820,8 +816,8 @@ static BULLET_DRAW_OPT void bullet_draw_one(u32 fb, u32 now, int buf, int i)
         if (ai == ASSET_bullet_type_C_Uranus) { sx = 0u; sy = 6u; w = 32u; h = 21u; }
         else if (ai == ASSET_bullet_type_B_chili_NOTROT90) { sy = 8u; h = 21u; }
         src += sy * g_assets[ai].stride_word + sx / 4u;
-        /* Hardware ROT90 transposes source axes. MX/MY flip output x/y;
-         * compensate crop origins in the same coordinates as CmdExec. */
+        /* 硬件 ROT90 会交换源坐标轴，MX/MY 再翻转输出 x/y。
+         * 这里按 CmdExec 使用的同一坐标系补偿裁剪原点。 */
         if (flip & GPU2D_ROT90) {
             dx += (flip & GPU2D_FLIP_X) ? BH - sy - h : sy;
             dy += (flip & GPU2D_FLIP_Y) ? BW - sx - w : sx;
@@ -1021,8 +1017,8 @@ void game_bullets_perf_fill(int count)
 }
 
 #if GAME_BOSS_BULLET_SWEEP
-/* Sweep all physical slots, including the 32 normally reserved for player
- * shots. Keep every bullet visible and moving for a constant render load. */
+/* 扫描全部物理槽位，包括通常为玩家保留的 32 个槽。
+ * 所有测试弹保持可见并持续运动，以形成稳定的绘制负载。 */
 void game_bullets_stress_fill(int count)
 {
     int i;
@@ -1085,8 +1081,8 @@ int game_bullets_stress_visible(void)
     for (i = 0; i < N_BULLETS; ++i) {
         const bullet_t *b = &g.bullets[i];
         if (!b->active) continue;
-        /* Require the whole sprite inside both the camera and world, not
-         * merely an intersection as game_visible_world() does. */
+        /* 要求整张精灵同时位于相机和世界范围内，
+         * 而不是像 game_visible_world() 那样只判断是否相交。 */
         if (b->x < g.cam_x || b->x + BW > g.cam_x + SCR_W ||
             b->y < g.cam_y || b->y + BH > g.cam_y + SCR_H) continue;
         if (b->x < 0 || b->y < 0 ||

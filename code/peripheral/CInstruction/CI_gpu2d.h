@@ -159,8 +159,8 @@ void CI_gpu2d_spriteAlphaTintRect(u32 asset_base, u32 stride, u32 dst_fb,
                                   u32 dx, u32 dy, u32 w, u32 h,
                                   u32 argb, u32 strength, u32 tone, u32 extra);
 
-/* Tint + white color key without destination alpha readback. The source
- * alpha channel is ignored, so semi-transparent edges become opaque. */
+/* 带白色键控的 tint，不读取目的像素的 alpha。
+ * 源素材 alpha 通道会被忽略，因此半透明边缘会变成不透明。 */
 void CI_gpu2d_spriteTintCKRect(u32 asset_base, u32 stride, u32 dst_fb,
                                 u32 dx, u32 dy, u32 w, u32 h,
                                 u32 argb, u32 strength, u32 tone, u32 flip);

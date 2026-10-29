@@ -29,13 +29,13 @@
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"      /* APB 槽 2: 命令完成计数 / 带宽观测 */
 #include "compare_demo.h"   /* 分屏对比 Demo: 左半加速器 / 右半纯 CPU（基础要求 3c） */
-#include "game_demo.h"      /* 游戏 demo: 四方向移动 + 子弹池 + Boss 弹幕 + 道具 + GUI */
+#include "game_demo.h"      /* 游戏 demo: WASD 移动 + 小键盘瞄准 + 子弹池 + Boss + GUI */
 #include "framebuffer_layout.h"
 
 /*------------------------------------------------------------------------------
  * 跑哪个 Demo（改这一行就切换，现在只有两个）:
  *   1 = 分屏对比（compare_demo.c）: 左半加速器 / 右半纯 CPU，同一组方块比帧率（基础要求 3c）
- *   2 = 游戏 demo（game_demo.c）: 四方向移动 + 子弹池 + Boss 弹幕 + 道具拾取 + 脏区重画 + GUI
+ *   2 = 游戏 demo（game/ 目录）: WASD 移动 + 小键盘瞄准 + 子弹池 + Boss + 道具 + GUI
  *   ★ 2026-10-17：老的 demo_anim（动图）/ demo_combine（图片合成）已删除 —— 它们的功能
  *     都被游戏 demo 覆盖（动图→游戏动画、合成→道具/角色叠层），留着只占 flash。
  *----------------------------------------------------------------------------*/
@@ -181,8 +181,8 @@ void main(){
                 bsp_printf("     重新综合并烧好 FPGA 之后, 把 IRQ_frame.h 里的 IRQ_FRAME_USE 改成 1。\r\n");
         #endif
 
-        /* Demo owns display setup and controls after this point:
-         * 1 = GPU/CPU split-screen comparison; 2 = game main loop. */
+        /* 从这里开始由 Demo 接管显示和输入：
+         * 1 = GPU/CPU 分屏对比；2 = 游戏主循环。 */
         #if (DEMO_RUN_SEL == 1)
                 compare_demo_run();
         #else
@@ -190,6 +190,6 @@ void main(){
         #endif
     }
 
-    /* Demo owns the game controls.  No legacy frame-switch loop follows. */
+    /* 输入由 Demo 接管，这里不再运行旧的帧切换主循环。 */
     while(1) bsp_uDelay(1000000u);
 }

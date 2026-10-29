@@ -395,12 +395,12 @@ extern int g_arena_x0, g_arena_y0, g_arena_x1, g_arena_y1;
 #define GAME_BOSS_DEBUG 0
 #endif
 
-/* Boss-room camera A/B test: use a 1x1 arena while keeping the Boss fight. */
+/* Boss 房相机 A/B 测试：保留 Boss 战，但改用 1×1 竞技场。 */
 #ifndef GAME_BOSS_1X1_TEST
 #define GAME_BOSS_1X1_TEST 0
 #endif
 
-/* Diagnostic only: shorten the Boss emitter's deliberate gaps. */
+/* 仅诊断使用：缩短 Boss 发射器中刻意保留的间隔。 */
 #ifndef GAME_BOSS_PACING_TEST
 #define GAME_BOSS_PACING_TEST 0
 #endif
@@ -483,13 +483,13 @@ enum { ITEM_CHILI, ITEM_URANUS, ITEM_EYES, ITEM_1UP, ITEM_MAGICCARD,
  *  hp/hp_max/lives：正数加、负数减（hp_max 先保留字段，等血条 UI 支持上限再启用）。
  *  move_v8/fire_every/bullet_speed/damage：有符号增量；bullet_speed 对普通/多弹幕都生效。  */
 typedef struct {
-    /* Definition deltas are -128..127; arithmetic promotes them to int. */
+    /* 属性增量定义为 -128..127；参与运算时提升为 int。 */
     signed char hp, hp_max, lives;
     signed char move_v8, fire_every, bullet_speed;
     signed char range;      /* 普通弹 32 px/点；追踪 0.8 s/点 */
     signed char damage;
     signed char bullet_type; /* -1 = 不改弹种 */
-    signed char triple;        /* number of extra shot paths; repeats accumulate */
+    signed char triple;        /* 额外弹道数；重复获得时累加 */
 } item_mod_t;
 
 typedef struct {
@@ -697,7 +697,7 @@ typedef struct {
     int moving, was_moving, last_dir;
     int vx8, vy8;                       /* 当前速度（1/8 像素每帧） */
     int rx, ry;                         /* 亚像素余量（累计到 8 才走 1 像素） */
-    u32 anim, fire_tick, anim_step;
+    u32 anim, fire_tick, anim_step;     /* fire_tick = 距下一发的剩余冷却帧 */
     u32 pickup_until, hurt_until;
 u32 gameover_until;                 /* GAME OVER 结束时刻（PHASE_GAMEOVER 用） */
 int score;                          /* 本局得分 */
@@ -744,8 +744,8 @@ int score;                          /* 本局得分 */
     old_t old_bomb_air[GAME_FB_COUNT][N_BOMB_AIRS];
     /* 子弹池 */
     bullet_t bullets[N_BULLETS];
-    /* Exact restoration needs each old rectangle. Tile restoration only needs
-     * their union, independent of bullet-slot reuse and camera movement. */
+    /* 精确恢复需要每个旧矩形；按格恢复只需所有旧矩形的并集，
+     * 与弹槽复用和相机移动无关。 */
 #if !GAME_BULLET_TILE_HISTORY
     old_t old_bullets[GAME_FB_COUNT][N_BULLETS];
 #else
@@ -801,7 +801,7 @@ static inline int game_triprism_count(void)
     return count;
 }
 
-/* Deterministic orbit position shared by collision, drawing and dirty history. */
+/* 碰撞、绘制和脏区历史共用同一套确定性环绕位置。 */
 static inline void game_triprism_position(int index, int count, u32 now,
                                           int *x, int *y)
 {
@@ -844,7 +844,9 @@ extern const asset_desc_t *const g_assets_ptr;
 
 //==================== 输入（game_input.c）====================
 
-u32  game_keys_read(void);
+u32  game_keys_read(void);                   /* WASD 移动及功能键掩码 */
+u32  game_aim_read(void);                    /* 小键盘瞄准方向掩码 */
+int  game_input_is_serial(void);             /* 1 = 串口手柄；0 = 板载按键回退 */
 int  game_take_spawn_item(void);             /* 取一次"按了 Y"（取完清） */
 int  game_take_bomb(void);                   /* 取一次"按了 E"（取完清） */
 int  game_take_restart(void);       /* 这一帧有没有"按过 R"（取完清零） */
@@ -863,11 +865,11 @@ int  game_restart(void);                /* 复位 + 把两块缓冲重铺一遍�
 void game_enter_gameover(u32 now);      /* 命尽：进 GAME OVER 画面 */
 void game_flow_enter_room(void);        /* 换房之后：按房间类型布置内容（道具 / Boss） */
 void game_boss_spawn(void);             /* 第一次进 Boss 房：满血到场中，立即开打 */
-int  game_init(void);
-int  game_finish_gpu(void);
-int  game_present(u32 fb);
-int  game_wait_display(void); /* Wait one boundary without changing the view. */
-int  game_wait_display_after(u32 mark);
+int  game_init(void);                   /* 初始化状态、GPU 和帧缓存；0 = 成功 */
+int  game_finish_gpu(void);             /* 结束当前帧的 GPU 命令并等待完成；0 = 成功 */
+int  game_present(u32 fb);              /* 把指定后台缓冲排到下一个显示边界；0 = 成功 */
+int  game_wait_display(void);           /* 等待一个显示边界，不改变当前显示内容 */
+int  game_wait_display_after(u32 mark); /* 等待 mark 之后的显示边界，正确处理已到达事件 */
 
 //==================== 相机（game_state.c / game_main.c）====================
 /*  HUD 画在 fb + cam 处 ⇒ 屏幕上位置固定；场景/实体画在 fb 的世界坐标处。
@@ -887,7 +889,7 @@ extern int g_cam_quant;
 
 //==================== 场景（game_world.c）====================
 /*  —— 房间系统（game_room.c）——
- *  房间不再硬编码：在 6×6 网格上随机生成一片连通的房间。
+ *  房间不再硬编码：在 7×7 网格上随机生成一片连通的房间。
  *  每个房间渲染门时直接看【周围 4 格】：
  *    · 邻居格没有房间       → 墙（门不存在，不画）
  *    · 邻居是普通房         → normal 门
@@ -920,7 +922,7 @@ void game_room_mark_cell_gone(int room, int x, int y); /* 标记破坏（重进�
 int  game_room_prev_layout(void);    /* 换房前的蓝图下标（-1 = 无） */
 int  game_room_prev_flip(void);      /* 旧布局覆盖区使用旧房间朝向 */
 int  game_room_prop_dirty(void);     /* 换房后还要为"旧蓝图的对象"标脏几帧（帧数递减） */
-void game_room_pos(int *gx, int *gy);/* 当前房间在 6×6 网格里的坐标 */
+void game_room_pos(int *gx, int *gy);/* 当前房间在 7×7 网格里的坐标 */
 int  game_room_type_at(int gx, int gy); /* 任意格子的房间类型；无房间 = ROOM_NONE */
 int  game_room_owner_at(int gx, int gy);/* 这一格属于哪间房（锚点格号）；空格 = -1 */
 void game_room_span(int *w, int *h);    /* 当前房间占几格（1×1 / 2×2） */
@@ -939,11 +941,11 @@ int  game_room_hidden_open(int a, int b);       /* 记为已打开；返回 1 = 
 void game_room_hidden_reset(void);              /* 换层 / 新一局：全部封回去 */
 int  game_room_blast_hidden(int cx, int cy, int r);  /* 炸弹：命中未开的隐藏门就打开，返回打开条数 */
 int  game_room_validate(void);       /* 启动自检：起点/道具/商店/Boss 唯一 / 特殊房不直连 / 空间不相邻 / 连通 */
-void game_room_reset(void);
-void game_room_step(void);
+void game_room_reset(void);             /* 新一局：生成房间图并把玩家放回起点 */
+void game_room_step(void);              /* 检查门触发；真正换房由主循环随后提交 */
 
 /*  一帧的模型更新（玩家 / 生命 / Boss / 子弹 / 怪 / 炸弹 / 金币 / 商店）：只改 g，不画 */
-void game_update_step(u32 keys, u32 now);
+void game_update_step(u32 keys, u32 aim_keys, u32 now); /* 按固定顺序推进 60 Hz 模型状态 */
 void game_room_request(int target, int entry_dir);  /* 剧情跳转；entry_dir < 0 = 落在房间中心 */
 void game_room_request_full(int target, int entry_dir); /* 同上，但强制整屏重铺（清旧怪贴图） */
 #if GAME_BOSS_SHORTCUT
@@ -961,11 +963,11 @@ int  game_room_is_cleared(int room);
 void game_room_new_run(void);        /* 新一轮：清掉所有"已用过/已生成"标记 */
 void game_room_door_bounds(int px, int py, int *x0, int *y0, int *x1, int *y1);
 int  game_room_find_type(int type);    /* 按房间类型找格子编号（-1 = 没有） */
-int  game_room_pending(void);
-int  game_room_rebuild_pending(void);
-int  game_room_finish_rebuild(void);
-int  game_room_commit(void);
-int  game_room_can_overlap_transition(void);
+int  game_room_pending(void);              /* 是否有等待提交的换房请求 */
+int  game_room_rebuild_pending(void);      /* 分批整屏重建是否尚未完成 */
+int  game_room_finish_rebuild(void);       /* 推进一步分批重建；0 = 本帧让出 */
+int  game_room_commit(void);               /* 提交已排队换房；0 = 需要后续分批完成 */
+int  game_room_can_overlap_transition(void); /* 新地形已缓存时可与当前画面过渡重叠 */
 
 /*  一张地图 = 框架参数（或异形表）+ 世界像素尺寸。
  *  ★ 墙 / 地板 / 门 / 角块都是【生成】的（game_frame.c），不再整张表存：
@@ -994,7 +996,7 @@ void game_world_hidden_cell(int tx, int ty, int *hx, int *hy);
 int  game_world_cols(void);             /* 当前地图多少格宽（普通 40 / Boss 45） */
 int  game_world_rows(void);             /* 当前地图多少格高（普通 23 / Boss 35） */
 int  game_world_w(void);                /* 当前世界像素宽（普通 1280 / Boss 1440） */
-int  game_world_h(void);                /* 当前世界像素高（普通 720  / Boss 1120） */
+int  game_world_h(void);                /* 当前世界像素高（普通 736  / Boss 1120） */
 int  game_world_is_boss(void);          /* 1 = 当前是 Boss 大房间（玩法语义，不是渲染语义） */
 int  game_world_terrain(void);          /* 1 = 异形房（逐格地形，需要逐格碰撞） */
 
@@ -1010,7 +1012,7 @@ int  game_floor_needs_prepare(u32 fb);
 u32  game_floor_reused_cells(void);
 void game_floor_prepare_frame(u32 fb);
 void game_floor_damage(int buf, dirty_map_t dirty);
-void game_capture_floor_damage(void); /* Capture old overlays before changing rooms. */
+void game_capture_floor_damage(void); /* 换房前先记录旧叠加层占用的区域。 */
 u32  game_floor_cmd_count(void);
 void game_mark_dirty(dirty_map_t dirty, int x, int y, int w, int h);
 #if !GAME_BG_EXACT_RECT
@@ -1021,7 +1023,7 @@ void game_dirty_begin(void);                                      /* 帧首：�
 int  game_dirty_touches(int x0, int y0, int x1, int y1);          /* 脏格队列是否碰到矩形 */
 void game_mark_doors_dirty(dirty_map_t dirty);   /* 4 扇门的两格都标脏 */
 void game_restore_dirty(u32 fb, dirty_map_t dirty);
-void game_restore_dirty_view(u32 fb, dirty_map_t dirty); /* frame-only; mark camera exposure first */
+void game_restore_dirty_view(u32 fb, dirty_map_t dirty); /* 只恢复当前视口；调用前先标相机新暴露区 */
 int  game_restore_preupdate(u32 fb, dirty_map_t dirty);
 int  game_restore_preupdate_active(u32 fb);
 void game_restore_preupdate_cancel(void);
@@ -1031,7 +1033,7 @@ u32  game_restore_direct_frames(void);
 u32  game_restore_copy_frames(void);
 void game_background_invalidate(void);
 u32  game_background_build(u32 fb);
-u32  game_background_refresh_doors(void); /* Reuse valid terrain; refresh room-dependent door skins. */
+u32  game_background_refresh_doors(void); /* 复用有效地形，只刷新随房间变化的门贴图。 */
 u32  game_background_warmup(void);
 u32  game_background_fb(void);
 int  game_background_ready(void);
@@ -1086,7 +1088,7 @@ void game_vital_step(u32 now);
 int  game_vital_hp(void);
 int  game_vital_lives(void);
 int  game_vital_invuln(u32 now);
-int  game_vital_dead(u32 now);              /* death animation timer is active */
+int  game_vital_dead(u32 now);              /* 1 = 死亡动画计时器仍在运行 */
 void game_vital_extra_life(void);           /* 1UP! 加一条命 */
 int  game_vital_heal_one(void);             /* 商店 heart：回 1 格血，不提升上限 */
 int  game_vital_over(void);                 /* 1 = 命数耗尽，该整局重开了 */
@@ -1112,10 +1114,10 @@ void game_hud_gameover(u32 fb, int score, int secs);
 #define GAMEOVER_H  150
 
 //==================== 角色（game_player.c）====================
-void game_player_step(u32 keys, u32 now);
+void game_player_step(u32 keys, u32 aim_keys, u32 now); /* WASD 移动，小键盘控制朝向 */
 void game_player_draw(u32 fb, u32 now, int buf);
 void game_player_submit(void);          /* 登记到渲染队列：z = 底边 y */
-void game_player_fire(void);            /* 自动瞄准最近的敌人 */
+void game_player_fire(void);            /* 按当前朝向发射一组玩家弹 */
 
 //==================== 子弹（game_bullet.c）====================
 int  game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enemy);
@@ -1162,8 +1164,8 @@ void game_capacity_camera(u32 now);
 #endif
 
 //==================== 小怪 / 金币（game_mob.c / game_coin.c）====================
-void game_mobs_dismiss(void); /* keep old footprints until their buffers are restored */
-void game_mobs_sync(int buf); /* begin a fresh record of mobs actually drawn */
+void game_mobs_dismiss(void); /* 保留旧覆盖区，直到两块缓冲都完成恢复。 */
+void game_mobs_sync(int buf); /* 开始记录该缓冲本帧实际绘制的小怪位置 */
 void game_mobs_reset(void);                         /* 换房时清空当前房间的小怪 */
 void game_mobs_spawn(int count);                    /* 生成 count 只 slime */
 void game_mobs_spawn_bug(int count);                /* 生成 count 只 bug（0,1,对称1,0 动画） */

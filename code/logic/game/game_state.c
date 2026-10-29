@@ -544,8 +544,8 @@ void game_start_fight(void)
     g.boss_hp = g_boss_def.hp;
     g.boss_gate = g_boss_def.gate1;
 #if GAME_CAPACITY_AUDIT == 2
-    /* Enter the selected real attack phase without crossing a health gate
-     * or summoning/clearing an intermission wave before measurement. */
+    /* 直接进入选定的真实攻击阶段，不跨越锁血线，
+     * 也不在测量前触发召唤或清除过场波次。 */
 #if GAME_CAPACITY_PHASE == 1
     g.boss_hp = g_boss_def.gate1;
     g.boss_gate = g_boss_def.gate2;

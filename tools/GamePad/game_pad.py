@@ -11,7 +11,9 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
   ★ 换串口最简单的方法：改下面 PORT = "COM5" 这一行，然后直接跑脚本。
 
 按键:
-    W / ↑ 上      S / ↓ 下      A / ← 左      D / → 右（可以斜着按）
+    W / A / S / D      控制移动（可以斜着按）
+    小键盘 ↑ / ↓ / ← / → 按住时控制人物朝向并连续射击
+    普通方向键        同样作为瞄准/射击输入，兼容 Num Lock 关闭的情况
     R            按一下重开一局（不用按住）
     Y            在玩家脚下生成道具和底座
     1 / 小键盘1  跳到 Boss 房
@@ -21,9 +23,10 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
     ESC 退出（松手即停，所以也可以随时按 Ctrl+C）
 
 协议（板端 game/game_input.c）:
-    两字节帧:  0xA5  +  mask
-    mask:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 E / bit6 Y / bit7 1
-    掩码变化时发送，按住时每 200 ms 补发；板端 500 ms 收不到就回落到板载按键。
+    三字节帧:  0xA6  +  move  +  aim
+    move:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 E / bit6 Y / bit7 1
+    aim:        bit0 左 / bit1 右 / bit2 下 / bit3 上
+    掩码变化时立即发送；连接期间每 200 ms 发送一次心跳。板端 500 ms 收不到就回落到板载按键。
     T 使用独立文本命令 T + 回车，不占用方向/传送等掩码位。
 """
 import argparse
@@ -59,18 +62,26 @@ PORT = "COM5"          # ← 板子接的那个串口（不确定就跑：uv run
 BAUD = 115200
 # =============================================================================
 
-PAD_MAGIC = 0xA5
+PAD_MAGIC_V2 = 0xA6
 
 # Windows 虚拟键码
-VK = {
-    0x26: 0x8,   # 上
-    0x28: 0x4,   # 下
-    0x25: 0x1,   # 左
-    0x27: 0x2,   # 右
+VK_MOVE = {
     0x57: 0x8,   # W
     0x53: 0x4,   # S
     0x41: 0x1,   # A
     0x44: 0x2,   # D
+}
+VK_AIM = {
+    0x26: 0x8,   # 上方向键
+    0x28: 0x4,   # 下方向键
+    0x25: 0x1,   # 左方向键
+    0x27: 0x2,   # 右方向键
+    0x68: 0x8,   # 小键盘 8
+    0x62: 0x4,   # 小键盘 2
+    0x64: 0x1,   # 小键盘 4
+    0x66: 0x2,   # 小键盘 6
+}
+VK_ACTION = {
     0x52: 0x10,  # R：按一下重开一局
     0x45: 0x20,  # E：放置炸弹
     0x59: 0x40,  # Y：生成道具和底座
@@ -88,12 +99,19 @@ def held(vk):
     return (user32.GetAsyncKeyState(vk) & 0x8000) != 0
 
 
-def read_mask():
-    m = 0
-    for vk, bit in VK.items():
+def read_masks():
+    move = 0
+    aim = 0
+    for vk, bit in VK_MOVE.items():
         if held(vk):
-            m |= bit
-    return m
+            move |= bit
+    for vk, bit in VK_AIM.items():
+        if held(vk):
+            aim |= bit
+    for vk, bit in VK_ACTION.items():
+        if held(vk):
+            move |= bit
+    return move, aim
 
 
 def show_ports():
@@ -135,16 +153,17 @@ def main():
                  % (port, e))
 
     print("已连接 %s @ %d" % (port, args.baud))
-    print("按键：WASD/方向键移动，R 重开，Y 道具+底座，E 炸弹，1 进 Boss，T 测试，/ 命令，ESC 退出。", flush=True)
+    print("按键：WASD 移动/默认朝向，按住小键盘/方向键瞄准并射击，R 重开，Y 道具，E 炸弹，1 进 Boss，T 测试，/ 命令，ESC 退出。", flush=True)
     sys.stdout.flush()
     if args.keep_log:
         print("采集模式: ESC 释放操控但保留日志，F8 切换操控，Ctrl+C 退出。", flush=True)
 
-    last_mask = -1
+    last_move = -1
+    last_aim = -1
     last_send = 0.0
     test_was_down = False
     cmd = None            # None = 普通模式；list = 正在输入一条命令
-    skip_next = False     # 方向键等特殊键会连发两个码，第二个要丢掉
+    skip_next = False     # 命令行输入时，扩展键会连发两个码，第二个要丢掉
     log = None
     controls = True
     control_was_down = False
@@ -223,24 +242,30 @@ def main():
                 ser.flush()
             test_was_down = test_down  # Holding T must never repeat the toggle.
 
-            mask = read_mask() if controls else 0
+            move_mask, aim_mask = read_masks() if controls and cmd is None else (0, 0)
             now = time.time()
-            # 变化就发；一直按着也每 200 ms 补发一次（板端 500 ms 收不到会掉线）
-            if mask != last_mask or (mask and now - last_send > 0.2):
-                ser.write(bytes([PAD_MAGIC, mask]))
+            # 变化立即发送；无按键时也定期发心跳，保持串口模式不误回落到板载自动索敌。
+            if (move_mask != last_move or aim_mask != last_aim or
+                    now - last_send > 0.2):
+                ser.write(bytes([PAD_MAGIC_V2, move_mask, aim_mask]))
                 ser.flush()
-                last_mask = mask
+                last_move = move_mask
+                last_aim = aim_mask
                 last_send = now
                 # 状态行（覆盖同一行，别刷屏）
                 names = []
-                if mask & 0x80: names.append("BOSS")
-                if mask & 0x20: names.append("BOMB(E)")
-                if mask & 0x40: names.append("SPAWN(Y)")
-                if mask & 0x10: names.append("RESTART")
-                if mask & 0x8: names.append("UP")
-                if mask & 0x4: names.append("DOWN")
-                if mask & 0x1: names.append("LEFT")
-                if mask & 0x2: names.append("RIGHT")
+                if move_mask & 0x80: names.append("BOSS")
+                if move_mask & 0x20: names.append("BOMB(E)")
+                if move_mask & 0x40: names.append("SPAWN(Y)")
+                if move_mask & 0x10: names.append("RESTART")
+                if move_mask & 0x8: names.append("MOVE-UP")
+                if move_mask & 0x4: names.append("MOVE-DOWN")
+                if move_mask & 0x1: names.append("MOVE-LEFT")
+                if move_mask & 0x2: names.append("MOVE-RIGHT")
+                if aim_mask & 0x8: names.append("AIM-UP")
+                if aim_mask & 0x4: names.append("AIM-DOWN")
+                if aim_mask & 0x1: names.append("AIM-LEFT")
+                if aim_mask & 0x2: names.append("AIM-RIGHT")
                 if not args.quiet_keys:
                     sys.stderr.write("\r  按键: %-22s" % (" ".join(names) if names else "(松开)"))
                     sys.stderr.flush()
@@ -256,7 +281,7 @@ def main():
             log.write(("\r\nGAMEPAD EXIT: " + exit_reason + "\r\n").encode("ascii"))
             log.close()
         try:
-            ser.write(bytes([PAD_MAGIC, 0]))     # 松手，别让它一直走
+            ser.write(bytes([PAD_MAGIC_V2, 0, 0]))  # 松手，别让它一直移动或瞄准
             ser.flush()
             time.sleep(0.05)
             ser.close()

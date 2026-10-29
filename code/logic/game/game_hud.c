@@ -107,8 +107,8 @@ static const char *row_label(int row)
     return row == 5 && g.test_mode ? "TEST" : s_row_label[row];
 }
 
-/* Restore only glyph footprints; the panel has no opaque background.
- * Keep the full vital row to cover hearts and a previous extra-life label. */
+/* 只恢复字模实际覆盖的范围，面板本身没有不透明背景。
+ * 生命行整体标脏，以覆盖心形和上一次可能显示的额外命数标签。 */
 void game_hud_mark_at(dirty_map_t dirty, int camx, int camy)
 {
     int i;
@@ -120,7 +120,7 @@ void game_hud_mark_at(dirty_map_t dirty, int camx, int camy)
             continue;
         }
         while (s_row_label[i][len]) ++len;
-        if (i == 5) len = 4; /* Include the previous TEST label when toggled off. */
+        if (i == 5) len = 4; /* 关闭测试模式时也覆盖上一次的 TEST 标签。 */
         game_mark_dirty(dirty, camx + HUD_LABEL_X, camy + i * HUD_ROW_H,
                         len * 16, 24);
         game_mark_dirty(dirty, camx + HUD_VALUE_X, camy + i * HUD_ROW_H,
@@ -226,7 +226,7 @@ int game_hud_prepare(dirty_map_t dirty, int buf,
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (i == 4) continue;
 
-        /* Cache mode as well as damage, even if configured equal to normal. */
+        /* 缓存中同时包含模式和伤害值，即使当前配置与普通模式相同。 */
         int key = v[i] + (i == 5 && g.test_mode ? 1000 : 0);
         if (s_last[buf][i] != key) {           /* ① 数值变了：标脏 + 重画这一行 */
             s_last[buf][i] = key;

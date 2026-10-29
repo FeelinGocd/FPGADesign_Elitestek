@@ -3,6 +3,16 @@
 // Full license header bsp/efinix/EfxSapphireSocRV64/include/LICENSE.MD
 ////////////////////////////////////////////////////////////////////////////////
 
+//==============================================================================
+//  userDef.h —— 应用侧 BSP 配置与板载外设地址
+//------------------------------------------------------------------------------
+//  干什么      : 选择调试模块/日志级别，并提供 KEY、GPIO0 等应用侧别名。
+//  上一级是谁  : src/main.c 及各外设驱动。
+//  修改注意    :
+//    · 调试日志会占用 UART 带宽，正式性能测量时通常只保留错误级输出；
+//    · GPIO 未在 IP Manager 中启用时，下面的编译期检查会主动报错。
+//==============================================================================
+
 #include "soc.h"
 
 #ifndef SRC_USERDEF_H_
@@ -13,36 +23,36 @@ extern "C" {
 #endif
 
 /* -----------------------------------------------------------------------------*/
-/* User Configuration                         	        	
-/* -----------------------------------------------------------------------------**/
+/* 用户配置
+/* -----------------------------------------------------------------------------*/
 
 /* -----------------------------------------------------------------------------*/
-/*  USER DEBUG CONFIGURATION
+/*  用户调试配置
 /* -----------------------------------------------------------------------------*/
-// --- DEBUG_MODE --- 
-    // 0 = Asserts OFF, Logs removed
-    // 1 = Asserts ON, Logs filtered
+// --- DEBUG_MODE ---
+    // 0 = 关闭断言并移除日志
+    // 1 = 开启断言，并按模块/级别过滤日志
 #define DEBUG_MODE 1
-// --- ACTIVE_DEBUG_MOD --- This is the list of available module to debug
-    // DBG_MOD_SYS          // Enable Log for RISCV Extension
-    // DBG_MOD_IRQ          // Enable Log for IRQ, mtrap
-    // DBG_MOD_FAULT        // Enable Log for System Fault  
-    // DBG_MOD_UART         // Enable Log for UART Driver
-    // DBG_MOD_I2C          // Enable Log for I2C Driver   
-    // DBG_MOD_SPI          // Enable Log for SPI Driver
-    // DBG_MOD_SPI_FLASH    // Enable Log for SPI FLASH Driver
-    // DBG_MOD_RTC          // Enable Log for RTC Driver
-    // DBG_MOD_CAM          // Enable Log for CAM Driver
-    // DBG_MOD_SENSOR       // Enable Log for Sensor (temp sensor)
-    // DBG_MOD_MAIN         // Enable Log for main.c
-    // DBG_MOD_ALL          // Enable all Logs
+// --- ACTIVE_DEBUG_MOD --- 可选调试模块
+    // DBG_MOD_SYS          // RISCV 扩展模块日志
+    // DBG_MOD_IRQ          // 中断与 mtrap 日志
+    // DBG_MOD_FAULT        // 系统故障日志
+    // DBG_MOD_UART         // UART 驱动日志
+    // DBG_MOD_I2C          // I2C 驱动日志
+    // DBG_MOD_SPI          // SPI 驱动日志
+    // DBG_MOD_SPI_FLASH    // SPI Flash 驱动日志
+    // DBG_MOD_RTC          // RTC 驱动日志
+    // DBG_MOD_CAM          // CAM 驱动日志
+    // DBG_MOD_SENSOR       // 温度传感器日志
+    // DBG_MOD_MAIN         // main.c 日志
+    // DBG_MOD_ALL          // 全部模块日志
 #define ACTIVE_DEBUG_MOD   DBG_MOD_ALL
 
 // --- ACTIVE_MIN_LVL ---
-    // DBG_LVL_ALL     0   // Show Info, Warn, Error
-    // DBG_LVL_WARN    1   // Show Warn, Error
-    // DBG_LVL_ERR     2   // Show Error only
-    // DBG_LVL_NONE    3   // Silence
+    // DBG_LVL_ALL     0   // 显示 Info、Warn、Error
+    // DBG_LVL_WARN    1   // 显示 Warn、Error
+    // DBG_LVL_ERR     2   // 只显示 Error
+    // DBG_LVL_NONE    3   // 完全静默
 #define ACTIVE_MIN_LVL   DBG_LVL_WARN
 
 /* -----------------------------------------------------------------------------*/

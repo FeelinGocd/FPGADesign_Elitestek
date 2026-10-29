@@ -162,8 +162,8 @@ static void burst_next(shot_t *s)
     } else {
         int layer, twin, layers = p->layers ? p->layers : 1;
         for (layer = 0; layer < layers && budget > 0; ++layer) {
-            /* Parallel lanes and 1/4-pixel speed steps keep layers distinct,
-             * while retaining each pattern's aim, fan, spin and twin arms. */
+            /* 平行通道和 1/4 像素速度阶梯让各层保持分离，
+             * 同时保留图案原有的瞄准、扇形、旋转和双向弹臂。 */
             int offset = layers > 1 ? (2 * layer - layers + 1) : 0;
             for (twin = 0; twin <= (p->twin != 0) && budget > 0; ++twin) {
                 int angle = (a + twin * (ANGLE_STEPS / 2)) & 63;

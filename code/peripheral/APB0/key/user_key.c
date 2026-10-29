@@ -14,7 +14,6 @@
 *     RTL/Peripherial/APB0/APB0_Interconnect.v
 *     RTL/Peripherial/APB0/APB0_Decoder.v
 *     RTL/Peripherial/APB0/key/APB0_key.v
-*     RTL/Peripherial/APB0/key/key.v
 *
 * 地址: APB0 窗口 0xf8100000, 译码到槽 0 (偏移 0x0000 ~ 0x0FFF)
 *
@@ -75,7 +74,7 @@ typedef struct {
 
 /*******************************************************************************
 *
-* @brief 读按键状态。key_state 由 key.v 内部维护, 松开自动清零。
+* @brief 读按键状态。key_state 由 RTL 顶层按键模块维护, 松开自动清零。
 *
 * @return bit[3:0], 按下 = 1, 松开 = 0 (已消抖)
 *

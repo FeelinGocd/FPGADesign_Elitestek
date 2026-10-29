@@ -1,5 +1,11 @@
-/* Optional RAM-only observation of ordinary player-controlled Boss fights.
- * Never changes game state, camera, damage, emission, or serial ownership. */
+//==============================================================================
+//  game_run_audit.c —— 普通 Boss 战的只读运行审计
+//------------------------------------------------------------------------------
+//  干什么      : 在 RAM 中记录各 Boss 阶段的帧耗时、IRQ 间隔和敌弹峰值。
+//  启用条件    : GAME_RUN_AUDIT != 0；默认关闭。
+//  接口契约    : 只观察游戏状态，不修改相机、伤害、弹幕发射或串口归属。
+//  数据读取    : 结构定义见 game_run_audit.h，读取时应检查 sequence 一致性。
+//==============================================================================
 #include "game.h"
 #if GAME_RUN_AUDIT
 #include "game_run_audit.h"
@@ -61,7 +67,7 @@ void game_run_audit_frame(void)
     int enemies;
     volatile game_run_audit_bucket_t *entry;
     if (bucket < 0) {
-        /* Leaving a fight starts a fresh cadence baseline, never a new log. */
+        /* 离开战斗时只重建节拍基线，不产生新的日志。 */
         last_room = last_bucket = -1;
         warmup = 0; have_baseline = begun = ended = 0;
         return;

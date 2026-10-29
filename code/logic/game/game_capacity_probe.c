@@ -1,5 +1,14 @@
-/* Diagnostic only: mode 1 owns a fixed visible grid; mode 2 observes the
- * unmodified fight/update path. Both use silent windows and display IRQs. */
+//==============================================================================
+//  game_capacity_probe.c —— 弹幕与帧耗时容量探测
+//------------------------------------------------------------------------------
+//  干什么      : 测量不同可见弹数下的 CPU/GPU 帧负载和显示节拍。
+//  启用条件    : GAME_CAPACITY_AUDIT != 0；默认关闭。
+//  模式        :
+//    · 1 = 合成固定可见弹阵，按 GAME_CAPACITY_STEP 递增；
+//    · 2 = 观察未改写的真实 Boss 战斗更新路径。
+//  接口契约    : 两种模式都使用静默测量窗口和显示中断，
+//                采样结束后再输出，避免串口写阻塞污染结果。
+//==============================================================================
 #include "game.h"
 #if GAME_CAPACITY_AUDIT
 #include "IRQ_frame.h"
@@ -37,8 +46,8 @@ static u32 cam_frames, visible_min, cmd_max;
 #if GAME_CAPACITY_AUDIT == 2
 static u32 enemy_min, enemy_max, visible_max, dense_frames, phase_bad;
 
-/* Count enemy pixels in the actual rendered viewport, excluding player
- * shots. No synthetic-fill or SKILL_DIAG helper is needed in this mode. */
+/* 统计当前渲染视口内完整可见的敌方弹数量，不包含玩家弹。
+ * 真实战斗模式不依赖合成填充或 SKILL_DIAG 辅助路径。 */
 static int visible_enemies(void)
 {
     int i, count = 0;
@@ -85,8 +94,8 @@ int game_boss_stress_step(void)
     if (armed && (!GAME_CAPACITY_BOSS || g.phase == PHASE_FIGHT)) {
         armed = 0; running = 1; epoch = game_ms();
 #if GAME_CAPACITY_AUDIT == 2
-        /* Keep normal automatic fire, while zero test damage and
-         * invincibility keep the selected real phase alive for all windows. */
+        /* 保持正常自动射击；测试伤害设为零并开启无敌，
+         * 使选定的真实 Boss 阶段能覆盖全部测量窗口。 */
         g.test_mode = 1;
         reset_window();
         bsp_printf("CAPSTART scene=%d mode=2 phase=%d start=%d stop=%d step=0 frames=%d windows=%d\r\n",
@@ -102,7 +111,6 @@ int game_boss_stress_step(void)
 #if GAME_CAPACITY_AUDIT == 2
     return 0; /* Observation only: game_update_step must run every subsystem. */
 #else
-    if (running) g.fire_tick = 0; /* player movement runs, automatic shots do not */
     return running;
 #endif
 }
@@ -212,8 +220,8 @@ void game_boss_stress_frame(u32 ignored)
     budget = stable && work_max <= CAP_BUDGET_US;
     if (!stable) raw_ok = 0;
     if (!budget) budget_ok = 0;
-    /* Printing happens after the measured window. The next 30 frames are
-     * discarded, including UART FIFO drain and buffer-history transition. */
+    /* 测量窗口结束后再输出；随后丢弃 30 帧，
+     * 覆盖 UART FIFO 排空和缓冲历史切换的影响。 */
 #if GAME_CAPACITY_AUDIT == 2
     bsp_printf("CAP scene=%d mode=2 phase=%d n=%d win=%d frames=%d ms=%d enemy_min=%d enemy_max=%d visible_min=%d visible_max=%d dense_frames=%d cam=%d avg_us=%d p99_us=%d max_us=%d miss=%d irq0=%d irq_max=%d drops=%d phase_bad=%d cmd_max=%d stable=%d budget=%d logic_us=%d prep_us=%d submit_us=%d fence_us=%d\r\n",
                GAME_CAPACITY_BOSS, GAME_CAPACITY_PHASE, level, window + 1, frames, (int)elapsed,

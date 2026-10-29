@@ -11,10 +11,10 @@
 //==============================================================================
 #include "render_list.h"
 
-/* Keep the hot queue compact: a function pointer costs four bytes per item,
- * while a frame normally reuses fewer than 16 distinct draw callbacks. */
+/* 热点队列保持紧凑：每个元素直接存函数指针要多 4 字节，
+ * 而一帧通常只复用不到 16 种绘制回调。 */
 static short          s_z[RL_MAX];
-/* Five callback bits + eleven entity-index bits share one 16-bit payload. */
+/* 5 位回调编号 + 11 位实体下标共用同一个 16 位载荷。 */
 static u16            s_payload[RL_MAX];
 static rl_draw_fn     s_fns[32];
 static unsigned char  s_fn_n;
@@ -56,7 +56,7 @@ int rl_push_id(int z, int draw_id, int arg)
 
 int rl_push(int z, rl_draw_fn fn, int arg)
 {
-    /* Rejected elements must not consume a callback-table entry. */
+    /* 被拒绝的元素不能占用回调表项。 */
     if (s_n >= RL_MAX || fn == 0 || (unsigned)arg > RL_ARG_MAX || z < -32768 || z > 32767) {
         ++s_dropped;
         return 0;
@@ -121,9 +121,8 @@ static void rl_sort(void)
 
     if (s_n <= 1 || rl_already_sorted()) return;
 
-    /* Stable LSD radix sort on z+32768.  Submission order is the tie-breaker,
-     * so this has the same ordering as the old heap sort without O(n log n)
-     * comparisons on the 300+ bullet frames. */
+    /* 对 z+32768 做稳定的 LSD 基数排序，以提交顺序作为同 z 的次序。
+     * 结果与旧堆排序一致，但数百发弹幕帧不再承担 O(n log n) 次比较。 */
     for (b = 0; b < 2; ++b) {
         int shift = b * 8;
         for (i = 0; i < 256; ++i) s_radix_count[i] = 0;

@@ -35,8 +35,7 @@ static int item_index(int item)
 const item_def_t g_item_defs[ITEM_COUNT] = {
     /* ITEM_CHILI  */ {
         "YOU FEEL SO HOT", ASSET_accessory_chili, 2, 1, 0,
-        /* Chili does not permanently replace the normal weapon. Each player
-         * projectile gets a 33% chance to use the flame effect instead. */
+        /* 辣椒不会永久替换普通武器；每发玩家弹有 33% 概率改用火焰弹效果。 */
         { 0, 0, 0, 0, 1, 1, 3, 0, -1, 0 }
     },
     /* ITEM_URANUS */ {
@@ -285,9 +284,8 @@ static void item_place(int type, int x, int y)
     g.item.active = 1;
     s_pickup_lock_until = 0u;
 
-    /* Keep each framebuffer's last drawn pedestal/icon until that buffer
-     * restores it. A new item can replace the old one during model update,
-     * after only the current back buffer has started its restoration. */
+    /* 每块帧缓存都要保留上次绘制的底座和图标，直到自身完成恢复。
+     * 模型更新时新道具可能覆盖旧道具，而当前后台缓冲可能刚开始恢复。 */
 }
 
 void game_item_spawn_random(int x, int y)
@@ -346,7 +344,7 @@ void game_item_try_pickup(u32 now)
 #define POOL_LABEL_X   (POOL_X + POOL_ICON - POOL_LABEL_W + 4)
 #define POOL_Y0        (POOL_LABEL_Y + 28)    /* 图标从标签下面开始 */
 
-/* Keep both buffers' old extents until each has erased a removed/expired icon. */
+/* 两块缓冲都要保留旧道具范围，直到各自擦除已移除或过期的图标。 */
 static unsigned char s_pool_drawn_count[GAME_FB_COUNT];
 
 void game_item_pool_rect(int *x, int *y, int *w, int *h)
@@ -480,8 +478,8 @@ void game_item_submit(void)
 }
 
 /*----------------------------------------------------------------------------*/
-/*  TriPrism: up to three orbiting emitters. A player shot can cross one and
- *  split once; game_bullet.c owns the projectile fan and reserve-slot limit. */
+/*  三棱镜：最多三个环形发射器。玩家弹穿过一个后可分裂一次；
+ *  分裂扇形弹和保留槽上限由 game_bullet.c 管理。 */
 static void triprism_draw_entry(u32 fb, u32 now, int buf, int index)
 {
     static const unsigned char seq[5] = { 0u, 1u, 2u, 1u, 0u };

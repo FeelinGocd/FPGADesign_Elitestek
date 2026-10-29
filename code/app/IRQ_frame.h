@@ -19,5 +19,5 @@ void IRQ_trapInstall(void);      /* 只装陷阱入口(mtvec), 不碰任何新�
 void IRQ_frame_init(void);       /* 开这一路中断(PLIC + CSR); 需要新 bitstream */
 u32  IRQ_frame_count(void);      /* 从初始化到现在收到过多少次"帧起始"中断 */
 u32  IRQ_frame_maxGap(void);     /* 两次中断之间最长间隔(CPU 周期数) —— 看有没有漏帧 */
-void IRQ_frame_isr(void);        /* 中断服务: 以后"每帧的绘制"就放这里 */
+void IRQ_frame_isr(void);        /* 中断服务: 只清事件并计数；绘制留在主循环 */
 void trap(void);                 /* 陷阱总入口(中断 + 异常), 由 common/trap.S 调用(名字由 trap.S 定) */
