@@ -120,6 +120,7 @@ static int                  s_world_h = SCR_H;
 static int                  s_is_boss;
 static int                  s_map_idx;
 static int                  s_terrain;                   /* 1 = 用的是布局自带地形 */
+static short s_content_x0, s_content_y0, s_content_x1, s_content_y1;
 static unsigned char        s_flip;                      /* 异形房镜像：bit0 左右、bit1 上下 */
 static int                  s_mx = -1, s_my = -1;        /* 镜像轴（内容外接框中心×2）：x' = s_mx - x */
 
@@ -560,13 +561,15 @@ static void world_select_layout(const room_layout_t *L,int flip,int boss)
         s_flip = 0u;                             /* 标准矩形房没有镜像 */
 #if GAME_BOSS_1X1_TEST
         if (s_is_boss)
-            bsp_printf("BOSS TEST: 1x1 arena, world=%dx%d, camera fixed\r\n",
+            GAME_LOG("BOSS TEST: 1x1 arena, world=%dx%d, camera fixed\r\n",
                        s_world_w, s_world_h);
 #endif
     }
 
     /* 构建渲染索引和门索引时，只读取一次源几何。 */
     s_door_n = 0;
+    s_content_x0 = (short)s_world_w; s_content_y0 = (short)s_world_h;
+    s_content_x1 = s_content_y1 = 0;
     for (ty = 0; ty < s_map_h; ++ty)
         for (tx = 0; tx < s_map_w; ++tx) {
             char dc;
@@ -587,6 +590,15 @@ static void world_select_layout(const room_layout_t *L,int flip,int boss)
                 ((dc == 'D' || dc == 'H') ?
                  ((game_world_dir_at(tx, ty) & 3) << 6) : 0u));
 #endif
+            if (dc != '.') {
+                int pad = (dc == 'D' || dc == 'H') ? TILE : 0;
+                int x0 = tx*TILE-pad, y0 = ty*TILE-pad;
+                int x1 = (tx+1)*TILE+pad, y1 = (ty+1)*TILE+pad;
+                if (x0 < s_content_x0) s_content_x0 = (short)x0;
+                if (y0 < s_content_y0) s_content_y0 = (short)y0;
+                if (x1 > s_content_x1) s_content_x1 = (short)x1;
+                if (y1 > s_content_y1) s_content_y1 = (short)y1;
+            }
             if ((dc == 'D' || dc == 'H') && s_door_n < MAX_DOORS) {
                 s_door_tx[s_door_n] = (unsigned char)tx;
                 s_door_ty[s_door_n] = (unsigned char)ty;
@@ -1356,10 +1368,7 @@ static void door_clean_rect(int tx, int ty, int *ox, int *oy, int *ow, int *oh)
 
     if (ai != ASSET_background_interact_hidden || game_world_tile_at(tx, ty) == 'H') {
         door_rect(tx, ty, ox, oy, ow, oh);
-        return;
-    }
-
-    {
+    } else {
         int r = (int)game_world_rot_at(tx, ty);
         const asset_desc_t *nd = &g_assets[ASSET_background_door_normal];
         int dw = (int)nd->width;
@@ -1375,6 +1384,17 @@ static void door_clean_rect(int tx, int ty, int *ox, int *oy, int *ow, int *oh)
             *ox = tx * TILE - (dw - TILE) / 2;
             *oy = ((door_pair_sy(tx, ty) < 0) ? (ty - 1) : ty) * TILE;
         }
+    }
+
+    /* A closed side has no door sprite, so its old pixels can only be removed
+     * by the dirty-restore path. Doors overhang their tile by four pixels;
+     * retain one full tile of margin so a previously visible right/left door
+     * cannot leave a half-door sliver outside the exact new footprint. */
+    if (!game_room_door_visible(tx, ty)) {
+        *ox -= TILE;
+        *oy -= TILE;
+        *ow += TILE * 2;
+        *oh += TILE * 2;
     }
 }
 
@@ -1412,25 +1432,33 @@ u32 game_background_refresh_doors(void)
     game_restore_preupdate_cancel();
 #if GAME_BG_COPY
     u32 cmds = 0u;
-    int k;
+    int k, tx, ty;
+    dirty_map_t patch;
     if (!s_background_valid) return game_background_build(FB_BG);
 
     /* 地形相同但房间连接图变化时，只有门覆盖区受邻居、特殊房皮肤
      * 和隐藏连接状态影响。画门前先恢复完整格范围（包括外伸 4 px），
      * 避免关闭或变小的门残留旧的透明边缘。 */
-    s_background_full = 1u;
+    dirty_clear(patch);
     for (k = 0; k < s_door_n; ++k) {
-        int x0, y0, x1, y1, tx, ty;
+        int x0, y0, x1, y1;
         door_dirty_range(s_door_tx[k], s_door_ty[k], &x0, &y0, &x1, &y1);
         if (x1 >= s_map_w) x1 = s_map_w - 1;
         if (y1 >= s_map_h) y1 = s_map_h - 1;
         for (ty = y0; ty <= y1; ++ty)
-            for (tx = x0; tx <= x1; ++tx) {
+            for (tx = x0; tx <= x1; ++tx)
+                dirty_set(patch, tx, ty);
+    }
+
+    s_background_full = 1u;
+    for (ty = 0; ty < s_map_h; ++ty)
+        for (tx = 0; tx < s_map_w; ++tx) {
+            if (dirty_get(patch, tx, ty)) {
                 blit_cell(s_bg_fb, tx, ty);
                 if (ty * TILE < s_world_h &&
                     (!is_door(tx, ty))) ++cmds;
             }
-    }
+        }
     cmds += floor_draw_doors(s_bg_fb);
     s_background_full = 0u;
     return cmds;
@@ -1471,12 +1499,65 @@ static void restore_dirty_direct(u32 fb, dirty_map_t dirty)
 typedef char bg_span_columns_fit_byte[(GRID_W < 128) ? 1 : -1];
 typedef char bg_span_rows_fit_byte[(GRID_H < 256) ? 1 : -1];
 typedef char bg_span_height_fits_command[(GRID_H * TILE <= 65535) ? 1 : -1];
+static int s_restore_view;
+/* World selection bounds every painted tile, with a full-tile guard around
+ * door anchors for their second half and rotated overhang. Outside that
+ * rectangle the cached background is exactly black, including custom maps. */
+static void restore_pixels(u32 fb, int left, int top, int right, int bottom)
+{
+    if (right <= left || bottom <= top) return;
+    if (s_content_x1 > s_content_x0 && s_content_y1 > s_content_y0) {
+        int x0 = s_content_x0, y0 = s_content_y0;
+        int x1 = s_content_x1, y1 = s_content_y1;
+        int edge = bottom < y0 ? bottom : y0;
+        if (top < edge) {
+            CI_gpu2d_fillRect(fb, left, top, right-left, edge-top, 0u);
+            ++s_restore_cmds;
+            top = edge;
+        }
+        edge = top > y1 ? top : y1;
+        if (bottom > edge) {
+            CI_gpu2d_fillRect(fb, left, edge, right-left, bottom-edge, 0u);
+            ++s_restore_cmds;
+            bottom = edge;
+        }
+        if (bottom <= top) return;
+        edge = right < x0 ? right : x0;
+        if (left < edge) {
+            CI_gpu2d_fillRect(fb, left, top, edge-left, bottom-top, 0u);
+            ++s_restore_cmds;
+            left = edge;
+        }
+        edge = left > x1 ? left : x1;
+        if (right > edge) {
+            CI_gpu2d_fillRect(fb, edge, top, right-edge, bottom-top, 0u);
+            ++s_restore_cmds;
+            right = edge;
+        }
+    }
+    if (right <= left || bottom <= top) return;
+    CI_gpu2d_blitRect(s_bg_fb, left, top, fb, left, top,
+                      right-left, bottom-top);
+    ++s_restore_cmds;
+}
 static void restore_span(u32 fb, int x0, int y0, int x1, int y1)
 {
-    CI_gpu2d_blitRect(s_bg_fb, (u32)(x0 * TILE), (u32)(y0 * TILE),
-                      fb, (u32)(x0 * TILE), (u32)(y0 * TILE),
-                      (u32)((x1 - x0) * TILE), (u32)((y1 - y0) * TILE));
-    ++s_restore_cmds;
+    int left = x0 * TILE, top = y0 * TILE;
+    int right = x1 * TILE, bottom = y1 * TILE;
+    /* The final pass only needs visible pixels. Early copies remain whole
+     * tiles: their exclusion map must stay valid after the camera update. */
+    if (s_restore_view
+#if PREUPDATE_RESTORE_ENABLED
+        && !s_pre_record
+#endif
+    ) {
+        if (left < g.cam_x) left = g.cam_x;
+        if (top < g.cam_y) top = g.cam_y;
+        if (right > g.cam_x + SCR_W) right = g.cam_x + SCR_W;
+        if (bottom > g.cam_y + SCR_H) bottom = g.cam_y + SCR_H;
+    }
+    if (right <= left || bottom <= top) return;
+    restore_pixels(fb, left, top, right, bottom);
 #if PREUPDATE_RESTORE_ENABLED
     if (s_pre_record) {
         int x, y;
@@ -1519,12 +1600,13 @@ static inline int restore_tile_excluded(int x, int y, int exclude)
 }
 
 /*----------------------------------------------------------------------------*/
-static void restore_dirty(u32 fb, dirty_map_t dirty, int view)
+static __attribute__((optimize("O2"))) void restore_dirty(u32 fb, dirty_map_t dirty, int view)
 {
     int tx, ty, k;
 
  #if GAME_BG_COPY
     if (s_background_valid) {
+        s_restore_view = view;
         int exclude = game_restore_preupdate_active(fb);
         if (s_dirty_ready && !s_dirty_overflow && s_dirty_max_tx < 0)
             return;
@@ -1677,8 +1759,8 @@ void game_restore_dirty(u32 fb, dirty_map_t dirty)
     restore_dirty(fb, dirty, 0);
 }
 
-/* 调用方已选择不被 HDMI 使用的帧缓存。下一相机位置未知，
- * 因此需要在整张世界中恢复旧覆盖区。 */
+/* 调用方已选择不被 HDMI 使用的帧缓存。先恢复当前视口，
+ * 相机更新后再补新视口中未恢复的格，屏外历史仍由暴露区规则处理。 */
 int game_restore_preupdate(u32 fb, dirty_map_t dirty)
 {
 #if PREUPDATE_RESTORE_ENABLED
@@ -1688,7 +1770,8 @@ int game_restore_preupdate(u32 fb, dirty_map_t dirty)
     dirty_clear(s_pre_restored);
     s_pre_fb = fb;
     s_pre_record = 1;
-    restore_dirty(fb, dirty, -1); /* force DDR copies, without viewport culling */
+    /* s_pre_restored 仅排除实际复制的格，后续普通恢复补齐相机新暴露区。 */
+    restore_dirty(fb, dirty, 1);
     s_pre_record = 0;
     s_pre_valid = 1;
     /* 连续拷贝可能包含干净间隔。即使第二次恢复会排除这些格，

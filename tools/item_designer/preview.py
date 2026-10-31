@@ -98,6 +98,10 @@ def effect_text(row):
         parts.append("加命 +%d" % int(row.get("lives") or 0))
     if int(row.get("hp") or 0):
         parts.append("回血 +%d" % int(row.get("hp") or 0))
+    if int(row.get("hp_max") or 0):
+        parts.append("生命上限 +%d" % int(row.get("hp_max") or 0))
+    if int(row.get("coins") or 0):
+        parts.append("金币 +%d" % int(row.get("coins") or 0))
     for key, label in (("move_v8", "移速"), ("fire_every", "射速"),
                        ("bullet_speed", "弹速"), ("range", "射程"), ("damage", "伤害")):
         v = int(row.get(key) or 0)
@@ -269,9 +273,6 @@ def render(rows, out_path, emit_c=False):
         if int(r.get("triple") or 0) and r.get("key") != "ITEM_EYES":
             print("[WARN] game_item.c currently derives fire_triple from ITEM_EYES only;",
                   "a new triple item also needs that line changed.")
-        if int(r.get("hp") or 0) == 0 and int(r.get("hp_max") or 0) != 0:
-            print("[WARN] hp_max is reserved and not applied by game_item_apply().")
-
     if emit_c:
         bullet_map = {"-": "-1", "": "-1", "A": "BULLET_A",
                       "CHILI": "BULLET_CHILI", "URANUS": "BULLET_URANUS"}
@@ -284,10 +285,11 @@ def render(rows, out_path, emit_c=False):
             icon = r.get("icon_asset", "ASSET_?")
             b = (r.get("bullet") or "-").strip()
             bt = bullet_map.get(b, b)
-            vals = [int(r.get("hp") or 0), 0, int(r.get("lives") or 0),
+            vals = [int(r.get("hp") or 0), int(r.get("hp_max") or 0), int(r.get("lives") or 0),
                     int(r.get("move_v8") or 0), int(r.get("fire_every") or 0),
                     int(r.get("bullet_speed") or 0), int(r.get("range") or 0),
-                    int(r.get("damage") or 0), bt, int(r.get("triple") or 0)]
+                    int(r.get("damage") or 0), bt, int(r.get("triple") or 0),
+                    int(r.get("coins") or 0)]
             lv = int(r.get("level") or 0)
             pool = int(r.get("pool") or 1)
             flags = "ITEM_FLAG_LIFE_PLUS" if str(r.get("life_plus", "0")) == "1" else "0"

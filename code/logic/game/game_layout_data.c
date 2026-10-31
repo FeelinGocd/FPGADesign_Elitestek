@@ -92,6 +92,48 @@ const obj_place_t L__1x1_002[] = {
     O(28,16,OBJ_STONE), O(29,16,OBJ_STONE), O(30,16,OBJ_CRATE), O(31,16,OBJ_CRATE),
 };
 
+/* 1x1_003：40×23，69 个对象 */
+const obj_place_t L__1x1_003[] = {
+    O(9,4,OBJ_CRATE), O(10,4,OBJ_CRATE), O(11,4,OBJ_WEB), O(18,4,OBJ_STONE), O(22,4,OBJ_STONE),
+    O(29,4,OBJ_WEB), O(30,4,OBJ_CRATE), O(31,4,OBJ_CRATE), O(9,5,OBJ_CRATE), O(10,5,OBJ_WEB),
+    O(18,5,OBJ_STONE), O(22,5,OBJ_STONE), O(30,5,OBJ_WEB), O(31,5,OBJ_CRATE), O(9,6,OBJ_WEB),
+    O(14,6,OBJ_AIMER), O(26,6,OBJ_AIMER), O(31,6,OBJ_WEB), O(9,8,OBJ_STONE), O(10,8,OBJ_STONE),
+    O(11,8,OBJ_STONE), O(12,8,OBJ_STONE), O(13,8,OBJ_STONE), O(14,8,OBJ_STONE),
+    O(15,8,OBJ_STONE), O(25,8,OBJ_STONE), O(26,8,OBJ_STONE), O(27,8,OBJ_STONE),
+    O(28,8,OBJ_STONE), O(29,8,OBJ_STONE), O(30,8,OBJ_STONE), O(31,8,OBJ_STONE),
+    O(20,9,OBJ_STONE), O(19,10,OBJ_STONE), O(20,10,OBJ_BOX), O(21,10,OBJ_STONE),
+    O(20,11,OBJ_STONE), O(9,12,OBJ_STONE), O(10,12,OBJ_STONE), O(11,12,OBJ_STONE),
+    O(12,12,OBJ_STONE), O(13,12,OBJ_STONE), O(14,12,OBJ_STONE), O(15,12,OBJ_STONE),
+    O(25,12,OBJ_STONE), O(26,12,OBJ_STONE), O(27,12,OBJ_STONE), O(28,12,OBJ_STONE),
+    O(29,12,OBJ_STONE), O(30,12,OBJ_STONE), O(31,12,OBJ_STONE), O(9,14,OBJ_WEB),
+    O(14,14,OBJ_AIMER), O(26,14,OBJ_AIMER), O(31,14,OBJ_WEB), O(9,15,OBJ_CRATE),
+    O(10,15,OBJ_WEB), O(18,15,OBJ_STONE), O(22,15,OBJ_STONE), O(30,15,OBJ_WEB),
+    O(31,15,OBJ_CRATE), O(9,16,OBJ_CRATE), O(10,16,OBJ_CRATE), O(11,16,OBJ_WEB),
+    O(18,16,OBJ_STONE), O(22,16,OBJ_STONE), O(29,16,OBJ_WEB), O(30,16,OBJ_CRATE),
+    O(31,16,OBJ_CRATE),
+};
+
+/* 1x1_004：40×23，71 个对象 */
+const obj_place_t L__1x1_004[] = {
+    O(9,4,OBJ_STONE), O(10,4,OBJ_STONE), O(30,4,OBJ_STONE), O(31,4,OBJ_STONE), O(9,5,OBJ_STONE),
+    O(10,5,OBJ_BOX), O(11,5,OBJ_STONE), O(29,5,OBJ_STONE), O(30,5,OBJ_CRATE), O(31,5,OBJ_STONE),
+    O(10,6,OBJ_STONE), O(16,6,OBJ_WEB), O(17,6,OBJ_WEB), O(23,6,OBJ_WEB), O(24,6,OBJ_WEB),
+    O(30,6,OBJ_STONE), O(15,7,OBJ_STONE), O(18,7,OBJ_STONE), O(19,7,OBJ_STONE),
+    O(20,7,OBJ_STONE), O(21,7,OBJ_STONE), O(22,7,OBJ_STONE), O(25,7,OBJ_STONE),
+    O(15,8,OBJ_STONE), O(19,8,OBJ_AIMER), O(20,8,OBJ_STONE), O(21,8,OBJ_AIMER),
+    O(25,8,OBJ_STONE), O(15,9,OBJ_STONE), O(19,9,OBJ_SLIME), O(20,9,OBJ_STONE), O(21,9,OBJ_BUG),
+    O(25,9,OBJ_STONE), O(15,10,OBJ_STONE), O(19,10,OBJ_SLIME), O(20,10,OBJ_STONE),
+    O(21,10,OBJ_BUG), O(25,10,OBJ_STONE), O(15,11,OBJ_STONE), O(19,11,OBJ_SLIME),
+    O(20,11,OBJ_STONE), O(21,11,OBJ_BUG), O(25,11,OBJ_STONE), O(15,12,OBJ_STONE),
+    O(19,12,OBJ_AIMER), O(20,12,OBJ_STONE), O(21,12,OBJ_AIMER), O(25,12,OBJ_STONE),
+    O(15,13,OBJ_STONE), O(18,13,OBJ_STONE), O(19,13,OBJ_STONE), O(20,13,OBJ_STONE),
+    O(21,13,OBJ_STONE), O(22,13,OBJ_STONE), O(25,13,OBJ_STONE), O(10,14,OBJ_STONE),
+    O(16,14,OBJ_WEB), O(17,14,OBJ_WEB), O(23,14,OBJ_WEB), O(24,14,OBJ_WEB), O(30,14,OBJ_STONE),
+    O(9,15,OBJ_STONE), O(10,15,OBJ_CRATE), O(11,15,OBJ_STONE), O(29,15,OBJ_STONE),
+    O(30,15,OBJ_BOX), O(31,15,OBJ_STONE), O(9,16,OBJ_STONE), O(10,16,OBJ_STONE),
+    O(30,16,OBJ_STONE), O(31,16,OBJ_STONE),
+};
+
 /* L_001：45×35 异形地形 */
 static const unsigned short LTI_L_001[35] = { 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 4, 3, 3, 3, 3, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 9, 10, 0, 0, 0, 0, 0 };
 static const unsigned short RTI_L_001[35] = { 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 4, 3, 3, 3, 3, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 9, 10, 0, 0, 0, 0, 0 };
@@ -165,11 +207,13 @@ const room_layout_t g_layouts[LAYOUT_COUNT] = {
     { "1x1_000", L__1x1_000, 0, 0, 0 },
     { "1x1_001", L__1x1_001, 37, 0, 0 },
     { "1x1_002", L__1x1_002, 61, 0, 0 },
-    { "L_001", L_L_001, 66, 3, &T_L_001 },
+    { "1x1_003", L__1x1_003, 69, 0, 0 },
+    { "1x1_004", L__1x1_004, 71, 0, 0 },
+    { "L_001", L_L_001, 66, 5, &T_L_001 },
     { "map_1x1_type0", L_map_1x1_type0, 37, 0, 0 },
-    { "map_L", L_map_L, 0, 3, &T_L_001 },
-    { "map_hidden_normal", L_map_hidden_normal, 0, 6, &T_map_hidden_normal },
-    { "room_2x2", L_room_2x2, 0, 7, &T_room_2x2 },
+    { "map_L", L_map_L, 0, 5, &T_L_001 },
+    { "map_hidden_normal", L_map_hidden_normal, 0, 8, &T_map_hidden_normal },
+    { "room_2x2", L_room_2x2, 0, 9, &T_room_2x2 },
 };
-const unsigned short g_layout_ids[LAYOUT_COUNT] = { 0, 1, 2, 1, 0, 0, 0, 0 };
+const unsigned short g_layout_ids[LAYOUT_COUNT] = { 0, 1, 2, 3, 4, 1, 0, 0, 0, 0 };
 

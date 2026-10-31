@@ -24,8 +24,11 @@ void game_update_step(u32 keys, u32 aim_keys, u32 now)
     }
 #endif
 
-    if (game_take_spawn_item() && g.phase != PHASE_GAMEOVER)
-        game_item_spawn_at_player();
+    if (g.phase != PHASE_GAMEOVER) {
+        int spawn_req = game_take_spawn_item();
+        if (spawn_req == 2) game_chest_spawn_test();
+        else if (spawn_req) game_item_spawn_at_player();
+    }
     if (game_take_bomb() && g.phase != PHASE_GAMEOVER)
         game_bomb_place(now);
 
@@ -41,6 +44,7 @@ void game_update_step(u32 keys, u32 aim_keys, u32 now)
 
     if (g.phase != PHASE_GAMEOVER && !game_vital_dead(now))
         game_player_step(keys, aim_keys, now);
+    game_chest_step(now);
     game_camera_step();
     game_boss_step(now);
     game_bullets_step(now);

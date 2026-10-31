@@ -10,18 +10,20 @@
 //      bufferUnpacker   : 16 字节/拍 -> 3 字节/像素
 //      HDMI_Top         : 720p60 时序(pixel_timing 里 define 选) + TMDS
 //      asyn_rst_syn     : 像素域复位同步(异步断言 / 同步释放)
-//      frame_start 跨域桥: 读域 HDMI_frame_start_o -> toggle -> 写域 2FF+seen
+//      frame_start 跨域桥: 读域 HDMI_frame_start_o -> toggle -> 写域 2FF+seen（EXTERNAL_FRAME_COMMIT=0 时用）
+//      frame_commit     : EXTERNAL_FRAME_COMMIT=1 时，帧边界改由 GPU2D_DisplayCDC 的 commit 触发
 //   ★ "寄存器 -> 有效信号"(翻页/选地址/帧率)的翻译【不在本模块】:
 //     由 GPU_2D 里的 GPU2D_APBHandler 做完, 这里只收 enable / mode / addr 三根线
 //
 //  两级时钟
-//      clk(100MHz)          : 寄存器值 / controller / aligner / PingPong 写侧 / AXI
+//      clk(mem_clk 100MHz)  : controller / aligner / PingPong 写侧 / AXI
 //      clk_HDMI_x1(74.25MHz): PingPong 读侧 / unpacker / HDMI / frame_start 的产生
 //      ★ aligner 只在写域: 74.25MHz 那条像素通路一个字节都不动
 //
 //  和外面怎么连
 //      进: 已经翻译好的 enable / mode / {段0,段1} 基址（寄存器在 GPU2D_APBHandler 那边）
-//      出: 帧边界单拍 lineBuffer_frame_start（回 GPU2D_APBHandler 翻页/计帧率）
+//      出: 帧边界 frame_start（mem 域）→ DisplayCDC → APBHandler 翻页/计帧率
+//      进: frame_commit（mem 域，来自 DisplayCDC）→ 放行下一帧首行预取
 //      端口名和 GPU2D_APBHandler 那侧保持一致, 顶层一一对接
 //==============================================================================
 module lineBuffer #(

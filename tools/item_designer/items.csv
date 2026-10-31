@@ -1,7 +1,9 @@
-id,key,enabled,desc,icon_asset,icon_file,bullet,triple,hp,lives,move_v8,fire_every,bullet_speed,range,damage,note,features,level,pool,life_plus
-0,ITEM_CHILI,1,YOU FEEL SO HOT,ASSET_accessory_chili,accessory_chili.png,-,0,0,0,0,1,1,3,0,完成,"[""每次发射独立33%概率替换为火焰弹"", ""火焰弹能够阻挡3次敌弹"", ""火焰弹能够存活2s"", ""火焰弹伤害=玩家当前伤害"", ""火焰命中小怪后以250ms tick灼烧""]",2,1,0
-1,ITEM_URANUS,1,IT FEELS LIKE IRON,ASSET_accessory_Uranus,accessory_Uranus.png,URANUS,0,0,0,2,-1,2,3,2,完成,"[""冰冻弹幕"", ""被命中3次的敌人会被冰冻，命中Boss降低Boss移速"", ""被命中的所有敌人接下来发射的弹幕弹速下降"", ""Boss的弹幕弹速下降每5s触发一次"", ""被命中的所有敌人在弹幕弹速下降时覆盖一层蓝色滤镜""]",2,1,0
-2,ITEM_EYES,1,SLOWER BUT MORER,ASSET_accessory_Inner_eyes,accessory_Inner_eyes.png,-,1,0,0,0,5,0,3,-1,完成,"[""每次拾取增加1条弹道"", ""降低发射速度"", ""降低伤害""]",2,1,0
-3,ITEM_1UP,1,EXTRA LIFE,ASSET_accessory_1UP_ExtraLiFE,accessory_1UP!ExtraLiFE.png,-,0,1,1,1,0,0,0,0,完成,"[""死亡时在当前房间直接复活""]",2,1,0
-4,ITEM_MAGICCARD,1,TURN BACK,ASSET_accessory_MagicCard_,accessory_MagicCard!.png,-,0,0,0,0,-1,-2,5,1,完成,"[""追踪弹幕"", ""淡紫色弹幕"", ""死亡后回到上一个房间剩余一颗心并举起本道具消耗，仅一次""]",3,1,1
-5,ITEM_TRIPRISM,1,SPLIT,ASSET_accessory_TriPrism,accessory_TriPrism.png,-,0,1,1,0,0,0,0,0,完成,"[""每拾取一件增加1个环绕棱镜，最多3个"", ""棱镜半径56px，约2秒顺时针一圈"", ""未分裂的玩家弹命中24x24棱镜后沿移动方向分裂为红黄绿蓝4发"", ""分裂弹不会再次分裂"", ""分裂弹总量上限24发""]",3,1,0
+id,key,enabled,desc,icon_asset,icon_file,bullet,triple,hp,hp_max,coins,lives,move_v8,fire_every,bullet_speed,range,damage,note,features,level,pool,life_plus
+0,ITEM_CHILI,1,YOU FEEL SO HOT,ASSET_accessory_chili,accessory_chili.png,-,0,0,0,0,0,0,1,1,3,0,完成,"[""每次发射独立33%概率替换为火焰弹"", ""火焰弹能够阻挡3次敌弹"", ""火焰弹能够存活2s"", ""火焰弹伤害=玩家当前伤害"", ""火焰命中小怪后以250ms tick灼烧""]",2,1,0
+1,ITEM_URANUS,1,IT FEELS LIKE IRON,ASSET_accessory_Uranus,accessory_Uranus.png,URANUS,0,0,0,0,0,2,-1,2,3,2,完成,"[""冰冻弹幕"", ""被命中3次的敌人会被冰冻，命中Boss降低Boss移速"", ""被命中的所有敌人接下来发射的弹幕弹速下降"", ""Boss的弹幕弹速下降每5s触发一次"", ""被命中的所有敌人在弹幕弹速下降时覆盖一层蓝色滤镜""]",2,1,0
+2,ITEM_EYES,1,SLOWER BUT MORER,ASSET_accessory_Inner_eyes,accessory_Inner_eyes.png,-,1,0,0,0,0,0,5,0,3,-1,完成,"[""每次拾取增加1条弹道"", ""降低发射速度"", ""降低伤害""]",2,1,0
+3,ITEM_1UP,1,EXTRA LIFE,ASSET_accessory_1UP_ExtraLiFE,accessory_1UP!ExtraLiFE.png,-,0,3,0,0,1,1,0,0,0,0,完成,"[""死亡时在当前房间直接复活""]",2,1,0
+4,ITEM_MAGICCARD,1,TURN BACK,ASSET_accessory_MagicCard_,accessory_MagicCard!.png,-,0,0,0,0,0,0,-1,-2,5,1,完成,"[""追踪弹幕"", ""淡紫色弹幕"", ""死亡后回到上一个房间剩余一颗心并举起本道具消耗，仅一次""]",3,1,1
+5,ITEM_TRIPRISM,1,SPLIT,ASSET_accessory_TriPrism,accessory_TriPrism.png,-,0,1,0,0,1,0,0,0,0,0,完成,"[""每拾取一件增加1个环绕棱镜，最多3个"", ""棱镜半径56px，约2秒顺时针一圈"", ""未分裂的玩家弹命中24x24棱镜后沿移动方向分裂为红黄绿蓝4发"", ""分裂弹不会再次分裂"", ""分裂弹总量上限24发""]",3,1,0
+6,ITEM_COINBAG,1,COIN BAG,ASSET_accessory_CoinBag,accessory_CoinBag.png,-,0,0,0,5,0,0,0,0,0,0,完成,"[""每个房间清理完后多给一个金币"", ""拾取时给予5金币"", ""钱袋使用自身世界坐标，平滑移动到人物后方""]",1,1,0
+7,ITEM_SUPER_BANDAGE,1,SUPER BANDAGE,ASSET_accessory_SpuerBandage,accessory_SpuerBandage.png,-,0,3,2,0,0,0,0,0,0,0,完成,"[""增加2个生命上限"", ""受伤后25%概率无敌5s"", ""无敌时人物彩色滤镜""]",1,1,0

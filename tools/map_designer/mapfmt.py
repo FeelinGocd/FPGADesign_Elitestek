@@ -10,6 +10,7 @@
     # OBJECTS
     slime 12,8
     bug 20,10
+    aimmer 22,10
     web 15,12
     stone 10,6
     box 25,15
@@ -97,6 +98,7 @@ OBJECT_KINDS: Dict[str, Dict[str, Any]] = {
     "box": {"id": 4, "label": "木箱", "layer": "actor", "blocker": True},
     "crate": {"id": 5, "label": "板条箱", "layer": "actor", "blocker": True},
     "exit": {"id": 6, "label": "出口", "layer": "scene"},
+    "aimmer": {"id": 7, "label": "瞄准怪", "layer": "actor"},
 }
 OBJECT_BY_ID = {info["id"]: name for name, info in OBJECT_KINDS.items()}
 OBJECT_ALIASES = {
@@ -106,12 +108,16 @@ OBJECT_ALIASES = {
     "mob_bug": "bug",
     "mob.bug": "bug",
     "enemy_bug": "bug",
+    "mob_aimmer": "aimmer",
+    "mob.aimmer": "aimmer",
+    "enemy_aimmer": "aimmer",
+    "aimer": "aimmer",
     "spider_web": "web",
     "rock": "stone",
     "crate_box": "box",
     "eixt": "exit",         # 素材名就是 eixt，顺手兼容这个拼写
 }
-OBJECT_LIMITS = {"mob": 16, "web": 40, "blocker": 112}
+OBJECT_LIMITS = {"mob": 24, "web": 40, "blocker": 112}
 
 #  笔刷角色 → 候选文件名片段（按优先级）。改图只改 res/pic，这里不用动；
 #  找不到的角色会在页面上显示成占位色块，并在 /api/assets 的 missing 里列出来。
@@ -126,6 +132,7 @@ ASSET_ROLES = (
     ("door", "门", ("background_door_normal", "background_door")),
     ("slime", "史莱姆", ("mobs_slime",)),
     ("bug", "甲虫", ("mobs_bug",)),
+    ("aimmer", "瞄准怪", ("mobs_aimmer_00", "mobs_aimmer")),
     ("web", "蜘蛛网", ("background_interact_web",)),
     ("stone", "石头", ("background_interact_stone",)),
     ("crate", "板条箱", ("background_interact_crate",)),
@@ -1051,6 +1058,7 @@ LAYOUT_OBJ_KINDS = {
     "stone": "OBJ_STONE",
     "box": "OBJ_BOX",
     "crate": "OBJ_CRATE",
+    "aimmer": "OBJ_AIMER",
 }
 LAYOUT_MAX_OBJS = 200          # room_layout_t.n_objs 是 unsigned char，留余量
 POOL_MAP_IDS = ("1x1", "L", "2x2", "hidden")
@@ -1666,7 +1674,7 @@ def validate(room: RoomMap) -> List[Issue]:
             add("error", "对象 %s 坐标越界 (%d,%d)" % (obj.kind, obj.x, obj.y), obj.x, obj.y)
             continue
 
-        if obj.kind in ("slime", "bug"):
+        if obj.kind in ("slime", "bug", "aimmer"):
             counts["mob"] += 1
         elif obj.kind == "web":
             counts["web"] += 1

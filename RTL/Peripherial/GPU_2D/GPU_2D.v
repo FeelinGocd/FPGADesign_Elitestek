@@ -27,8 +27,11 @@
 //      寄存器：APB0_gpu2d ─端口─▶ ⑤ Handler ─▶ ⑥ 显示通道 / 加速器
 //              ◀─端口─ acc_frame_done / done_clr / fps_*_val / 六个观测值
 //
-//  时钟
-//      clk_ci / clk_acc（v1 同源）  ；  clk_HDMI_x1 = 74.25MHz 像素域（只有 ⑥ 用）
+//  时钟（三个域）
+//      clk_ci / clk_acc = 300MHz ：命令域 + 两路源 + 加工面 + 寄存器层
+//      clk_mem         = 100MHz ：AXIMastersHandler + lineBuffer 写侧（ASYNC_MEMORY=1）
+//      clk_HDMI_x1     = 74.25MHz：PingPong 读侧 / unpacker / HDMI_Top
+//      跨域只走三座桥：GPU2D_MemoryCDC / GPU2D_DisplayCDC / async_PingPongBuffer
 //
 //  参考：docs/spec/硬件_加速器.md、docs/spec/硬件_显示通路.md
 //==============================================================================
@@ -48,7 +51,7 @@ module GPU_2D #(
     parameter AXI_LEN_WIDTH = 8,
     parameter AXI_ID        = {AXI_ID_WIDTH{1'b0}},
     parameter IMAGE_NUM     = 2,                    // 一条命令几张图（★ 与 CIUnpack/CmdExec 一致）
-    parameter ASYNC_MEMORY  = 0                     // 1: accelerator 200MHz, AXI/display 100MHz
+    parameter ASYNC_MEMORY  = 0                     // 1: acc 300MHz, AXI/display 100MHz（顶层传 1）
 )(
     //==================== 时钟 / 复位 ====================
     input  wire                     clk_ci,         //(I) CI 侧时钟（= CPU 时钟）
@@ -762,7 +765,7 @@ GPU2D_APBHandler #(
 //        显示和加速器要"同一拍锁存同一个模式值"，搬进来之后这条约束就是一根内部线。
 //      ★ 寄存器侧走 APB0 槽 2 的显示子块(0x2040)：格子(APB0_gpu2d)也在本模块里(见 ⑦)，
 //        寄存器值 -> 有效信号的翻译就是上面 ⑤ Handler 干的活
-//      ★ 两级时钟：clk_acc(100MHz, AXI/取数) / clk_HDMI_x1(74.25MHz, 像素)
+//      ★ 三级时钟：clk_acc 300MHz(计算) / memory_clk 100MHz(AXI+写侧) / clk_HDMI_x1 74.25MHz(像素)
 //------------------------------------------------------------------------------
 lineBuffer #(
     .AXI_ADDR_WIDTH                     (AXI_ADDR_WIDTH),

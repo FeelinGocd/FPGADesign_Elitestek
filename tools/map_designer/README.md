@@ -139,6 +139,7 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 | --- | --- | --- |
 | `slime` | 史莱姆出生点 | 固定刷一只 slime |
 | `bug` | 甲虫出生点 | 固定刷一只 bug |
+| `aimmer` | 瞄准怪出生点 | 原地不动，每 1.2 秒向上/下/左/右各发射一发敌方弹幕 |
 | `web` | 蜘蛛网 | 踩上去减速 |
 | `stone` | 石头 | 阻挡玩家 / 弹幕 |
 | `box` | 木箱 | 和石头共用阻挡逻辑，贴图不同 |
@@ -253,7 +254,7 @@ JSON 存档仍使用原来的逐格 0..3。固件统一从 game_world_rot_at 解
 按文件名匹配到各笔刷 —— 木地板 `background_floor_wood`、隐藏房地板 `background_floor_hidden`、
 墙 `background_wall_wood`、隐藏房墙 `background_wall_hidden`、角块 `background_corner_wood`、
 隐藏房角块 `background_corner_hidden`、门 `background_door_normal`、隐藏门 `background_interact_hidden`、
-怪 `mobs_slime` / `mobs_bug`、
+怪 `mobs_slime` / `mobs_bug` / `mobs_aimmer_00`、
 交互物 `background_interact_web|stone|crate|box_close|eixt`。
 
 所以**换图 / 挪目录都不用改代码**：把文件放回 `res/pic` 下、名字里带上面那些片段即可；

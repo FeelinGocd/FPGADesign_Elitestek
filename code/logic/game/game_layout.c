@@ -43,7 +43,7 @@ static const room_kind_t g_kinds[] = {
     /* ROOM_BOSS：Boss 房（空布局 = 只有地形，内容由 game_boss 管） */
     { "boss", RK_SPECIAL | RK_FIGHT | RK_NO_MOB | RK_NO_WEB,
       ASSET_background_door_boss, 0x00E02020u, { LAY_room_2x2, 0xFF, 0xFF, 0xFF }, 1 },
-    /* ROOM_HIDDEN：隐藏房（基岩地板 + 四面隐藏门，内容按普通房）
+    /* ROOM_HIDDEN：隐藏房（基岩地板 + 四面隐藏门，中心高品道具 + 2 颗雷）
      *  ★ flags 不能带 RK_SPECIAL —— 否则会被"特殊房必须是叶子 / 两两 8 邻域不相邻"判死 */
     { "hidden", 0, -1, 0x002040C0u, { LAY_map_hidden_normal, 0xFF, 0xFF, 0xFF }, 1 },
     /* ROOM_HIDDEN_SUPER：本版不生成，颜色/布局先占位（和普通隐藏房区分开） */

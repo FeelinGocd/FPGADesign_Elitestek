@@ -34,7 +34,9 @@ TARGETS = [
     "code/logic/game",
 ]
 
-LIMIT = {"OBJ_SLIME": 16, "OBJ_BUG": 16, "OBJ_WEB": 40, "OBJ_STONE": 128, "OBJ_CRATE": 128, "OBJ_BOX": 128}
+LIMIT = {"OBJ_WEB": 40, "OBJ_STONE": 128, "OBJ_CRATE": 128, "OBJ_BOX": 128}
+MOB_LIMIT = 24
+MOB_KINDS = ("OBJ_SLIME", "OBJ_BUG", "OBJ_AIMER")
 BLOCK = ("OBJ_STONE", "OBJ_BOX", "OBJ_CRATE")
 
 def parse_frames(world_src):
@@ -122,6 +124,10 @@ def check(game_dir):
             if n > LIMIT.get(kind, 1 << 30):
                 print("  ! %s %s=%d 超过池子上限 %d" % (name, kind, n, LIMIT[kind]))
                 bad += 1
+        mobs = sum(n for kind, n in cnt.items() if kind in MOB_KINDS)
+        if mobs > MOB_LIMIT:
+            print("  ! %s mobs=%d 超过 N_MOBS=%d" % (name, mobs, MOB_LIMIT))
+            bad += 1
         desc = " ".join("%s=%d" % (k[4:], v) for k, v in sorted(cnt.items()))
         print("  %-12s objects=%2d  map=%d  %s" % (name, len(objs), map_idx, desc))
     return bad, warn

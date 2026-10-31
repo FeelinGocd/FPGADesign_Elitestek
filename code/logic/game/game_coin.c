@@ -81,11 +81,9 @@ void game_coins_sync(int buf)
     }
 }
 
-void game_coins_spawn(int count)
+static void coins_spawn_at(int cx, int cy, int count)
 {
     int i, n = 0;
-    int cx = (ARENA_X0 + ARENA_X1) / 2 - COIN_W / 2;
-    int cy = (ARENA_Y0 + ARENA_Y1) / 2 - COIN_H / 2;
     signed char room = (signed char)game_room_id();
 
     if (count <= 0) return;
@@ -120,6 +118,17 @@ void game_coins_spawn(int count)
         c->y      = (short)y;
         ++n;
     }
+}
+
+void game_coins_spawn(int count)
+{
+    coins_spawn_at((ARENA_X0 + ARENA_X1) / 2 - COIN_W / 2,
+                   (ARENA_Y0 + ARENA_Y1) / 2 - COIN_H / 2, count);
+}
+
+void game_coins_spawn_at(int x, int y, int count)
+{
+    coins_spawn_at(x, y, count);
 }
 
 /*  矩形是否压住【当前房间】还没捡的金币 —— 石头生成时避让用。

@@ -19,6 +19,10 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
     1 / 小键盘1  跳到 Boss 房
     E            放置炸弹
     T            切换测试模式（无敌＋测试伤害；再次按下关闭）
+    N            每按一次增加 25 个敌方弹幕上限，最高 600
+    B            每按一次降低 25 个敌方弹幕上限，最低 500
+    P            暂停 / 继续游戏逻辑，暂停时锁定当前画面
+    M            切换游戏 Demo / GPU-CPU 对比 Demo
     /            进入"命令行"：敲完回车发给板子（回车不会当移动键）
     ESC 退出（松手即停，所以也可以随时按 Ctrl+C）
 
@@ -27,7 +31,7 @@ game_pad.py —— 用电脑键盘通过串口控制板子上的游戏（虚拟�
     move:       bit0 左 / bit1 右 / bit2 下 / bit3 上 / bit4 R / bit5 E / bit6 Y / bit7 1
     aim:        bit0 左 / bit1 右 / bit2 下 / bit3 上
     掩码变化时立即发送；连接期间每 200 ms 发送一次心跳。板端 500 ms 收不到就回落到板载按键。
-    T 使用独立文本命令 T + 回车，不占用方向/传送等掩码位。
+    T / M / N / B / P 使用独立文本命令加回车，不占用方向/传送等掩码位。
 """
 import argparse
 import codecs
@@ -90,6 +94,10 @@ VK_ACTION = {
 }
 VK_ESC = 0x1B
 VK_TEST = 0x54
+VK_SWITCH_DEMO = 0x4D
+VK_BULLET_LIMIT = 0x4E
+VK_BULLET_LIMIT_DOWN = 0x42
+VK_PAUSE = 0x50
 VK_CONTROL = 0x77  # F8
 
 user32 = ctypes.windll.user32
@@ -153,7 +161,7 @@ def main():
                  % (port, e))
 
     print("已连接 %s @ %d" % (port, args.baud))
-    print("按键：WASD 移动/默认朝向，按住小键盘/方向键瞄准并射击，R 重开，Y 道具，E 炸弹，1 进 Boss，T 测试，/ 命令，ESC 退出。", flush=True)
+    print("按键：WASD 移动/默认朝向，按住小键盘/方向键瞄准并射击，M 切换 Demo，R 重开，Y 道具，E 炸弹，1 进 Boss，T 测试，N 弹幕上限 +25 / B -25（500～600），P 暂停/继续，/ 命令，ESC 退出。", flush=True)
     sys.stdout.flush()
     if args.keep_log:
         print("采集模式: ESC 释放操控但保留日志，F8 切换操控，Ctrl+C 退出。", flush=True)
@@ -162,6 +170,10 @@ def main():
     last_aim = -1
     last_send = 0.0
     test_was_down = False
+    switch_was_down = False
+    bullet_limit_was_down = False
+    bullet_limit_down_was_down = False
+    pause_was_down = False
     cmd = None            # None = 普通模式；list = 正在输入一条命令
     skip_next = False     # 命令行输入时，扩展键会连发两个码，第二个要丢掉
     log = None
@@ -241,6 +253,30 @@ def main():
                 ser.write(b"T\r")
                 ser.flush()
             test_was_down = test_down  # Holding T must never repeat the toggle.
+
+            switch_down = held(VK_SWITCH_DEMO)
+            if controls and cmd is None and switch_down and not switch_was_down:
+                ser.write(b"M\r")
+                ser.flush()
+            switch_was_down = switch_down
+
+            bullet_limit_down = held(VK_BULLET_LIMIT)
+            if controls and cmd is None and bullet_limit_down and not bullet_limit_was_down:
+                ser.write(b"N\r")
+                ser.flush()
+            bullet_limit_was_down = bullet_limit_down
+
+            bullet_limit_decrease_down = held(VK_BULLET_LIMIT_DOWN)
+            if controls and cmd is None and bullet_limit_decrease_down and not bullet_limit_down_was_down:
+                ser.write(b"B\r")
+                ser.flush()
+            bullet_limit_down_was_down = bullet_limit_decrease_down
+
+            pause_down = held(VK_PAUSE)
+            if controls and cmd is None and pause_down and not pause_was_down:
+                ser.write(b"P\r")
+                ser.flush()
+            pause_was_down = pause_down
 
             move_mask, aim_mask = read_masks() if controls and cmd is None else (0, 0)
             now = time.time()

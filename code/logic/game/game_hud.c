@@ -16,9 +16,9 @@
 #include "game.h"
 #include "CI_gpu2d.h"
 
-/*  每行刷新时先恢复这一行的地砖（不填色块），宽度覆盖到 204 px  */
+/*  每行刷新时先恢复这一行的地砖（不填色块），宽度覆盖到 224 px  */
 #define HUD_PLATE_X     0
-#define HUD_PLATE_W     204
+#define HUD_PLATE_W     224
 
 int game_hud_need_full = 0;
 
@@ -201,8 +201,9 @@ int game_hud_prepare_overlap(dirty_map_t dirty, int buf)
     for (i = 0; i < HUD_CELLS_Y; ++i) {
         if (!row_touched(dirty, i)) continue;
         any = 1;
-        /* 第 4 行由 hud_vital 在本帧补画；不作废另一块缓冲的生命值。 */
-        if (i != 4) s_draw[buf][i] = 1;
+        /* 第 4 行由 hud_vital 自管重绘标志。 */
+        if (i == 4) game_vital_request_redraw(buf);
+        else s_draw[buf][i] = 1;
     }
     return any;
 }

@@ -1,5 +1,7 @@
 PROJ_NAME=GamingPlayUnit
 STANDALONE = ..
+# Project DDR image: allow runtime bullet capacity and render entries.
+LDSCRIPT ?= game_memory.ld
 
 # ---------------------------------------------------------------------------
 # Efinity C 宸ョ▼ makefile 妯℃澘
@@ -57,6 +59,9 @@ endif
 # ????????make GAME_PROFILE=0 ...
 GAME_PROFILE ?= 0
 CFLAGS += -DGAME_PROFILE=$(GAME_PROFILE)
+# 发布版默认关闭 game 运行日志；make GAME_LOGS=1 恢复串口诊断。
+GAME_LOGS ?= 0
+CFLAGS += -DGAME_LOG_ENABLE=$(GAME_LOGS)
 GAME_TEST_DAMAGE ?= 10
 CFLAGS += -DGAME_TEST_DAMAGE=$(GAME_TEST_DAMAGE)
 GAME_UART_TELEMETRY ?= $(GAME_PROFILE)
@@ -155,5 +160,3 @@ include ${STANDALONE}/common/standalone.mk
 # Existing IDE objects predate .d generation.  The generated asset header is
 # also an explicit dependency so the first asset repack cannot reuse them.
 $(OBJS): peripheral/APB0/gpu2d/assets_desc.h
-
-LDSCRIPT =  ${BSP_PATH}/linker/default.ld

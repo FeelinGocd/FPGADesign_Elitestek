@@ -99,9 +99,10 @@ e.S.mode="layout";e.S.shape="L";e.S.layoutId=null;e.S.candidateId=12;e.S.objects
 const locked=JSON.stringify(e.S.map);
 e.putCell(15,10,"B");e.placeDoor(15,10,"D");e.removeDoorAt(15,10);
 assert.equal(JSON.stringify(e.S.map),locked,"layout mode must lock terrain, door placement and erasure");
-e.S.map[10][15]="B";
-e.addObject("slime",15,10);e.addObject("stone",1,1);e.addObject("exit",15,10);
-assert.equal(e.S.objects.length,1,"objects must be on floor; special exit excluded");
+e.S.map[10][15]="B";e.S.map[11][15]="B";
+e.addObject("slime",15,10);e.addObject("aimmer",15,11);
+e.addObject("stone",1,1);e.addObject("exit",15,10);
+assert.equal(e.S.objects.length,2,"floor mobs include aimmer; special exit excluded");
 const layout=JSON.parse(e.serializeExportJson());
 assert.equal(e.numberedFile("L",12),"L_012.json");
 assert.equal(layout.name,"L_012");assert.equal(layout.layout_id,12);

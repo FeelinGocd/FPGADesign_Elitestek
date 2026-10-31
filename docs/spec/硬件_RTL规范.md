@@ -189,13 +189,15 @@ assign src1_data = palette_data;
 | `Peripherial/GPU_2D/pixel/DDR/*` | `DDRSource` / `DDRUnpacker` | 源①：DDR 读 + 拆像素 |
 | `Peripherial/GPU_2D/pixel/palette/*` | `PaletteRAM` / `PaletteLUT` / `PaletteDecoder` / `PaletteSource` | 源②：片上素材 + 调色板 + 镜像 / 旋转 |
 | `Peripherial/GPU_2D/process/*` | `colorKey` / `alphaBlending` / `imageCombine` | 像素运算：ck / α / 合成 + 色调 |
-| `Peripherial/GPU_2D/factory/*` | `Factory` / `Compositor` / `DDRPacker` / `WriteController` | 选路 → 打包 → 写 |
-| `Peripherial/GPU_2D/interface/*` | `AXIMastersHandler` / `GPU2D_APBHandler` | AXI 主口 + APB 寄存器 |
+| `Peripherial/GPU_2D/factory/*` | `Factory` / `Compositor` / `PixelPipeline` / `DDRPacker` / `WriteController` | 选路 → 弹性寄存 → 打包 → 写 |
+| `Peripherial/GPU_2D/interface/*` | `AXIMastersHandler` / `GPU2D_APBHandler` / `GPU2D_MemoryCDC` / `GPU2D_DisplayCDC` | AXI 主口 + APB 寄存器 + 两座跨域桥 |
 | `Peripherial/GPU_2D/lineBuffer/*` | `lineBuffer` / `bufferControler` / `lineAligner` / `bufferUnpacker` | 显示通道（**本规范的基准样板**） |
 | `Peripherial/GPU_2D/lineBuffer/PingPongBuffer/*` | `async_PingPongBuffer` / `async_fifo` / `BlockRAM` | 跨域双 bank |
 | `Peripherial/APB0/*` | `APB0_Decoder` / `APB0_Interconnect` / `APB0_gpu2d`（文件 `APB0_GPU_2D.v`）/ `APB0_key` | APB 子系统 |
 | `Peripherial/key/*` | `key` | 按键：同步 + 消抖 + 按下沿（功能层，总线层是 `APB0_key`） |
 | `Peripherial/AXI4/Master/*` | `AXI4_Master` / `AXI4_Master_Read` / `AXI4_Master_Write` | AXI4 主口 |
+| `common/*` | `ResetSync` / `CdcStream` | 复位同步释放 / 异步 FIFO 的 ready-valid 封装 |
+| `constraints/*.sdc` | —（不是模块） | 时钟与跨域约束：300/100 MHz、max_delay 3.333 ns、JTAG 异步组 |
 
 ### 6.2 拿来的（保持原样）
 

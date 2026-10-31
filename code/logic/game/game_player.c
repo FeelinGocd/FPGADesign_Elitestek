@@ -299,7 +299,15 @@ void game_player_draw(u32 fb, u32 now, int buf)
 #endif
 
     if (game_visible_world(g.x, g.y, PW, PH)) {
-        if (hurt && ((now / 120u) & 1u)) {
+        if (game_vital_bonus_invuln(now) && !hurt) {
+            int phase = (int)((now / 80u) & 63u);
+            u32 r = (u32)(g_sin_tab[(phase + 16) & 63] + 64) * 255u / 128u;
+            u32 gr = (u32)(g_sin_tab[phase] + 64) * 255u / 128u;
+            u32 b = (u32)(g_sin_tab[(phase + 48) & 63] + 64) * 255u / 128u;
+            CI_gpu2d_spriteAlphaTintRect(g_assets[ai].base_word, g_assets[ai].stride_word,
+                                         fb, (u32)g.x, (u32)g.y, PW, PH,
+                                         (r << 16) | (gr << 8) | b, 120u, 1u, 0u);
+        } else if (hurt && ((now / 120u) & 1u)) {
             CI_gpu2d_combineTintRect(g_assets[ai].base_word, g_assets[ai].stride_word,
                 GPU2D_MODE_REPLACE | GPU2D_MODE_SPRITE | GPU2D_MODE_CKEY_EN,
                 0x00FF2828u, 180u, 1u,
@@ -317,6 +325,10 @@ void game_player_draw(u32 fb, u32 now, int buf)
 
         if (g.held_type == HELD_HEART) {
             icon = ASSET_SpecialEffect_heart;
+            iw = 24;
+            ih = 24;
+        } else if (g.held_type == HELD_BOMB) {
+            icon = ASSET_SpecialEffect_bomb;
             iw = 24;
             ih = 24;
         } else {

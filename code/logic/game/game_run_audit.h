@@ -42,4 +42,30 @@ typedef struct {
 } game_run_audit_t;
 
 extern volatile game_run_audit_t g_game_run_audit;
+
+/* Separate optional detail block: keep the existing v1 dump ABI intact. */
+enum {
+    RUN_BEGIN, RUN_UPDATE, RUN_PREPARE, RUN_RESTORE,
+    RUN_SUBMIT, RUN_EXECUTE, RUN_FENCE, RUN_PARTS
+};
+typedef struct {
+    uint32_t frames, over_budget, full_frames, full_gaps;
+    uint32_t sum_us[RUN_PARTS], max_us[RUN_PARTS];
+    uint32_t worst_us[RUN_PARTS], worst_work_us;
+    uint32_t worst_enemy, worst_drawn, worst_cam, worst_cmd;
+    uint32_t histogram[16]; /* 2 ms bins; last bin includes >=30 ms */
+    uint32_t player_peak, drawn_player_peak, drawn_split_peak;
+    uint32_t full_drawn_frames, full_drawn_gaps;
+    uint32_t total_drawn_peak, full_with_split_frames;
+    uint32_t full_with_split_gaps, full_split_peak;
+} game_run_detail_t;
+extern volatile game_run_detail_t g_game_run_detail;
+#ifndef GAME_RUN_DETAIL
+#define GAME_RUN_DETAIL 0
+#endif
+#if GAME_RUN_DETAIL
+void game_run_audit_mark(unsigned part);
+#else
+#define game_run_audit_mark(part) ((void)0)
+#endif
 #endif

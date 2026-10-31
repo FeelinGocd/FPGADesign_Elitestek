@@ -98,12 +98,12 @@ int game_boss_stress_step(void)
          * 使选定的真实 Boss 阶段能覆盖全部测量窗口。 */
         g.test_mode = 1;
         reset_window();
-        bsp_printf("CAPSTART scene=%d mode=2 phase=%d start=%d stop=%d step=0 frames=%d windows=%d\r\n",
+        GAME_LOG("CAPSTART scene=%d mode=2 phase=%d start=%d stop=%d step=0 frames=%d windows=%d\r\n",
                    GAME_CAPACITY_BOSS, GAME_CAPACITY_PHASE, level, level,
                    GAME_CAPACITY_FRAMES, CAP_WINDOWS);
 #else
         game_bullets_stress_fill(level); reset_window();
-        bsp_printf("CAPSTART scene=%d start=%d stop=%d step=%d frames=%d windows=%d\r\n",
+        GAME_LOG("CAPSTART scene=%d start=%d stop=%d step=%d frames=%d windows=%d\r\n",
                    GAME_CAPACITY_BOSS, level, GAME_CAPACITY_STOP,
                    GAME_CAPACITY_STEP, GAME_CAPACITY_FRAMES, CAP_WINDOWS);
 #endif
@@ -223,7 +223,7 @@ void game_boss_stress_frame(u32 ignored)
     /* 测量窗口结束后再输出；随后丢弃 30 帧，
      * 覆盖 UART FIFO 排空和缓冲历史切换的影响。 */
 #if GAME_CAPACITY_AUDIT == 2
-    bsp_printf("CAP scene=%d mode=2 phase=%d n=%d win=%d frames=%d ms=%d enemy_min=%d enemy_max=%d visible_min=%d visible_max=%d dense_frames=%d cam=%d avg_us=%d p99_us=%d max_us=%d miss=%d irq0=%d irq_max=%d drops=%d phase_bad=%d cmd_max=%d stable=%d budget=%d logic_us=%d prep_us=%d submit_us=%d fence_us=%d\r\n",
+    GAME_LOG("CAP scene=%d mode=2 phase=%d n=%d win=%d frames=%d ms=%d enemy_min=%d enemy_max=%d visible_min=%d visible_max=%d dense_frames=%d cam=%d avg_us=%d p99_us=%d max_us=%d miss=%d irq0=%d irq_max=%d drops=%d phase_bad=%d cmd_max=%d stable=%d budget=%d logic_us=%d prep_us=%d submit_us=%d fence_us=%d\r\n",
                GAME_CAPACITY_BOSS, GAME_CAPACITY_PHASE, level, window + 1, frames, (int)elapsed,
                (int)enemy_min, (int)enemy_max, (int)visible_min, (int)visible_max,
                (int)dense_frames, (int)cam_frames, (int)(work_sum / (u32)frames),
@@ -232,7 +232,7 @@ void game_boss_stress_frame(u32 ignored)
                (int)(part_sum[0] / (u32)frames), (int)(part_sum[1] / (u32)frames),
                (int)(part_sum[2] / (u32)frames), (int)(part_sum[3] / (u32)frames));
 #else
-    bsp_printf("CAP scene=%d n=%d win=%d frames=%d ms=%d visible=%d cam=%d avg_us=%d p99_us=%d max_us=%d miss=%d irq0=%d irq_max=%d drops=%d cmd_max=%d stable=%d budget=%d logic_us=%d prep_us=%d submit_us=%d fence_us=%d\r\n",
+    GAME_LOG("CAP scene=%d n=%d win=%d frames=%d ms=%d visible=%d cam=%d avg_us=%d p99_us=%d max_us=%d miss=%d irq0=%d irq_max=%d drops=%d cmd_max=%d stable=%d budget=%d logic_us=%d prep_us=%d submit_us=%d fence_us=%d\r\n",
                GAME_CAPACITY_BOSS, level, window + 1, frames, (int)elapsed,
                (int)visible_min, (int)cam_frames, (int)(work_sum / (u32)frames),
                (int)p99, (int)work_max, (int)missing, (int)irq_zero,
@@ -246,11 +246,11 @@ void game_boss_stress_frame(u32 ignored)
     if (GAME_CAPACITY_AUDIT == 2 || level >= GAME_CAPACITY_STOP) {
         done = 1;
 #if GAME_CAPACITY_AUDIT == 2
-        bsp_printf("CAPDONE scene=%d mode=2 phase=%d raw=%d reserved=%d budget_us=%d pool=%d\r\n",
+        GAME_LOG("CAPDONE scene=%d mode=2 phase=%d raw=%d reserved=%d budget_us=%d pool=%d\r\n",
                    GAME_CAPACITY_BOSS, GAME_CAPACITY_PHASE, best_raw, best_budget,
                    (int)CAP_BUDGET_US, N_BULLETS);
 #else
-        bsp_printf("CAPDONE scene=%d raw=%d reserved=%d budget_us=%d pool=%d\r\n",
+        GAME_LOG("CAPDONE scene=%d raw=%d reserved=%d budget_us=%d pool=%d\r\n",
                    GAME_CAPACITY_BOSS, best_raw, best_budget, (int)CAP_BUDGET_US, N_BULLETS);
 #endif
         return;

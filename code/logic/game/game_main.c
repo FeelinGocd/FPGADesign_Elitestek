@@ -21,6 +21,9 @@
 //  参考        : docs/spec/软件_驱动与API.md §6.3
 //==============================================================================
 #include "game.h"
+#if GAME_RUN_AUDIT
+#include "game_run_audit.h"
+#endif
 #include "game_schedule.h"
 #include "CI_gpu2d.h"
 #include "user_gpu2d.h"
@@ -112,15 +115,15 @@ static void game_dense_diag_frame(void)
         u32 ticks_per_us = (u32)(BSP_CLINT_HZ / 1000000u);
         gpu2d_getStats(&hw_end);
         s_dense_diag_active = 0;
-        bsp_printf("DENSE RINGS: enemy=%d visible=%d total=%d rejected=%d\r\n",
+        GAME_LOG("DENSE RINGS: enemy=%d visible=%d total=%d rejected=%d\r\n",
                    s_dense_diag_start_enemy, s_dense_diag_start_visible,
                    s_dense_diag_start_total, (int)s_dense_diag_start_rejected);
-        bsp_printf("DENSE LOAD: 120 frames=%d ms gap_max=%d bad=%d enemy_min=%d visible_min/max=%d/%d cmd_avg/max=%d/%d\r\n",
+        GAME_LOG("DENSE LOAD: 120 frames=%d ms gap_max=%d bad=%d enemy_min=%d visible_min/max=%d/%d cmd_avg/max=%d/%d\r\n",
                    (int)s_dense_diag_elapsed, s_dense_diag_gap_max,
                    s_dense_diag_bad, s_dense_diag_min_enemy,
                    s_dense_diag_min_visible, s_dense_diag_max_visible,
                    (int)(s_dense_diag_cmd_sum / 120u), s_dense_diag_cmd_max);
-        bsp_printf("DENSE COST: draw_avg/max=%d/%d us fence_avg/max=%d/%d us gpu_rd/wr/busy=%d/%d/%d per frame\r\n",
+        GAME_LOG("DENSE COST: draw_avg/max=%d/%d us fence_avg/max=%d/%d us gpu_rd/wr/busy=%d/%d/%d per frame\r\n",
                    (int)(s_dense_diag_draw_sum / (s_dense_diag_draw_n ? s_dense_diag_draw_n : 1u) / ticks_per_us),
                    (int)(s_dense_diag_draw_max / ticks_per_us),
                    (int)(s_dense_diag_fence_sum / (s_dense_diag_fence_n ? s_dense_diag_fence_n : 1u) / ticks_per_us),
@@ -128,7 +131,7 @@ static void game_dense_diag_frame(void)
                    (int)((hw_end.rd_beats - s_dense_diag_hw_start.rd_beats) / 120u),
                    (int)((hw_end.wr_beats - s_dense_diag_hw_start.wr_beats) / 120u),
                    (int)((hw_end.busy_cyc - s_dense_diag_hw_start.busy_cyc) / 120u));
-        bsp_printf("DENSE SCHED: steps=%d hz_x100=%d zero/multi=%d/%d dropped_us=%d update_avg/max=%d/%d us present_avg/max=%d/%d us buffers=%d\r\n",
+        GAME_LOG("DENSE SCHED: steps=%d hz_x100=%d zero/multi=%d/%d dropped_us=%d update_avg/max=%d/%d us present_avg/max=%d/%d us buffers=%d\r\n",
                    (int)s_dense_diag_sim_steps,
                    (int)(s_dense_diag_sim_steps * 100000u / (s_dense_diag_elapsed ? s_dense_diag_elapsed : 1u)),
                    (int)s_dense_diag_sim_zero, (int)s_dense_diag_sim_multi,
@@ -298,14 +301,14 @@ static void boss_stage_profile_frame(void)
             u32 div = BSP_CLINT_HZ / 1000000u;
             for (i = 0; i < BOSS_PHASE_COUNT+2; ++i) {
                 v = &s_stage_profile[i];
-                bsp_printf("%s LOAD: phase=%d frames=%d elapsed_ms=%d enemy_peak=%d core_peak=%d rain_peak=%d mobs_peak=%d cmd_max=%d gap_max_ms=%d slow25=%d draw_max_us=%d fence_max_us=%d\r\n",
+                GAME_LOG("%s LOAD: phase=%d frames=%d elapsed_ms=%d enemy_peak=%d core_peak=%d rain_peak=%d mobs_peak=%d cmd_max=%d gap_max_ms=%d slow25=%d draw_max_us=%d fence_max_us=%d\r\n",
                            i<BOSS_PHASE_COUNT ? "PHASE" : "INTERMISSION",
                            i<BOSS_PHASE_COUNT ? i+1 : i-BOSS_PHASE_COUNT+1,(int)v->frames,(int)v->elapsed,(int)v->enemy_peak,
                            (int)v->core_peak,(int)v->rain_peak,(int)v->mobs_peak,
                            (int)v->cmd_peak,(int)v->gap_max,(int)v->slow25,
                            (int)(v->draw_max/div),(int)(v->fence_max/div));
             }
-            bsp_printf("NAV LOAD: build_max_us=%d\r\n",(int)game_mobs_nav_max_us());
+            GAME_LOG("NAV LOAD: build_max_us=%d\r\n",(int)game_mobs_nav_max_us());
             s_stage_done = 1;
         }
         return;
@@ -405,7 +408,7 @@ static void boss_skill_diag_frame(void)
         if (div == 0u) div = 1u;
         for (i = 0; i < g_boss_move_n; ++i) {
             v = &s_skill_diag[i];
-            bsp_printf("SKILL LOAD: id=%d frames=%d cmd_avg/max=%d/%d bullets_max=%d enemy_max=%d visible_max=%d dense_frames=%d dense_ms=%d dense_gap_max_ms=%d elapsed_ms=%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d cam=%d pause=%d rejects=%d irq_repeat=%d irq_delta_max=%d sim0/2=%d/%d work_avg/max_us=%d/%d dense_work_max_us=%d dense_visible_max=%d\r\n",
+            GAME_LOG("SKILL LOAD: id=%d frames=%d cmd_avg/max=%d/%d bullets_max=%d enemy_max=%d visible_max=%d dense_frames=%d dense_ms=%d dense_gap_max_ms=%d elapsed_ms=%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d cam=%d pause=%d rejects=%d irq_repeat=%d irq_delta_max=%d sim0/2=%d/%d work_avg/max_us=%d/%d dense_work_max_us=%d dense_visible_max=%d\r\n",
                        i, (int)v->frames,
                        (int)(v->frames ? v->cmd_sum / v->frames : 0u),
                        (int)v->cmd_max, (int)v->bullet_max, (int)v->enemy_max,
@@ -551,7 +554,7 @@ static void boss_cam_diag_frame(u32 now)
     for (m = 0; m < 2; ++m) for (h = 0; h < 2; ++h) {
         v = &s_camdiag[m][h];
         if (v->frames == 0u) continue;
-        bsp_printf("CAMLOAD move=%d heavy=%d n=%d cmd_avg/max=%d/%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d sim0/2=%d/%d irq_repeat=%d irq_delta_max=%d irq_late=%d elapsed_ms=%d draw_avg_us=%d fence_avg_us=%d restore_avg/max=%d/%d layout=%d flip=%d x/y=%d/%d cam_x/y=%d/%d bullets_min/max=%d/%d\r\n",
+        GAME_LOG("CAMLOAD move=%d heavy=%d n=%d cmd_avg/max=%d/%d dirty_max=%d draw_max_us=%d fence_max_us=%d gap_max_ms=%d slow25=%d sim0/2=%d/%d irq_repeat=%d irq_delta_max=%d irq_late=%d elapsed_ms=%d draw_avg_us=%d fence_avg_us=%d restore_avg/max=%d/%d layout=%d flip=%d x/y=%d/%d cam_x/y=%d/%d bullets_min/max=%d/%d\r\n",
                    m, h, (int)v->frames,
                    (int)(v->frames ? v->cmd_sum / v->frames : 0u),
                    (int)v->cmd_max, (int)v->dirty_max,
@@ -578,7 +581,7 @@ static u32 s_diag_sim_steps, s_diag_fence_max, s_diag_gap_25, s_diag_gap_33;
 
 void game_debug_frame_report(void)
 {
-    bsp_printf("FRAME DIAG: frames=%d irq=%d irq_max=%d sim=%d gap_max=%d slow25=%d slow33=%d fence_max_us=%d bullets=%d\r\n",
+    GAME_LOG("FRAME DIAG: frames=%d irq=%d irq_max=%d sim=%d gap_max=%d slow25=%d slow33=%d fence_max_us=%d bullets=%d\r\n",
                (int)s_diag_frames, (int)s_diag_irq_ticks, (int)s_diag_irq_max,
                (int)s_diag_sim_steps, (int)s_diag_gap_max,
                (int)s_diag_gap_25, (int)s_diag_gap_33,
@@ -681,28 +684,28 @@ static void prof_report(void)
 #endif
 
 #if GAME_UART_TELEMETRY
-    bsp_printf("PROFILE 1s us avg/max: begin=%d/%d update=%d/%d draw=%d/%d fence=%d/%d present=%d/%d gap_ms=%d/%d\r\n",
+    GAME_LOG("PROFILE 1s us avg/max: begin=%d/%d update=%d/%d draw=%d/%d fence=%d/%d present=%d/%d gap_ms=%d/%d\r\n",
                (int)(s_pf_begin / s_pf_frames / div),   (int)(s_pf_begin_max / div),
                (int)(s_pf_update / s_pf_frames / div),  (int)(s_pf_update_max / div),
                (int)(s_pf_draw / s_pf_frames / div),    (int)(s_pf_draw_max / div),
                (int)(s_pf_fence / s_pf_frames / div),   (int)(s_pf_fence_max / div),
                (int)(s_pf_present / s_pf_frames / div), (int)(s_pf_present_max / div),
                (int)(s_pf_gap_sum / s_pf_frames), (int)s_pf_gap_max);
-    bsp_printf("DRAW detail us avg: prepare=%d submit=%d execute=%d history_merge=%d history_build=%d\r\n",
+    GAME_LOG("DRAW detail us avg: prepare=%d submit=%d execute=%d history_merge=%d history_build=%d\r\n",
                (int)(s_pf_draw_prepare / s_pf_frames / div),
                (int)(s_pf_draw_submit / s_pf_frames / div),
                (int)(s_pf_draw_execute / s_pf_frames / div),
                (int)(s_pf_history_merge / s_pf_frames / div),
                (int)(s_pf_history_build / s_pf_frames / div));
-    bsp_printf("IRQ timing: ticks/frame=%d max=%d late_before_present=%d/%d\r\n",
+    GAME_LOG("IRQ timing: ticks/frame=%d max=%d late_before_present=%d/%d\r\n",
                (int)(s_pf_irq_ticks / s_pf_frames), (int)s_pf_irq_max,
                (int)s_pf_irq_late, (int)s_pf_frames);
-    bsp_printf("SIM timing: steps=%d render_frames=%d\r\n",
+    GAME_LOG("SIM timing: steps=%d render_frames=%d\r\n",
                (int)s_pf_sim_steps, (int)s_pf_frames);
 
     gpu2d_getStats(&hw);
     if (s_gpu_prev_valid)
-        bsp_printf("GPU 1s beats/frame: rd=%d wr=%d busy_cyc=%d cmds=%d\r\n",
+        GAME_LOG("GPU 1s beats/frame: rd=%d wr=%d busy_cyc=%d cmds=%d\r\n",
                    (int)((hw.rd_beats - s_gpu_prev.rd_beats) / s_pf_frames),
                    (int)((hw.wr_beats - s_gpu_prev.wr_beats) / s_pf_frames),
                    (int)((hw.busy_cyc - s_gpu_prev.busy_cyc) / s_pf_frames),
@@ -808,7 +811,13 @@ static void scene_restore(u32 fb, u32 now, int buf, int arg)
 static void hud_toast(u32 fb, u32 now, int buf, int arg)
 {
     (void)now; (void)buf; (void)arg;
-    game_hud_toast(fb, game_item_desc(g.toast_type));
+    if (g.toast_type < 0) {
+        u32 view = game_view_fb(fb);
+        int x = (SCR_W - 16*16) / 2;
+        game_hud_label_at(view, x, HUD_TOAST_Y, "BULLET LIMIT");
+        game_hud_number_at(view, x+13*16, HUD_TOAST_Y,
+                           game_enemy_bullet_limit(), 3);
+    } else game_hud_toast(fb, game_item_desc(g.toast_type));
 }
 
 static void hud_bossbar(u32 fb, u32 now, int buf, int arg)
@@ -834,8 +843,8 @@ static void hud_panel(u32 fb, u32 now, int buf, int arg)
 
 static void hud_vital(u32 fb, u32 now, int buf, int arg)
 {
-    (void)buf; (void)arg;
-    game_vital_draw(fb, now, game_hud_need_full || g_hud_full || g_hud_need);
+    (void)arg;
+    game_vital_draw(fb, now, buf, game_hud_need_full || g_hud_full || g_hud_need);
 }
 
 static void hud_pool(u32 fb, u32 now, int buf, int arg)
@@ -949,6 +958,8 @@ static void mark_hud_rects_at(int camx, int camy)
 static void mark_old_actors(dirty_map_t dirty, int buf)
 {
     int i;
+    int prism_count = game_triprism_count();
+    u32 prism_now = game_ms() & ~31u;
     if (g.old_boss[buf].active)
         game_mark_dirty(dirty, g.old_boss[buf].x, g.old_boss[buf].y, BOSS_W, BOSS_H);
     if (g.old_player[buf].active)
@@ -960,10 +971,16 @@ static void mark_old_actors(dirty_map_t dirty, int buf)
                         g.old_item[buf].y + ITEM_ICON_DY - ITEM_FLOAT_AMP - 2,
                         ITEM_W, ITEM_H - ITEM_ICON_DY + ITEM_FLOAT_AMP + 2);
     for (i = 0; i < GAME_TRIPRISM_MAX; ++i)
-        if (g.old_triprism[buf][i].active)
-            game_mark_dirty(dirty, g.old_triprism[buf][i].x,
-                            g.old_triprism[buf][i].y,
-                            GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE);
+        if (g.old_triprism[buf][i].active) {
+            int nx, ny;
+            game_triprism_position(i, prism_count, prism_now, &nx, &ny);
+            /* TriPrism 的视觉轨道按 32 ms 更新；位置未变时无需重复标脏旧瓦片。 */
+            if (i >= prism_count || nx != g.old_triprism[buf][i].x ||
+                ny != g.old_triprism[buf][i].y)
+                game_mark_dirty(dirty, g.old_triprism[buf][i].x,
+                                g.old_triprism[buf][i].y,
+                                GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE);
+        }
 #if GAME_PROFILE
     {
         u32 history_t0 = prof_now();
@@ -1248,10 +1265,16 @@ static void game_draw(u32 now, int buf)
     game_capacity_mark(1);
 #endif
 #if GAME_BG_EARLY_RESTORE
+ #if GAME_RUN_AUDIT
+    game_run_audit_mark(RUN_PREPARE);
+ #endif
     /* 脏区网格已经完整。先下发地形命令，再处理历史复制、队列构建和排序，
      * 让 GPU 与这段 CPU 工作重叠。实体/HUD 命令仍按 FIFO 紧跟地形之后；
      * s_static_force 保留恢复前的失效决策。 */
     scene_restore(fb, now, buf, 0);
+ #if GAME_RUN_AUDIT
+    game_run_audit_mark(RUN_RESTORE);
+ #endif
 #endif
 
     /*  ★ 帧首：把"这块缓冲里已经过期"的 HUD 行 / 血量行 / 道具池标脏，
@@ -1297,6 +1320,7 @@ static void game_draw(u32 now, int buf)
     game_coins_submit();
     game_web_submit(buf);
     game_stones_submit(buf);
+    game_chest_submit_test();
     game_item_submit();
     game_bombs_submit();
 
@@ -1305,12 +1329,18 @@ static void game_draw(u32 now, int buf)
     s_pf_draw_submit += draw_t1 - draw_t0;
     draw_t0 = draw_t1;
 #endif
+#if GAME_RUN_AUDIT
+    game_run_audit_mark(RUN_SUBMIT);
+#endif
     rl_draw_all(fb, now, buf);
 #if GAME_PROFILE
     s_pf_draw_execute += prof_now() - draw_t0;
 #endif
 
     game_stones_erase_tick();          /* 待擦队列：这一帧已经标过了，ttl-- */
+ #if GAME_RUN_AUDIT
+    game_run_audit_mark(RUN_EXECUTE);
+ #endif
 
     g_hud_full = 0;
     g.hud_cam_x[buf] = g.cam_x;
@@ -1444,7 +1474,7 @@ static int frame_end(u32 now, int buf)
 #if GAME_PROFILE
             u32 ba, be, bp;
             game_bullet_draw_stats(&ba, &be, &bp);
-            bsp_printf("PROBE 1s: peak bullets=%d at frame=%d, fps=%d, frames=%d, cmd/max=%d, restore=%d/%d(d/c=%d/%d), bullet_draw=%d/%d/%d, px=%d py=%d hp=%d life=%d, z-drop=%d\r\n",
+            GAME_LOG("PROBE 1s: peak bullets=%d at frame=%d, fps=%d, frames=%d, cmd/max=%d, restore=%d/%d(d/c=%d/%d), bullet_draw=%d/%d/%d, px=%d py=%d hp=%d life=%d, z-drop=%d\r\n",
                        g.probe_peak, g.probe_peak_frame,
                        (int)((g.probe_frames * 1000u) / (dt ? dt : 1u)),
                        (int)g.probe_frames, g.probe_peak_cmd,
@@ -1456,7 +1486,7 @@ static int frame_end(u32 now, int buf)
                        g.x, g.y, game_vital_hp(), game_vital_lives(),
                        (int)rl_dropped());
 #else
-            bsp_printf("PROBE 1s: peak bullets=%d at frame=%d, fps=%d, frames=%d, cmd/max=%d, restore=%d/%d, px=%d py=%d hp=%d life=%d, z-drop=%d\r\n",
+            GAME_LOG("PROBE 1s: peak bullets=%d at frame=%d, fps=%d, frames=%d, cmd/max=%d, restore=%d/%d, px=%d py=%d hp=%d life=%d, z-drop=%d\r\n",
                        g.probe_peak, g.probe_peak_frame,
                        (int)((g.probe_frames * 1000u) / (dt ? dt : 1u)),
                        (int)g.probe_frames, g.probe_peak_cmd,
@@ -1484,36 +1514,31 @@ static int frame_end(u32 now, int buf)
 }
 
 /*----------------------------------------------------------------------------*/
-void game_demo_run(void)
+int game_demo_run(void)
 {
-    bsp_printf("\r\nGAME: WASD=move/facing, hold numpad/arrow=aim+fire\r\n");
-    bsp_printf("BOARD: KEY0..3=move/turn, auto fire only when an enemy is ahead\r\n");
-    bsp_printf("GAME CONFIG: buffers=%d pool=%d enemy_cap=%d rings=%d logic_hz=%d tint=%d restore_early=%d\r\n",
+    GAME_LOG("\r\nGAME: WASD=move/facing, hold numpad/arrow=aim+fire\r\n");
+    GAME_LOG("GAME CONFIG: buffers=%d pool=%d enemy_cap=%d rings=%d logic_hz=%d tint=%d restore_early=%d\r\n",
                GAME_FB_COUNT, N_BULLETS, ENEMY_CAP, GAME_BOSS_DENSE_RINGS,
                GAME_FIXED_UPDATE ? (int)GAME_LOGIC_HZ : 0, GAME_BULLET_TINT,
                GAME_BG_EARLY_RESTORE);
-    bsp_printf("DEBUG CMDS: R = restart, Y = spawn item+base, E = bomb (type + Enter)\r\n");
-    bsp_printf("TEST MODE: T = toggle invincibility and %d damage (GamePad / type + Enter)\r\n", GAME_TEST_DAMAGE);
-#if GAME_BOSS_SHORTCUT
-    bsp_printf("BOSS SHORTCUT: 1 = jump to boss room\r\n");
-#endif
 #if GAME_BOSS_DEBUG
-    bsp_printf("BOSS DEBUG: player damage disabled\r\n");
+    GAME_LOG("BOSS DEBUG: player damage disabled\r\n");
 #if GAME_BOSS_BULLET_SWEEP
-    bsp_printf("BOSS TEST: 1 starts automatic moving-bullet 60Hz sweep\r\n");
+    GAME_LOG("BOSS TEST: 1 starts automatic moving-bullet 60Hz sweep\r\n");
 #endif
 #if GAME_PROFILE
-    bsp_printf("BOSS TEST: /stat prints accumulated frame timing, then resets it\r\n");
+    GAME_LOG("BOSS TEST: /stat prints accumulated frame timing, then resets it\r\n");
 #endif
 #endif
     if (PERF_TEST_MODE == 1)
-        bsp_printf("PERF TEST: fixed model, bullet levels 16/32/48/64/80/96\r\n");
+        GAME_LOG("PERF TEST: fixed model, bullet levels 16/32/48/64/80/96\r\n");
     else if (PERF_TEST_MODE == 2)
-        bsp_printf("PERF TEST: %d moving bullets, background restore ON\r\n", PERF_TEST_BULLETS);
+        GAME_LOG("PERF TEST: %d moving bullets, background restore ON\r\n", PERF_TEST_BULLETS);
     else if (PERF_TEST_MODE == 3)
-        bsp_printf("PERF TEST: %d moving bullets, background restore OFF\r\n", PERF_TEST_BULLETS);
+        GAME_LOG("PERF TEST: %d moving bullets, background restore OFF\r\n", PERF_TEST_BULLETS);
 
-    if (!game_init()) return;
+    game_time_reset();
+    if (!game_init()) return 0;
 #if GAME_CAPACITY_AUDIT
     if (GAME_CAPACITY_BOSS) game_room_debug_boss();
     game_boss_stress_arm();
@@ -1531,9 +1556,39 @@ void game_demo_run(void)
         u32 now  = game_ms();
         int back;
 
+        if (game_take_demo_switch()) {
+#if GAME_TRIPLE_BUFFER
+            if (!triple_retire_pending()) return 0;
+#endif
+            GAME_LOG("DEMO SWITCH: game -> compare\r\n");
+            return 1;
+        }
+
+        if (game_take_pause_change()) {
+#if GAME_TRIPLE_BUFFER
+            /* Let the last completed frame become visible, then keep its
+             * buffer and viewport untouched throughout the pause. */
+            if (!triple_retire_pending()) return 0;
+#endif
+#if GAME_FIXED_UPDATE
+            game_logic_reset();          /* Never catch up the paused time. */
+#endif
+#if GAME_RUN_AUDIT
+            game_run_audit_rebase();
+#endif
+#if GAME_PROFILE
+            s_pf_irq_last = s_pf_last_frame = 0u;
+#endif
+            now = game_ms();
+        }
+        if (game_paused()) {
+            bsp_uDelay(1000u);
+            continue;
+        }
+
 #if GAME_TRIPLE_BUFFER
         back = triple_free_buffer();
-        if (back < 0) return;
+        if (back < 0) return 0;
 #else
         back = g.front ^ 1;
 #endif
@@ -1542,9 +1597,9 @@ void game_demo_run(void)
         if (game_take_restart() ||
             (g.phase == PHASE_GAMEOVER && (int)(now - g.gameover_until) >= 0)) {
 #if GAME_TRIPLE_BUFFER
-            if (!triple_retire_pending()) return;
+            if (!triple_retire_pending()) return 0;
 #endif
-            if (!game_restart()) return;
+            if (!game_restart()) return 0;
 #if GAME_FIXED_UPDATE
             game_logic_reset();
 #endif
@@ -1567,17 +1622,17 @@ void game_demo_run(void)
          * 再接受下一个排队请求或恢复普通模型/渲染更新。 */
         if (game_room_rebuild_pending()) {
 #if GAME_TRIPLE_BUFFER
-            if (!triple_retire_pending()) return;
+            if (!triple_retire_pending()) return 0;
 #endif
-            if (!game_room_finish_rebuild()) return;
+            if (!game_room_finish_rebuild()) return 0;
 #if GAME_FIXED_UPDATE
             game_logic_reset();
 #endif
             continue;
         }
         if (game_room_pending()) {
-            if (!prepare_room_transition()) return;
-            if (!game_room_commit()) return;
+            if (!prepare_room_transition()) return 0;
+            if (!game_room_commit()) return 0;
 #if GAME_FIXED_UPDATE
             game_logic_reset();
 #endif
@@ -1636,13 +1691,19 @@ void game_demo_run(void)
 #else
         frame_begin(now);
         game_preupdate_restore(back);
+#if GAME_RUN_AUDIT
+        game_run_audit_mark(RUN_BEGIN);
+#endif
         game_logic_run(keys, aim_keys, now);
+#if GAME_RUN_AUDIT
+        game_run_audit_mark(RUN_UPDATE);
+#endif
         game_draw(now, back);
 #endif
 #if GAME_CAPACITY_AUDIT
         game_capacity_mark(2);
 #endif
-        if (!frame_end(now, back)) return;
+        if (!frame_end(now, back)) return 0;
 
 #if !GAME_TRIPLE_BUFFER
         g.front = back;

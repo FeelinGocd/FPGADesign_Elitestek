@@ -68,7 +68,7 @@ int game_boss_stress_step(void)
         s_level_all_pass = 1;
         s_last_ms = 0;
         game_bullets_stress_fill(s_level);
-        bsp_printf("BULLET SWEEP: start=%d hold=%d pool=%d, %d frames/window\r\n",
+        GAME_LOG("BULLET SWEEP: start=%d hold=%d pool=%d, %d frames/window\r\n",
                    s_level, GAME_BOSS_SWEEP_HOLD_LEVEL, N_BULLETS, SWEEP_FRAMES);
     }
     return s_running;
@@ -76,6 +76,12 @@ int game_boss_stress_step(void)
 
 void game_boss_stress_frame(u32 now)
 {
+#if GAME_RUN_AUDIT
+    /* The RAM recorder owns timing for this build. Hold the initial load
+     * continuously without UART windows or reinitializing moving bullets. */
+    (void)now;
+    return;
+#endif
     u32 irq;
     u32 dt, di;
     if (!s_running) return;
@@ -127,7 +133,7 @@ void game_boss_stress_frame(u32 now)
             gpu2d_stats_t hw_end;
             gpu2d_getStats(&hw_end);
             s_hold_reported = 1;
-            bsp_printf("BULLET HOLD: n=%d visible_min=%d player/cam_move=%d/%d, 120 frames=%d ms, gap_max=%d, irq_max=%d, bad=%d, cmd_avg/max=%d/%d, gpu_rd/wr/busy=%d/%d/%d\r\n",
+            GAME_LOG("BULLET HOLD: n=%d visible_min=%d player/cam_move=%d/%d, 120 frames=%d ms, gap_max=%d, irq_max=%d, bad=%d, cmd_avg/max=%d/%d, gpu_rd/wr/busy=%d/%d/%d\r\n",
                        s_level, s_visible_min, s_hold_player_frames, s_hold_move_frames,
                        (int)s_elapsed, s_gap_max, s_irq_max, s_bad,
                        (int)(s_cmd_sum / SWEEP_FRAMES), s_cmd_max,
@@ -181,7 +187,7 @@ void game_boss_stress_frame(u32 now)
         gpu2d_getStats(&hw_end);
         if (pass) s_best_once = s_level;
         if (!pass) s_level_all_pass = 0;
-        bsp_printf("BULLET SWEEP: n=%d visible_min=%d run=%d %s, 120 frames=%d ms, max_gap=%d ms, irq_delta_max=%d, bad=%d, cmd_avg/max=%d/%d, drop=%d, gpu_rd/wr/busy=%d/%d/%d\r\n",
+        GAME_LOG("BULLET SWEEP: n=%d visible_min=%d run=%d %s, 120 frames=%d ms, max_gap=%d ms, irq_delta_max=%d, bad=%d, cmd_avg/max=%d/%d, drop=%d, gpu_rd/wr/busy=%d/%d/%d\r\n",
                    s_level, s_visible_min, s_repeat + 1, pass ? "PASS" : "FAIL", (int)s_elapsed,
                    s_gap_max, s_irq_max, s_bad, (int)(s_cmd_sum / SWEEP_FRAMES),
                    s_cmd_max, (int)s_drops,
@@ -195,7 +201,7 @@ void game_boss_stress_frame(u32 now)
     }
     if (s_level_all_pass && s_level <= 240) s_best = s_level;
     if (s_level >= GAME_BOSS_SWEEP_HOLD_LEVEL) {
-        bsp_printf("BULLET SWEEP DONE: highest 3-window pass=%d, highest single-window=%d, pool=%d, normal enemy cap=%d\r\n",
+        GAME_LOG("BULLET SWEEP DONE: highest 3-window pass=%d, highest single-window=%d, pool=%d, normal enemy cap=%d\r\n",
                    s_best, s_best_once, N_BULLETS, ENEMY_CAP);
         s_holding = 1;
         s_hold_started = 0;
@@ -204,7 +210,7 @@ void game_boss_stress_frame(u32 now)
         s_hold_cam_y = g.cam_y;
         s_hold_player_x = g.x;
         s_hold_player_y = g.y;
-        bsp_printf("BULLET SWEEP HOLD: %d fully visible bullets stay on screen; PAD and camera active\r\n",
+        GAME_LOG("BULLET SWEEP HOLD: %d fully visible bullets stay on screen; PAD and camera active\r\n",
                    game_bullets_stress_visible());
         return;
     }

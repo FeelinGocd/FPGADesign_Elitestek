@@ -36,12 +36,12 @@ import preview  # noqa: E402
 
 FIELDS = [
     "id", "key", "enabled", "desc", "icon_asset", "icon_file", "bullet",
-    "triple", "hp", "lives", "move_v8", "fire_every", "bullet_speed",
+    "triple", "hp", "hp_max", "coins", "lives", "move_v8", "fire_every", "bullet_speed",
     "range", "damage", "note", "features", "level", "pool", "life_plus",
 ]
-INT_FIELDS = ["triple", "hp", "lives", "move_v8", "fire_every",
+INT_FIELDS = ["triple", "hp", "hp_max", "coins", "lives", "move_v8", "fire_every",
               "bullet_speed", "range", "damage", "level", "pool", "life_plus"]
-FIELD_CN = {"triple": "增加弹幕", "hp": "回血", "lives": "加命",
+FIELD_CN = {"triple": "增加弹幕", "hp": "回血", "hp_max": "生命上限", "coins": "金币", "lives": "加命",
             "move_v8": "移速", "fire_every": "射速", "bullet_speed": "弹速",
             "range": "射程", "damage": "伤害", "level": "品质", "pool": "道具池",
             "life_plus": "生命保险"}
@@ -239,6 +239,10 @@ def effect_cn(r):
         parts.append("增加弹幕")
     if int(r.get("hp") or 0):
         parts.append("回血 +" + str(int(r.get("hp") or 0)))
+    if int(r.get("hp_max") or 0):
+        parts.append("生命上限 +" + str(int(r.get("hp_max") or 0)))
+    if int(r.get("coins") or 0):
+        parts.append("金币 +" + str(int(r.get("coins") or 0)))
     if int(r.get("lives") or 0):
         parts.append("命数 +" + str(int(r.get("lives") or 0)))
     labels = (("move_v8", "移速"), ("fire_every", "射速"),
@@ -283,6 +287,9 @@ def table_md(rows):
     out.append("| — | " + code_cell("SHOP_HEART") + " | — | " +
                code_cell("ASSET_SpecialEffect_heart") + " / SpecialEffect_heart.png | " +
                "回 1 格血 / 5 币 / 不进道具池 | — | — | — | — | 已实装 |")
+    out.append("| — | " + code_cell("SHOP_BOMB") + " | — | " +
+               code_cell("ASSET_SpecialEffect_bomb") + " / SpecialEffect_bomb.png | " +
+               "炸弹 +1 / 5 币 / 不进道具池 | — | — | — | — | 已实装 |")
     for r in disabled:
         icon = code_cell(r.get("icon_asset", "")) + " / " + md_cell(r.get("icon_file", ""))
         feats = parse_features(r.get("features", ""))
@@ -326,10 +333,11 @@ def make_c(rows):
     for r in enabled:
         b = (r.get("bullet") or "-").strip()
         bt = bullet_map.get(b, b)
-        vals = [r.get("hp") or "0", "0", r.get("lives") or "0",
+        vals = [r.get("hp") or "0", r.get("hp_max") or "0", r.get("lives") or "0",
                 r.get("move_v8") or "0", r.get("fire_every") or "0",
                 r.get("bullet_speed") or "0", r.get("range") or "0",
-                r.get("damage") or "0", bt, r.get("triple") or "0"]
+                r.get("damage") or "0", bt, r.get("triple") or "0",
+                r.get("coins") or "0"]
         lv = r.get("level") or "0"
         pool = r.get("pool") or "1"
         flags = "ITEM_FLAG_LIFE_PLUS" if str(r.get("life_plus", "0")) == "1" else "0"
@@ -416,7 +424,7 @@ def request_md(rows, brief, diff, stamp):
         "1. 读取 tools/item_designer/items.csv、本文件和 design_brief.md。",
         "2. 按启用顺序更新 game.h 的 ITEM_* / ITEM_COUNT，把上面的表贴进 game_item.c。",
         "3. 如果新增/替换了图标，先跑 uv run tools/img2hex/pic2pram.py，再重编固件/重综合 bit。",
-        "4. 如果涉及新效果，检查 game_item_apply() 的字段限制（hp_max/增加弹幕等，见规范第 3.2 节）。",
+        "4. 如果涉及新效果，检查 game_item_apply() 和 game_vital.c 的字段限制（见规范第 3.2 节）。",
         "5. 更新/检查 docs/spec/道具_规范.md 与预览图，回复改了哪些文件。",
         "",
         "> 对话里发送：请读取 tools/item_designer/pending_request.md 并实现道具。",

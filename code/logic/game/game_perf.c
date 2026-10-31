@@ -66,20 +66,20 @@ int game_perf_tick(u32 now)
     /* 这个 BSP 的 printf 只支持工程里用过的整数格式；不用 %u（会被当成浮点）。 */
     if (PERF_TEST_MODE == 1) {
 #if GAME_UART_TELEMETRY
-        bsp_printf("PERF bullets=%d: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
+        GAME_LOG("PERF bullets=%d: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
                    counts[level], (int)frames, (int)dt,
                    (int)((frames * 1000u) / dt), (int)(dc / frames));
 #endif
         if (++level >= PERF_LEVELS) {
 #if GAME_UART_TELEMETRY
-            bsp_printf("PERF DONE: all bullet levels completed\r\n");
+            GAME_LOG("PERF DONE: all bullet levels completed\r\n");
 #endif
             return 0;
         }
         game_bullets_perf_fill(counts[level]);
     } else {
 #if GAME_UART_TELEMETRY
-        bsp_printf("PERF dynamic: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
+        GAME_LOG("PERF dynamic: %d frames, %d ms, %d fps, %d cmd/frame\r\n",
                    (int)frames, (int)dt,
                    (int)((frames * 1000u) / dt), (int)(dc / frames));
 #endif

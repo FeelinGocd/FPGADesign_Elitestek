@@ -766,7 +766,7 @@ static int room_try_generate(void)
                         rooms[n++] = id;
                     }
                 --l_left;
-                bsp_printf("ROOM: L flip=%d at (%d,%d)\r\n", lf, x, y);
+                GAME_LOG("ROOM: L flip=%d at (%d,%d)\r\n", lf, x, y);
                 continue;
             }
         }
@@ -925,7 +925,7 @@ static void room_layout_generate(void)
      *    放在最后是有意的 —— 上面的 validate 看不到它，所以它不参与成环/连通校验。  */
     game_room_hidden_reset();
     if (!room_try_make_hidden()) {
-        bsp_printf("ROOM: hidden room not placed (grid full)\r\n");
+        GAME_LOG("ROOM: hidden room not placed (grid full)\r\n");
     }
 }
 
@@ -1077,16 +1077,20 @@ static void doors_build(void)
                     int nx2, ny2, cell2;
 
                     if (rid != room || s_rooms[c2].type == ROOM_NONE) continue;
-                    if (ndx[dir] == 0 && (int)s_rooms[c2].gy != cgy
+                    /* The borrowed cell must be on the same door row/column as
+                     * the half that owns this opening.  Without this two-axis
+                     * check, a neighbour touching only the other half of a
+                     * 2x2 room can make a non-existent side look connected. */
 #if GAME_BOSS_1X1_TEST
-                        && s_rooms[room].type != ROOM_BOSS
+                    if (s_rooms[room].type != ROOM_BOSS &&
+                        ((int)s_rooms[c2].gx != cgx ||
+                         (int)s_rooms[c2].gy != cgy))
+                        continue;
+#else
+                    if ((int)s_rooms[c2].gx != cgx ||
+                        (int)s_rooms[c2].gy != cgy)
+                        continue;
 #endif
-                       ) continue;   /* 上下门：同一行 */
-                    if (ndy[dir] == 0 && (int)s_rooms[c2].gx != cgx
-#if GAME_BOSS_1X1_TEST
-                        && s_rooms[room].type != ROOM_BOSS
-#endif
-                       ) continue;   /* 左右门：同一列 */
                     nx2 = (int)s_rooms[c2].gx + ndx[dir];
                     ny2 = (int)s_rooms[c2].gy + ndy[dir];
                     if (nx2 < 0 || nx2 >= ROOM_GRID_W || ny2 < 0 || ny2 >= ROOM_GRID_H) continue;
@@ -1130,7 +1134,7 @@ static void doors_build(void)
         int alive = 0;
 
         for (i = 0; i < n; ++i) if (s_doors[i].room >= 0) ++alive;
-        if (n > 0 && alive == 0) bsp_printf("ROOM: all doors walled (room %d)\r\n", room);
+        if (n > 0 && alive == 0) GAME_LOG("ROOM: all doors walled (room %d)\r\n", room);
     }
 
     s_door_count = n;
@@ -1141,15 +1145,12 @@ static void doors_build(void)
     for (i = 0; i < s_door_count; ++i) {
         int t = s_doors[i].room;
         int cur = game_room_id();
-        if ((cur >= 0 && cur < ROOM_COUNT && s_rooms[cur].type == ROOM_BOSS) ||
-            (t >= 0 && t < ROOM_COUNT && s_rooms[t].type == ROOM_BOSS)) {
-            bsp_printf("ROOM DOOR: cur=%d type=%d cell=%d,%d dir=%d target=%d ttype=%d asset=%d hidden=%d\r\n",
-                       cur, (cur >= 0 && cur < ROOM_COUNT) ? (int)s_rooms[cur].type : -1,
-                       s_doors[i].dx, s_doors[i].dy, s_doors[i].dir, t,
-                       (t >= 0 && t < ROOM_COUNT) ? (int)s_rooms[t].type : -1,
-                       game_room_door_asset_at(s_doors[i].dx, s_doors[i].dy),
-                       s_doors[i].hidden);
-        }
+        GAME_LOG("ROOM DOOR: cur=%d type=%d cell=%d,%d dir=%d target=%d ttype=%d asset=%d hidden=%d\r\n",
+                   cur, (cur >= 0 && cur < ROOM_COUNT) ? (int)s_rooms[cur].type : -1,
+                   s_doors[i].dx, s_doors[i].dy, s_doors[i].dir, t,
+                   (t >= 0 && t < ROOM_COUNT) ? (int)s_rooms[t].type : -1,
+                   game_room_door_asset_at(s_doors[i].dx, s_doors[i].dy),
+                   s_doors[i].hidden);
     }
 #endif
 }
@@ -1354,7 +1355,7 @@ int game_room_blast_hidden(int cx, int cy, int r)
         if (!hidden_rect_hit(cx, cy, sx, sy, r)) continue;
         if (game_room_hidden_open(me, d->room)) {
             ++opened;
-            bsp_printf("BOMB: hidden link %d <-> %d\r\n", me, (int)d->room);
+            GAME_LOG("BOMB: hidden link %d <-> %d\r\n", me, (int)d->room);
         }
     }
     if (opened) (void)game_background_refresh_doors();
@@ -1607,7 +1608,7 @@ void game_room_debug_boss(void)
         return;
     s_debug_boss_entry = 1;
     game_room_request_full(s_boss_anchor, -1);
-    bsp_printf("DEBUG: jump to boss room\r\n");
+    GAME_LOG("DEBUG: jump to boss room\r\n");
 }
 #endif
 
@@ -1872,7 +1873,7 @@ static int room_ticks_us(u32 ticks)
 
 static void room_build_report(const char *stage)
 {
-    bsp_printf("ROOM %s: chunks=%d cmds=%d reused=%d max_cmds=%d max_work=%d us work=%d us elapsed=%d us\r\n",
+    GAME_LOG("ROOM %s: chunks=%d cmds=%d reused=%d max_cmds=%d max_work=%d us work=%d us elapsed=%d us\r\n",
                stage, (int)s_rebuild_frames, (int)s_rebuild_cmds,
                (int)game_floor_reused_cells(),
                (int)s_rebuild_max_cmds, room_ticks_us(s_rebuild_max_ticks), room_ticks_us(s_rebuild_work_ticks),
@@ -1908,7 +1909,7 @@ int game_room_finish_rebuild(void)
         /* 每个小批次仍会等待写入完成；连续批次共用一个工作时间窗，
          * 不再每批都消耗一整帧。 */
         if (gpu2d_waitCmdDone(cmd0 + cmds, 3000000u) != 0) {
-            bsp_printf("ROOM BUILD ERROR: GPU timeout\r\n");
+            GAME_LOG("ROOM BUILD ERROR: GPU timeout\r\n");
             return 0;
         }
 #if GAME_PROFILE
@@ -1929,7 +1930,7 @@ int game_room_finish_rebuild(void)
                 u32 bg_cmds = game_background_build(FB_BG);
                 u32 bg_target = bg0 + bg_cmds;
                 if (gpu2d_waitCmdDone(bg_target, 10000000u) != 0) {
-                    bsp_printf("ROOM BUILD ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
+                    GAME_LOG("ROOM BUILD ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
                                bg0, bg_cmds, bg_target, gpu2d_getCmdDone());
                     return 0;
                 }
@@ -2052,7 +2053,7 @@ int game_room_commit(void)
             u32 bg_cmds;
             bg_cmds = game_background_refresh_doors();
             if (gpu2d_waitCmdDone(bg0 + bg_cmds, 10000000u) != 0) {
-                bsp_printf("ROOM BUILD ERROR: same-map background timeout base=%u cmds=%u done=%u\r\n",
+                GAME_LOG("ROOM BUILD ERROR: same-map background timeout base=%u cmds=%u done=%u\r\n",
                            bg0, bg_cmds, gpu2d_getCmdDone());
                 return 0;
             }
@@ -2063,7 +2064,7 @@ int game_room_commit(void)
         game_flow_enter_room();
 #if GAME_PROFILE
         t_flow = (u32)clint_getTime(BSP_CLINT);
-        bsp_printf("ROOM TIMING same: select=%d doors=%d flow=%d total=%d us\r\n",
+        GAME_LOG("ROOM TIMING same: select=%d doors=%d flow=%d total=%d us\r\n",
                    room_ticks_us(t_select - t0), room_ticks_us(t_doors - t_select),
                    room_ticks_us(t_flow - t_doors), room_ticks_us(t_flow - t0));
 #endif
@@ -2091,7 +2092,7 @@ int game_room_commit(void)
     s_rebuild_t0 = t0;
     s_rebuild_frames = s_rebuild_cmds = s_rebuild_work_ticks = 0u;
     s_rebuild_max_ticks = s_rebuild_max_cmds = 0u;
-    bsp_printf("ROOM PREP: select=%d doors=%d total=%d us rows=%d\r\n",
+    GAME_LOG("ROOM PREP: select=%d doors=%d total=%d us rows=%d\r\n",
                room_ticks_us(t_select - t0), room_ticks_us(t_doors - t_select),
                room_ticks_us((u32)clint_getTime(BSP_CLINT) - t0),
                s_rebuild_last - s_rebuild_row + 1);

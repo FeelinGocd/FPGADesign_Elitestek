@@ -1,5 +1,5 @@
 //==============================================================================
-//  game_mob.c —— 当前房间的小怪（slime 2 帧 / bug 4 步）
+//  game_mob.c —— 当前房间的小怪（slime / bug / 四向瞄准怪）
 //------------------------------------------------------------------------------
 //  干什么      :
 //    · 换房时 reset；第一次进房生成 slime + bug；各自追玩家、接触扣血。
@@ -28,9 +28,15 @@
 
 #define MOB_SLIME      0
 #define MOB_BUG        1
+#define MOB_AIMER      2
 
 #define BUG_MOVE_MS    30u          /* bug 每 30 ms 走 1 px */
 #define BUG_FRAME_MS   120u         /* bug 每 120 ms 换一帧 */
+#define AIMER_HP       3
+#define AIMER_FRAME_MS 180u
+#define AIMER_FIRE_MS  1200u
+typedef char aimmer_asset_pair_check[
+    (ASSET_mobs_aimmer_01 == ASSET_mobs_aimmer_00 + 1) ? 1 : -1];
 
 static u32 s_seed;
 static int s_spawned;               /* 本房间已经生成过 slime（用于触发一次清房奖励） */
@@ -284,13 +290,17 @@ void game_mobs_reset(void)
 static void mob_init(mob_t *m, int x, int y, int type)
 {
     m->active = 1;
-    m->type = (unsigned char)((type == MOB_BUG) ? MOB_BUG : MOB_SLIME);
-    m->hp = (m->type == MOB_BUG) ? BUG_HP : MOB_HP;
+    m->type = (unsigned char)(type <= MOB_AIMER ? type : MOB_SLIME);
+    m->hp = (m->type == MOB_BUG) ? BUG_HP :
+            (m->type == MOB_AIMER) ? AIMER_HP : MOB_HP;
     m->frame = 0;
     m->hop_left=0;m->nav_follow=0;
     m->x = (short)x;
     m->y = (short)y;
-    if (m->type == MOB_BUG) {
+    if (m->type == MOB_AIMER) {
+        m->move_next = game_ms() + 300u + (mob_rand() % 400u);
+        m->hop_until = 0u;
+    } else if (m->type == MOB_BUG) {
         m->move_next = game_ms() + 100u + (mob_rand() % 200u);
         m->hop_until = game_ms() + BUG_FRAME_MS;
     } else {
@@ -320,12 +330,18 @@ void game_mobs_spawn_bug(int count) { mobs_spawn(count, MOB_BUG); }
 int game_mobs_spawn_at(int x, int y, int type)
 {
     int i;
+    int mob_type;
+
+    if (type == OBJ_BUG || type == MOB_BUG) mob_type = MOB_BUG;
+    else if (type == OBJ_AIMER || type == MOB_AIMER) mob_type = MOB_AIMER;
+    else mob_type = MOB_SLIME;
+
     if (x < ARENA_X0 || y < ARENA_Y0) return 0;
     if (x + MOB_W > ARENA_X1 || y + MOB_H > ARENA_Y1) return 0;
     if (!mob_body_walkable(x, y)) return 0;
     for (i = 0; i < N_MOBS; ++i) {
         if (g.mobs[i].active) continue;
-        mob_init(&g.mobs[i], x, y, type);
+        mob_init(&g.mobs[i], x, y, mob_type);
         s_spawned = 1;
         return 1;
     }
@@ -402,7 +418,14 @@ void game_mobs_step(u32 now)
         }
         if (m->freeze_until && (int)(now - m->freeze_until) < 0)
             goto mob_contact;
-        if (m->type == MOB_BUG) {
+        if (m->type == MOB_AIMER) {
+            if ((int)(now - m->move_next) >= 0) {
+                int d;
+                for (d = 0; d < 4; ++d)
+                    game_bullet_fire_enemy(m->x, m->y, d);
+                m->move_next = now + AIMER_FIRE_MS;
+            }
+        } else if (m->type == MOB_BUG) {
             if ((int)(now-m->move_next)>=0) {
                 mob_advance(i,2,now);
                 m->move_next=now+BUG_MOVE_MS;
@@ -435,9 +458,10 @@ mob_contact:
         int n = game_room_take_reward();
 
         s_spawned = 0;
+        if (game_item_has(ITEM_COINBAG)) n += COINBAG_ROOM_BONUS;
         game_coins_spawn(n);
         g.door_dirty = GAME_FB_COUNT;
-        bsp_printf("ROOM CLEAR: %d coins\r\n", n);
+        GAME_LOG("ROOM CLEAR: %d coins\r\n", n);
     }
 }
 
@@ -468,7 +492,10 @@ static void mob_draw_one(u32 fb, u32 now, int buf, int i)
         int dy = (int)m->y;
         u32 flip = 0u;
 
-        if (m->type == MOB_BUG) {
+        if (m->type == MOB_AIMER) {
+            a = &g_assets[ASSET_mobs_aimmer_00 +
+                          (int)((now / AIMER_FRAME_MS) & 1u)];
+        } else if (m->type == MOB_BUG) {
             unsigned char f = (unsigned char)(m->frame & 3u);
 
             if (f == 1u) {

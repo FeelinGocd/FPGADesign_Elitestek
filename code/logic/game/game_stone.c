@@ -75,6 +75,11 @@ static void stone_grid_ensure(void)
     if (s_grid_room != (signed char)game_room_id()) stone_grid_build();
 }
 
+void game_stone_invalidate(void)
+{
+    s_grid_room = -1;
+}
+
 int game_stone_has_blockers(void)
 {
     stone_grid_ensure();
@@ -246,6 +251,11 @@ static void erase_push(int x, int y)
     ++s_erase_n;
 }
 
+void game_stone_erase_cell(int x, int y)
+{
+    erase_push(x, y);
+}
+
 int game_stones_erase_at(int i, int *x, int *y)
 {
     int k, n = 0;
@@ -299,15 +309,18 @@ static void stone_draw_one(u32 fb, u32 now, int buf, int i)
     const asset_desc_t *a;
     int x, y;
 
-    (void)now;
     (void)buf;
     if (!L || i < 0 || i >= (int)L->n_objs) return;
     o = &L->objs[i];
     if (!is_blocker((int)o->kind)) return;
-    if (game_room_cell_gone((int)game_room_id(), (int)o->x, (int)o->y)) return;
+    if (game_room_cell_gone((int)game_room_id(), (int)o->x, (int)o->y) &&
+        !(o->kind == OBJ_BOX && game_chest_is_opening(game_room_id(), o->x, o->y, now))) return;
 
     game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
-    a = &g_assets[stone_asset((int)o->kind)];
+    if (o->kind == OBJ_BOX && game_chest_is_opening(game_room_id(), o->x, o->y, now))
+        a = &g_assets[ASSET_background_interact_box_open];
+    else
+        a = &g_assets[stone_asset((int)o->kind)];
     CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
                              (u32)(x * TILE), (u32)(y * TILE),
                              STONE_SIZE, STONE_SIZE, 0u);
@@ -351,8 +364,10 @@ static void stone_dynamic_build(signed char room)
     for (i = 0; i < N_BOMBS; ++i)
         if (g.bombs[i].active && g.bombs[i].room == room)
             stone_dynamic_mark(g.bombs[i].x, g.bombs[i].y, BOMB_W, BOMB_H);
-    if (g.bomb_pickup.active && g.bomb_pickup.room == room)
-        stone_dynamic_mark(g.bomb_pickup.x, g.bomb_pickup.y, BOMB_PICK_W, BOMB_PICK_H);
+    for (i = 0; i < N_BOMB_PICKUPS; ++i)
+        if (g.bomb_pickups[i].active && g.bomb_pickups[i].room == room)
+            stone_dynamic_mark(g.bomb_pickups[i].x, g.bomb_pickups[i].y,
+                               BOMB_PICK_W, BOMB_PICK_H);
     for (i = 0; i < N_BOMB_AIRS; ++i)
         if (g.bomb_airs[i].active && g.bomb_airs[i].room == room)
             stone_dynamic_mark(g.bomb_airs[i].x, g.bomb_airs[i].y, BOMB_PICK_W, BOMB_PICK_H);
@@ -364,6 +379,7 @@ void game_stones_submit(int buf)
 {
     const room_layout_t *L = stone_layout();
     signed char room = (signed char)game_room_id();
+    u32 now = game_ms();
     int i;
 
     (void)buf;
@@ -377,7 +393,8 @@ void game_stones_submit(int buf)
         int x, y;
 
         if (!is_blocker((int)o->kind)) continue;
-        if (game_room_cell_gone(room, (int)o->x, (int)o->y)) continue;
+        if (game_room_cell_gone(room, (int)o->x, (int)o->y) &&
+            !(o->kind == OBJ_BOX && game_chest_is_opening(room, o->x, o->y, now))) continue;
         game_layout_obj_cell(L, o, game_room_flip(), &x, &y);
         x *= TILE;
         y *= TILE;

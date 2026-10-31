@@ -28,6 +28,7 @@
 static unsigned char s_seen[ROOM_GRID_H][ROOM_GRID_W];
 static int s_cur_x, s_cur_y;
 static int s_mm_valid;
+static int s_mm_dirty = 1;
 
 void game_minimap_reset(void)
 {
@@ -37,6 +38,7 @@ void game_minimap_reset(void)
         for (x = 0; x < ROOM_GRID_W; ++x)
             s_seen[y][x] = 0;
     s_mm_valid = 0;
+    s_mm_dirty = 1;
 }
 
 void game_minimap_refresh(void)
@@ -97,6 +99,7 @@ void game_minimap_refresh(void)
             }
     }
     s_mm_valid = 1;
+    s_mm_dirty = 1;
 }
 
 /*  颜色和"是不是特殊房"都在 room_kind_t 表里（game_layout.c），这里只查表  */
@@ -110,13 +113,12 @@ void game_minimap_rect(int *x, int *y, int *w, int *h)
     *x = MM_BG_X; *y = MM_BG_Y; *w = MM_BG_W; *h = MM_BG_H;
 }
 
-void game_minimap_draw(u32 fb)
+static void minimap_draw_contents(u32 fb)
 {
     int x, y;
 
     if (!s_mm_valid) return;
 
-    fb = game_view_fb(fb);
     /* 固定底板 */
     CI_gpu2d_fillRect(fb, MM_BG_X, MM_BG_Y, MM_BG_W, MM_BG_H, MM_BG_COLOR);
 
@@ -285,4 +287,18 @@ void game_minimap_draw(u32 fb)
         }
         CI_gpu2d_fillRect(fb, (u32)wx, (u32)wy, (u32)mk, (u32)mk, 0x00FFFFFFu);
     }
+}
+
+void game_minimap_draw(u32 fb)
+{
+    if (!s_mm_valid) return;
+    if (s_mm_dirty) {
+        /* Same painter and same pixels; only the destination is cached.
+         * FIFO ordering completes these writes before the following copy. */
+        minimap_draw_contents(DDR_MINIMAP_CACHE -
+                              MM_BG_Y * 5760u - MM_BG_X * 3u);
+        s_mm_dirty = 0;
+    }
+    CI_gpu2d_blitRect(DDR_MINIMAP_CACHE, 0u, 0u,
+                      game_view_fb(fb), MM_BG_X, MM_BG_Y, MM_BG_W, MM_BG_H);
 }

@@ -1,5 +1,5 @@
 //==============================================================================
-//  game_shop.c —— 商店房：heart / 随机道具（无底座、无浮动）
+//  game_shop.c —— 商店房：heart / 炸弹 / 随机道具（无底座、无浮动）
 //------------------------------------------------------------------------------
 //  商品按“掉落物”的方式记状态：
 //    · 每条商品 = active / room / x / y / kind / type；
@@ -7,6 +7,7 @@
 //    · old_shop[2] 记录两块缓冲上一次画在哪，换房时脏区擦掉旧贴图。
 //  规则：
 //    · heart 5 币，只回 1 格血，不提升 HP_MAX；
+//    · 炸弹 5 币，购买后增加 1 颗可用炸弹；
 //    · 随机道具 15 币，类型首次进店时按“拿过权重减半”决定；
 //    · 价格用 16×8 数字；商品无底座、无浮动；
 //    · 商店内不生成 mob / web / stone（见 game_state.c）。
@@ -15,16 +16,21 @@
 #include "CI_gpu2d.h"
 #include "bsp.h"
 
-#define SHOP_GOODS      2
+#define SHOP_GOODS      3
 #define SHOP_KIND_HEART 0
-#define SHOP_KIND_ITEM  1
+#define SHOP_KIND_BOMB  1
+#define SHOP_KIND_ITEM  2
 
 #define SHOP_HEART_X   560
 #define SHOP_HEART_Y   300
-#define SHOP_ITEM_X    720
+#define SHOP_BOMB_X    680
+#define SHOP_BOMB_Y    300
+#define SHOP_ITEM_X    800
 #define SHOP_ITEM_Y    296
 #define SHOP_HEART_W   24
 #define SHOP_HEART_H   24
+#define SHOP_BOMB_W    24
+#define SHOP_BOMB_H    24
 #define SHOP_ITEM_W    32
 #define SHOP_ITEM_H    32
 #define SHOP_PRICE_GAP 6
@@ -33,7 +39,7 @@ typedef struct {
     unsigned char active;
     signed char   room;
     short         x, y;
-    unsigned char kind;         /* SHOP_KIND_HEART / SHOP_KIND_ITEM */
+    unsigned char kind;         /* SHOP_KIND_HEART / SHOP_KIND_BOMB / SHOP_KIND_ITEM */
     unsigned char type;         /* 道具类型；heart 不用 */
 } shop_good_t;
 
@@ -89,6 +95,7 @@ void game_shop_enter(void)
     s_room = (signed char)id;
 
     shop_add_good(SHOP_KIND_HEART, 0, SHOP_HEART_X, SHOP_HEART_Y);
+    shop_add_good(SHOP_KIND_BOMB, 0, SHOP_BOMB_X, SHOP_BOMB_Y);
     shop_add_good(SHOP_KIND_ITEM, game_item_random_type(),
                   SHOP_ITEM_X, SHOP_ITEM_Y);
 }
@@ -127,9 +134,11 @@ void game_shop_step(u32 now)
 
         if (!good->active || good->room != (signed char)game_room_id()) continue;
 
-        w = (good->kind == SHOP_KIND_HEART) ? SHOP_HEART_W : SHOP_ITEM_W;
-        h = (good->kind == SHOP_KIND_HEART) ? SHOP_HEART_H : SHOP_ITEM_H;
-        price = (good->kind == SHOP_KIND_HEART) ? 5 : 15;
+        w = (good->kind == SHOP_KIND_ITEM) ? SHOP_ITEM_W :
+            (good->kind == SHOP_KIND_BOMB) ? SHOP_BOMB_W : SHOP_HEART_W;
+        h = (good->kind == SHOP_KIND_ITEM) ? SHOP_ITEM_H :
+            (good->kind == SHOP_KIND_BOMB) ? SHOP_BOMB_H : SHOP_HEART_H;
+        price = (good->kind == SHOP_KIND_ITEM) ? 15 : 5;
 
         if (!shop_hit(px, py, PB_W, PB_H, good->x, good->y, w, h)) continue;
         if (g.coins < price) continue;
@@ -141,7 +150,14 @@ void game_shop_step(u32 now)
             g.held_type = HELD_HEART;           /* get_acc 姿势头顶举 heart，不是上一个道具 */
             g.pickup_until = now + PICKUP_MS;   /* 和捡道具一样播 get_acc 动画 */
             good->active = 0;
-            bsp_printf("SHOP: buy heart (+1 hp, -5)\r\n");
+            GAME_LOG("SHOP: buy heart (+1 hp, -5)\r\n");
+        } else if (good->kind == SHOP_KIND_BOMB) {
+            g.coins -= price;
+            ++g.bomb_count;
+            g.held_type = HELD_BOMB;
+            g.pickup_until = now + PICKUP_MS;
+            good->active = 0;
+            GAME_LOG("SHOP: buy bomb (+1, -5), count=%d\r\n", g.bomb_count);
         } else {
             g.coins -= price;
             game_item_apply(good->type);    /* 属性和普通掉落物完全一致 */
@@ -149,7 +165,7 @@ void game_shop_step(u32 now)
             g.toast_type = good->type;
             g.toast_until = now + HUD_TOAST_MS;
             good->active = 0;
-            bsp_printf("SHOP: buy item #%d (-15)\r\n", good->type);
+            GAME_LOG("SHOP: buy item #%d (-15)\r\n", good->type);
         }
     }
 }
@@ -161,8 +177,10 @@ void game_shop_mark_old(dirty_map_t dirty, int buf)
 
     for (i = 0; i < SHOP_GOODS; ++i) {
         const old_t *o = &s_old[buf][i];
-        int w = (i == SHOP_KIND_HEART) ? SHOP_HEART_W : SHOP_ITEM_W;
-        int h = (i == SHOP_KIND_HEART) ? SHOP_HEART_H : SHOP_ITEM_H;
+        int w = (i == SHOP_KIND_ITEM) ? SHOP_ITEM_W :
+                (i == SHOP_KIND_BOMB) ? SHOP_BOMB_W : SHOP_HEART_W;
+        int h = (i == SHOP_KIND_ITEM) ? SHOP_ITEM_H :
+                (i == SHOP_KIND_BOMB) ? SHOP_BOMB_H : SHOP_HEART_H;
 
         if (!o->active) continue;
         game_mark_dirty(dirty, o->x - 4, o->y - 4,
@@ -211,6 +229,14 @@ static void shop_draw_one(u32 fb, u32 now, int buf, int arg)
                                      SHOP_HEART_W, SHOP_HEART_H, 0u);
             shop_price(fb, good->x + 4,
                        good->y + SHOP_HEART_H + SHOP_PRICE_GAP, 5, 1);
+        } else if (good->kind == SHOP_KIND_BOMB) {
+            a = &g_assets[ASSET_SpecialEffect_bomb];
+            if (!game_visible_world(good->x, good->y, SHOP_BOMB_W, SHOP_BOMB_H)) continue;
+            CI_gpu2d_spriteAlphaRect(a->base_word, a->stride_word, fb,
+                                     (u32)good->x, (u32)good->y,
+                                     SHOP_BOMB_W, SHOP_BOMB_H, 0u);
+            shop_price(fb, good->x + 4,
+                       good->y + SHOP_BOMB_H + SHOP_PRICE_GAP, 5, 1);
         } else {
             a = &g_assets[game_item_icon(good->type)];
             if (!game_visible_world(good->x, good->y, SHOP_ITEM_W, SHOP_ITEM_H)) continue;

@@ -34,12 +34,6 @@ const signed char g_sin_tab[64] = {
      -64,  -64,  -63,  -61,  -59,  -56,  -53,  -49,  -45,  -41,  -36,  -30,  -24,  -19,  -12,   -6
 };
 
-/*----------------------------------------------------------------------------*/
-u32 game_ms(void)
-{
-    return (u32)(clint_getTime(BSP_CLINT) / (BSP_CLINT_HZ / 1000u));
-}
-
 /*==============================================================================
  *  相机：显示窗口 = 1920×1080 帧缓冲里的一个 1280×720 窗口
  *    · 普通房世界就是 1280×720/736 ⇒ cam 固定 0
@@ -74,7 +68,7 @@ static void lb_detect_unaligned(void)
     lineBuffer_setFullBase(probe, probe);
     g_cam_quant = (lineBuffer_getFullBaseC() == probe) ? 0 : 16;
     lineBuffer_setFullBase((u32)FB_C, (u32)FB_D);
-    bsp_printf("LB ALIGN: %s (cam step %d)\r\n",
+    GAME_LOG("LB ALIGN: %s (cam step %d)\r\n",
                g_cam_quant ? "OLD-BITSTREAM" : "OK", g_cam_quant ? g_cam_quant : 1);
 }
 
@@ -175,7 +169,7 @@ int game_finish_gpu(void)
 
     CI_gpu2d_fence();
     if (gpu2d_waitFrame(before, 3000000u) != 0) {
-        bsp_printf("DEBUG: GPU fence timeout\r\n");
+        GAME_LOG("DEBUG: GPU fence timeout\r\n");
         return 0;
     }
     return 1;
@@ -198,7 +192,7 @@ int game_wait_display_after(u32 before)
         ++wait;
     }
     if (IRQ_frame_count() == before) {
-        bsp_printf("DEBUG: display IRQ timeout\r\n");
+        GAME_LOG("DEBUG: display IRQ timeout\r\n");
         return 0;
     }
 #else
@@ -225,6 +219,7 @@ void game_reset_state(void)
     int i;
 
     game_static_draw_reset();
+    game_enemy_bullet_limit_reset();
 
     /* 玩家在初始房正中间（房间系统负责摆位置） */
     game_room_reset();
@@ -295,6 +290,7 @@ void game_reset_state(void)
     g.item.active = 0;
     g.boss_drop_pending = 0;                /* Boss 饰品掉落状态也清零 */
     g.item.type = ITEM_CHILI;
+    g.hidden_item_type = ITEM_CHILI;
     g.item.x = (SCR_W - ITEM_W) / 2;
     g.item.y = (SCR_H - ITEM_H) / 2;
     g.phase = PHASE_EXPLORE;
@@ -331,7 +327,7 @@ void game_enter_gameover(u32 now)
 
     /*  GAME OVER 期间玩法冻结；5 秒后由 game_update 调 game_restart() 重开  */
     game_shot_stop(&g.shot);            /* Boss 停火 */
-    bsp_printf("GAME OVER: stage %d (auto restart in %d ms)\r\n",
+    GAME_LOG("GAME OVER: stage %d (auto restart in %d ms)\r\n",
                g.stage, (int)GAMEOVER_MS);
 }
 
@@ -358,6 +354,7 @@ static void spawn_layout_objects(const room_layout_t *L, int want_mobs,
         switch (o->kind) {
         case OBJ_SLIME:
         case OBJ_BUG:
+        case OBJ_AIMER:
             if (want_mobs && game_mobs_spawn_at(x, y, o->kind)) ++*n_mob;
             break;
         case OBJ_WEB:
@@ -410,7 +407,7 @@ static void player_place_safe(void)
 
                 g.x = x;
                 g.y = y;
-                bsp_printf("ROOM: spawn blocked, moved to (%d,%d)\r\n", x, y);
+                GAME_LOG("ROOM: spawn blocked, moved to (%d,%d)\r\n", x, y);
                 return;
             }
         }
@@ -468,6 +465,29 @@ void game_flow_enter_room(void)
         }
         break;
 
+    case ROOM_HIDDEN: {
+        int cx = (ARENA_X0 + ARENA_X1) / 2;
+        int cy = (ARENA_Y0 + ARENA_Y1) / 2;
+
+        g.boss_drop_pending = 0;
+        if (game_room_is_used(id)) break;
+        if (!game_room_is_spawned(id)) {
+            g.hidden_item_type = (unsigned char)game_item_spawn_high(
+                cx - ITEM_W / 2, cy - ITEM_H / 2);
+            game_bomb_spawn_pickup(cx - 2 * TILE - BOMB_PICK_W / 2,
+                                   cy + TILE - BOMB_PICK_H / 2, id);
+            game_bomb_spawn_pickup(cx + 2 * TILE - BOMB_PICK_W / 2,
+                                   cy + TILE - BOMB_PICK_H / 2, id);
+            game_room_mark_spawned(id);
+        } else {
+            g.item.type = g.hidden_item_type;
+            g.item.x = (short)(cx - ITEM_W / 2);
+            g.item.y = (short)(cy - ITEM_H / 2);
+            g.item.active = 1;
+        }
+        break;
+    }
+
     case ROOM_BOSS:
         /*  死亡卡回退：Boss 还活着才重置；Boss 已死时保持房间原样。  */
         if (respawn && g.boss_hp > 0) game_room_clear_spawned(id);
@@ -503,7 +523,7 @@ void game_flow_enter_room(void)
         game_room_mark_spawned(id);
     }
 
-    bsp_printf("ROOM: %s layout=%d mob=%d web=%d stone=%d\r\n",
+    GAME_LOG("ROOM: %s layout=%d mob=%d web=%d stone=%d\r\n",
                k->name, game_room_layout(), n_mob, n_web, n_stone);
 
     /*  对象都摆完了：最后确认玩家没站在石头/箱子里（map1 的中心板条箱就靠这条兜底）  */
@@ -557,7 +577,7 @@ void game_start_fight(void)
     g.boss_locked = 0;
     g.boss_tick = 0u;
     game_boss_resume();
-    bsp_printf("FIGHT: stage %d\r\n", g.stage);
+    GAME_LOG("FIGHT: stage %d\r\n", g.stage);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -569,19 +589,25 @@ int game_restart(void)
         , FB_THIRD
 #endif
     };
-    u32 cmd0;
+    u32 cmd0, background_cmds = 0u;
     int bi;
 
-    bsp_printf("RESTART: hold R released, new game\r\n");
+    GAME_LOG("RESTART: hold R released, new game\r\n");
 
     game_reset_state();
 
     cmd0 = gpu2d_getCmdDone();
     gpu2d_exclusive_begin();
+    /* Reset regenerated the connection graph. Refresh the shared terrain's
+     * doors before any later dirty restoration can copy its previous skin
+     * or a wall from the old game over the freshly drawn doors. */
+#if GAME_BG_COPY
+    background_cmds = game_background_refresh_doors();
+#endif
     for (bi = 0; bi < GAME_FB_COUNT; ++bi) game_draw_floor(fb[bi]);
     lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
-    if (gpu2d_exclusive_end(cmd0 + (u32)GAME_FB_COUNT * game_floor_cmd_count()) != 0) {
-        bsp_printf("RESTART ERROR: timeout\r\n");
+    if (gpu2d_exclusive_end(cmd0 + background_cmds + (u32)GAME_FB_COUNT * game_floor_cmd_count()) != 0) {
+        GAME_LOG("RESTART ERROR: timeout\r\n");
         return 0;
     }
     game_camera_synced();
@@ -603,20 +629,20 @@ int game_init(void)
 
     /*  硬规则自检：起点/道具/Boss 唯一、特殊房不直连/空间不相邻、连通  */
     if (game_room_validate() != 0) {
-        bsp_printf("ROOM ERROR: room generation rule broken "
+        GAME_LOG("ROOM ERROR: room generation rule broken "
                    "(count / adjacent / connectivity)\r\n");
         return 0;
     }
 
-    bsp_printf("DEBUG: accessory at (%d,%d), bullet=A\r\n", g.item.x, g.item.y);
+    GAME_LOG("DEBUG: accessory at (%d,%d), bullet=A\r\n", g.item.x, g.item.y);
 
     game_perf_init();
 
-    bsp_printf("INIT 1/7: disable display\r\n");
+    GAME_LOG("INIT 1/7: disable display\r\n");
     init_cmd0 = gpu2d_getCmdDone();
     gpu2d_exclusive_begin();
 
-    bsp_printf("INIT 2/7: full-screen mode\r\n");
+    GAME_LOG("INIT 2/7: full-screen mode\r\n");
     lineBuffer_setSplit(0);
 
     /*  ★ 硬件能力自检：老 bitstream 的 APB 会丢弃非 16B 对齐的全屏基址。
@@ -626,19 +652,19 @@ int game_init(void)
     if (!g_cam_quant) lb_detect_unaligned();
 
     /* 等一个帧边界，让显示侧先锁存"全屏"几何，再开始画。 */
-    bsp_printf("INIT 3/7: wait display boundary\r\n");
+    GAME_LOG("INIT 3/7: wait display boundary\r\n");
     bsp_uDelay(20000u);
 
-    bsp_printf("INIT 4/7: draw floor into %d buffers\r\n", GAME_FB_COUNT);
+    GAME_LOG("INIT 4/7: draw floor into %d buffers\r\n", GAME_FB_COUNT);
     for (bi = 0; bi < GAME_FB_COUNT; ++bi) {
-        bsp_printf("INIT 5/7: buffer %d\r\n", bi);
+        GAME_LOG("INIT 5/7: buffer %d\r\n", bi);
         game_draw_floor(fb[bi]);
     }
 
-    bsp_printf("INIT 6/7: wait GPU\r\n");
+    GAME_LOG("INIT 6/7: wait GPU\r\n");
     lineBuffer_setFullBase(game_view_fb(FB_C), game_view_fb(FB_D));
     if (gpu2d_exclusive_end(init_cmd0 + (u32)GAME_FB_COUNT * game_floor_cmd_count()) != 0) {
-        bsp_printf("INIT ERROR: initial floor timeout\r\n");
+        GAME_LOG("INIT ERROR: initial floor timeout\r\n");
         return 0;
     }
 #if GAME_BG_COPY
@@ -647,14 +673,14 @@ int game_init(void)
         u32 bg_cmds = game_background_warmup();
         u32 bg_target = bg0 + bg_cmds;
         if (gpu2d_waitCmdDone(bg_target, 10000000u) != 0) {
-            bsp_printf("INIT ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
+            GAME_LOG("INIT ERROR: background build timeout base=%u cmds=%u target=%u done=%u\r\n",
                        bg0, bg_cmds, bg_target, gpu2d_getCmdDone());
             return 0;
         }
     }
 #endif
 
-    bsp_printf("INIT 7/7: %dx%d ready, display re-enabled\r\n", SCR_W, SCR_H);
+    GAME_LOG("INIT 7/7: %dx%d ready, display re-enabled\r\n", SCR_W, SCR_H);
     game_camera_synced();
     if (!game_present(FB_C)) return 0;
     return 1;

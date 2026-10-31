@@ -122,9 +122,12 @@ void game_bombs_reset(void)
         g.bombs[i].boom_until = 0u;
         for (b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb[b][i].active = 0;
     }
-    g.bomb_pickup.active = 0;
-    g.bomb_pickup.room = -1;
-    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_pickup[b].active = 0;
+    for (i = 0; i < N_BOMB_PICKUPS; ++i) {
+        g.bomb_pickups[i].active = 0;
+        g.bomb_pickups[i].room = -1;
+        for (b = 0; b < GAME_FB_COUNT; ++b)
+            g.old_bomb_pickup[b][i].active = 0;
+    }
     for (i = 0; i < N_BOMB_AIRS; ++i) {
         g.bomb_airs[i].active = 0;
         g.bomb_airs[i].room = -1;
@@ -138,25 +141,31 @@ void game_bombs_reset(void)
 
 void game_bomb_spawn_pickup(int x, int y, int room)
 {
-    g.bomb_pickup.active = 1;
-    g.bomb_pickup.room = (signed char)room;
-    g.bomb_pickup.x = (short)x;
-    g.bomb_pickup.y = (short)y;
-    for (int b = 0; b < GAME_FB_COUNT; ++b) g.old_bomb_pickup[b].active = 0;
+    int i, b;
+
+    for (i = 0; i < N_BOMB_PICKUPS && g.bomb_pickups[i].active; ++i) {}
+    if (i >= N_BOMB_PICKUPS) return;
+    g.bomb_pickups[i].active = 1;
+    g.bomb_pickups[i].room = (signed char)room;
+    g.bomb_pickups[i].x = (short)x;
+    g.bomb_pickups[i].y = (short)y;
+    for (b = 0; b < GAME_FB_COUNT; ++b)
+        g.old_bomb_pickup[b][i].active = 0;
 }
 
 void game_bomb_pickup_try(u32 now)
 {
+    int i;
     (void)now;
 
-    if (!g.bomb_pickup.active) return;
-    if (g.bomb_pickup.room != (signed char)game_room_id()) return;
-    if (!bomb_rect_overlap(g.bomb_pickup.x, g.bomb_pickup.y, BOMB_PICK_W, BOMB_PICK_H,
-                           g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H)) return;
-
-    g.bomb_pickup.active = 0;
-    ++g.bomb_count;
-    bsp_printf("BOMB: picked up, count=%d\r\n", g.bomb_count);
+    for (i = 0; i < N_BOMB_PICKUPS; ++i) {
+        bomb_pickup_t *p = &g.bomb_pickups[i];
+        if (!p->active || p->room != (signed char)game_room_id()) continue;
+        if (!bomb_rect_overlap(p->x, p->y, BOMB_PICK_W, BOMB_PICK_H,
+                               g.x + PB_OFF_X, g.y + PB_OFF_Y, PB_W, PB_H)) continue;
+        p->active = 0;
+        ++g.bomb_count;
+    }
 }
 
 /*----------------------------------------------------------------------------*/
@@ -191,7 +200,7 @@ int game_bomb_place(u32 now)
     --g.bomb_count;
     for (int bidx = 0; bidx < GAME_FB_COUNT; ++bidx)
         g.old_bomb[bidx][i].active = 0;
-    bsp_printf("BOMB: placed, count=%d\r\n", g.bomb_count);
+    GAME_LOG("BOMB: placed, count=%d\r\n", g.bomb_count);
     return 1;
 }
 
@@ -453,12 +462,13 @@ static void bomb_draw_one(u32 fb, u32 now, int buf, int i)
 static void pickup_draw_one(u32 fb, u32 now, int buf, int arg)
 {
     const asset_desc_t *a;
-    bomb_pickup_t *p = &g.bomb_pickup;
+    bomb_pickup_t *p = &g.bomb_pickups[arg];
 
     (void)arg;
-    g.old_bomb_pickup[buf].active = (unsigned int)(p->active && p->room == (signed char)game_room_id());
-    g.old_bomb_pickup[buf].x = p->x;
-    g.old_bomb_pickup[buf].y = p->y;
+    g.old_bomb_pickup[buf][arg].active =
+        (unsigned int)(p->active && p->room == (signed char)game_room_id());
+    g.old_bomb_pickup[buf][arg].x = p->x;
+    g.old_bomb_pickup[buf][arg].y = p->y;
     if (!p->active) return;
     if (p->room != (signed char)game_room_id()) return;
     if (!game_visible_world(p->x, p->y, BOMB_PICK_W, BOMB_PICK_H)) return;
@@ -497,9 +507,11 @@ void game_bombs_prepare(dirty_map_t dirty, int buf)
         game_mark_dirty(dirty, g.old_bomb[buf][i].x, g.old_bomb[buf][i].y,
                         BOMB_W, BOMB_H);
     }
-    if (g.old_bomb_pickup[buf].active)
-        game_mark_dirty(dirty, g.old_bomb_pickup[buf].x, g.old_bomb_pickup[buf].y,
-                        BOMB_PICK_W, BOMB_PICK_H);
+    for (i = 0; i < N_BOMB_PICKUPS; ++i)
+        if (g.old_bomb_pickup[buf][i].active)
+            game_mark_dirty(dirty, g.old_bomb_pickup[buf][i].x,
+                            g.old_bomb_pickup[buf][i].y,
+                            BOMB_PICK_W, BOMB_PICK_H);
     for (i = 0; i < N_BOMB_AIRS; ++i) {
         if (!g.old_bomb_air[buf][i].active) continue;
         game_mark_dirty(dirty, g.old_bomb_air[buf][i].x, g.old_bomb_air[buf][i].y,
@@ -513,7 +525,14 @@ void game_bombs_submit(void)
 
     for (i = 0; i < N_BOMBS; ++i)
         rl_push(ACTOR_Z(g.bombs[i].y + BOMB_H), bomb_draw_one, i);
-    rl_push(ACTOR_Z(g.bomb_pickup.y + BOMB_H), pickup_draw_one, 0);
+    for (i = 0; i < N_BOMB_PICKUPS; ++i)
+        if (g.bomb_pickups[i].active || g.old_bomb_pickup[0][i].active ||
+            g.old_bomb_pickup[1][i].active
+#if GAME_TRIPLE_BUFFER
+            || g.old_bomb_pickup[2][i].active
+#endif
+           )
+            rl_push(ACTOR_Z(g.bomb_pickups[i].y + BOMB_H), pickup_draw_one, i);
 
     /*  火花只在"还活着"或"上一帧还画着（要擦）"时入队，不白占渲染队列  */
     for (i = 0; i < N_BOMB_AIRS; ++i)

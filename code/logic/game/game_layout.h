@@ -20,7 +20,7 @@
 #include "type.h"
 
 /*  对象种类：和 tools/map_designer 的 obj kind 一一对应  */
-enum { OBJ_SLIME = 0, OBJ_BUG, OBJ_WEB, OBJ_STONE, OBJ_BOX, OBJ_CRATE };
+enum { OBJ_SLIME = 0, OBJ_BUG, OBJ_WEB, OBJ_STONE, OBJ_BOX, OBJ_CRATE, OBJ_AIMER = 7 };
 
 /*  一个固定对象：格子坐标（40×23，32 px/格）；param 留给具体种类扩展  */
 typedef struct {

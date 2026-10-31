@@ -42,14 +42,40 @@
 static int s_alive;
 static int s_enemy_alive;
 static int s_split_alive;
+static int s_enemy_limit = ENEMY_CAP;
+static int s_free_n;
+static unsigned short s_free_head;
+
+int game_enemy_bullet_limit(void) { return s_enemy_limit; }
+
+void game_enemy_bullet_limit_reset(void)
+{
+    s_enemy_limit = ENEMY_CAP;
+}
+
+int game_enemy_bullet_limit_increase(void)
+{
+    int old_slots = game_bullet_slots(), i;
+    if (s_enemy_limit > GAME_ENEMY_BULLET_MAX - GAME_BULLET_LIMIT_STEP)
+        return s_enemy_limit;
+    s_enemy_limit += GAME_BULLET_LIMIT_STEP;
+    /* Add clean slots to the existing free chain without disturbing live
+     * bullets or per-framebuffer tile history. */
+    for (i = old_slots; i < game_bullet_slots(); ++i) {
+        bullet_t *b = &g.bullets[i];
+        *b = (bullet_t){0};
+        b->age = s_free_head;
+        s_free_head = (unsigned short)i;
+        ++s_free_n;
+    }
+    return s_enemy_limit;
+}
 static unsigned short s_chili_ids[PLAYER_RESERVE];
 static int s_chili_n;
 #if GAME_BOSS_SKILL_DIAG
 static u32 s_enemy_spawn_rejects;
 u32 game_enemy_spawn_rejects(void) { return s_enemy_spawn_rejects; }
 #endif
-static int s_free_n;
-static unsigned short s_free_head;
 #if GAME_BULLET_DIRTY_BOUNDS
 /* 每块帧缓存保留的精灵类型（0=A、1=B、2=C）和轴向（bit0=90° 旋转）。
  * 在绘制时保存，避免槽位复用后旧覆盖区取到新弹的类型或方向。 */
@@ -98,9 +124,10 @@ static void bullet_untrack_chili(int i)
 static void bullet_free_tail(int first)
 {
     int i;
-    s_free_n = N_BULLETS - first;
-    s_free_head = s_free_n ? (unsigned short)(N_BULLETS - 1) : 65535u;
-    for (i = first; i < N_BULLETS; ++i)
+    int slots = game_bullet_slots();
+    s_free_n = slots - first;
+    s_free_head = s_free_n ? (unsigned short)(slots - 1) : 65535u;
+    for (i = first; i < slots; ++i)
         g.bullets[i].age = i == first ? 65535u : (unsigned short)(i - 1);
 }
 
@@ -119,6 +146,45 @@ static void bullet_release(int i)
     b->age = s_free_head;
     s_free_head = (unsigned short)i;
     ++s_free_n;
+}
+
+/* Shrink only on a key press. Preserve player shots and framebuffer history;
+ * move surviving high-slot bullets before removing those slots from the pool. */
+int game_enemy_bullet_limit_decrease(void)
+{
+    int old_slots = game_bullet_slots(), slots, i, dst = 0;
+    if (s_enemy_limit <= ENEMY_CAP) return s_enemy_limit;
+    s_enemy_limit -= GAME_BULLET_LIMIT_STEP;
+    if (s_enemy_limit < ENEMY_CAP) s_enemy_limit = ENEMY_CAP;
+    slots = game_bullet_slots();
+
+    /* Prefer removing enemy bullets when the new capacity is already full. */
+    for (i = old_slots - 1; i >= 0 &&
+         (s_enemy_alive > s_enemy_limit || s_alive > slots); --i)
+        if (g.bullets[i].active && g.bullets[i].enemy) bullet_release(i);
+    /* Players can borrow unused enemy slots; also handle that unusual case. */
+    for (i = old_slots - 1; i >= 0 && s_alive > slots; --i)
+        bullet_release(i);
+    for (i = slots; i < old_slots; ++i) {
+        if (!g.bullets[i].active) continue;
+        while (g.bullets[dst].active) ++dst;
+        g.bullets[dst++] = g.bullets[i];
+        g.bullets[i].active = 0;
+    }
+
+    s_free_head = 65535u;
+    s_free_n = s_chili_n = 0;
+    for (i = 0; i < slots; ++i) {
+        bullet_t *b = &g.bullets[i];
+        if (!b->active) {
+            b->age = s_free_head;
+            s_free_head = (unsigned short)i;
+            ++s_free_n;
+        } else if (!b->enemy && b->type == BULLET_CHILI) {
+            s_chili_ids[s_chili_n++] = (unsigned short)i;
+        }
+    }
+    return s_enemy_limit;
 }
 
 /* 朝向 → 翻转位（朝右是原图）。辣椒那张美术要求"不转"，单独一套。 */
@@ -224,7 +290,7 @@ static void bullet_lock_target(bullet_t *b)
     if (b->enemy || !magic_owned()) return;
     if (bullet_find_target(b, &tx, &ty, &kind, &idx)) {
         b->home_kind = (signed char)kind;
-        b->home_idx = (signed char)idx;
+        b->home_idx = (unsigned char)idx;
     }
 }
 
@@ -302,7 +368,7 @@ int game_bullet_spawn(int x, int y, int vx, int vy, int mode, int type, int enem
 
     /* 敌弹占用达到上限后保留 PLAYER_RESERVE 槽给玩家。 */
     if (enemy) {
-        if (s_enemy_alive >= ENEMY_CAP) {
+        if (s_enemy_alive >= game_enemy_bullet_limit()) {
 #if GAME_BOSS_SKILL_DIAG
             ++s_enemy_spawn_rejects;
 #endif
@@ -440,9 +506,41 @@ static void bullet_recycle(bullet_t *b, int i)
     b->ry = 0;
 }
 
+static int s_prism_cache_count;
+static short s_prism_cache_x[GAME_TRIPRISM_MAX];
+static short s_prism_cache_y[GAME_TRIPRISM_MAX];
+
+/* The prisms orbit with the player. Resolve their positions once per physics
+ * step, then reuse that snapshot for every player bullet in the pool. */
+static void triprism_cache_update(u32 now)
+{
+    int i;
+    int x, y;
+
+    s_prism_cache_count = game_triprism_count();
+    for (i = 0; i < s_prism_cache_count; ++i) {
+        game_triprism_position(i, s_prism_cache_count, now, &x, &y);
+        s_prism_cache_x[i] = (short)x;
+        s_prism_cache_y[i] = (short)y;
+    }
+}
+
+static int triprism_hit_cached(int cx, int cy)
+{
+    int i;
+
+    for (i = 0; i < s_prism_cache_count; ++i)
+        if (cx >= s_prism_cache_x[i] &&
+            cx < s_prism_cache_x[i] + GAME_TRIPRISM_SIZE &&
+            cy >= s_prism_cache_y[i] &&
+            cy < s_prism_cache_y[i] + GAME_TRIPRISM_SIZE)
+            return 1;
+    return 0;
+}
+
 /* 玩家弹穿过三棱镜后消耗自身，并分裂成四发彩色扇形弹。
  * 分裂弹带有 split_color 标记，多个棱镜覆盖同一路径时不会再次分裂。 */
-static int triprism_try_split(int i, u32 now, int cx, int cy)
+static int triprism_try_split(int i, int cx, int cy)
 {
     bullet_t *b = &g.bullets[i];
     static const signed char fan[GAME_TRIPRISM_SPLIT_COUNT] = { -12, -4, 4, 12 };
@@ -450,7 +548,7 @@ static int triprism_try_split(int i, u32 now, int cx, int cy)
     int type, vx8, vy8;
 
     if (!b->active || b->enemy || b->split_color) return 0;
-    if (!game_triprism_hit_test(cx, cy, now)) return 0;
+    if (!triprism_hit_cached(cx, cy)) return 0;
     if (s_split_alive + GAME_TRIPRISM_SPLIT_COUNT > GAME_TRIPRISM_SPLIT_LIMIT)
         return 0;
     if (game_perf_pinned()) return 0;
@@ -598,7 +696,9 @@ BULLET_SIM_OPT void game_bullets_step(u32 now)
     int i;
     int stone_collision = game_stone_has_blockers();
 
-    for (i = 0; i < N_BULLETS; ++i) {
+    triprism_cache_update(now);
+
+    for (i = 0; i < game_bullet_slots(); ++i) {
         bullet_t *b;
         int cx, cy;
 
@@ -626,7 +726,7 @@ BULLET_SIM_OPT void game_bullets_step(u32 now)
         cy = b->y + BH / 2;
 
         if (b->enemy && chili_block_enemy(i, cx, cy)) continue;
-        if (!b->enemy && triprism_try_split(i, now, cx, cy)) continue;
+        if (!b->enemy && triprism_try_split(i, cx, cy)) continue;
 
         /*  可交互石头：玩家弹 / Boss 弹撞上都直接消失；石头本身不可破坏  */
         if (stone_collision && game_stone_hit_at(cx, cy)) {
@@ -695,8 +795,13 @@ void game_bullets_clear_history(int buf)
  * 会破坏已经完成的恢复和 HUD 决策。 */
 static inline __attribute__((always_inline)) void bullet_history_rect(dirty_map_t tiles, int x, int y, int w, int h)
 {
-    int tx0 = x / TILE, ty0 = y / TILE;
-    int tx1 = (x + w - 1) / TILE, ty1 = (y + h - 1) / TILE;
+    /* The common, on-canvas case needs shifts rather than the target's
+     * iterative signed divider. Preserve C truncation for negative edges. */
+    int tx0 = x >= 0 ? (int)((unsigned)x / TILE) : x / TILE;
+    int ty0 = y >= 0 ? (int)((unsigned)y / TILE) : y / TILE;
+    int right = x + w - 1, bottom = y + h - 1;
+    int tx1 = right >= 0 ? (int)((unsigned)right / TILE) : right / TILE;
+    int ty1 = bottom >= 0 ? (int)((unsigned)bottom / TILE) : bottom / TILE;
     int tx, ty;
 
     if (tx0 < 0) tx0 = 0;
@@ -745,7 +850,7 @@ void game_bullets_sync(int buf)
     game_bullets_clear_history(buf);
 #else
     int i;
-    for (i = 0; i < N_BULLETS; ++i) {
+    for (i = 0; i < game_bullet_slots(); ++i) {
         g.old_bullets[buf][i].active = g.bullets[i].active;
         g.old_bullets[buf][i].x = g.bullets[i].x;
         g.old_bullets[buf][i].y = g.bullets[i].y;
@@ -762,6 +867,7 @@ void game_bullets_sync(int buf)
 #endif
         }
     }
+    for (; i < N_BULLETS; ++i) g.old_bullets[buf][i].active = 0;
 #endif
 }
 
@@ -769,6 +875,7 @@ void game_bullets_mark_old(dirty_map_t dirty, int buf)
 {
     int i;
 #if !GAME_BULLET_TILE_HISTORY
+    /* A reduced live pool still has old pixels in each framebuffer's tail. */
     for (i = 0; i < N_BULLETS; ++i) {
         const old_t *b = &g.old_bullets[buf][i];
         if (!b->active) continue;
@@ -900,12 +1007,12 @@ static BULLET_DRAW_OPT void bullet_draw_one(u32 fb, u32 now, int buf, int i)
 /*  把每颗在场、且整块在屏内的弹登记进渲染队列。
  *  z = Z_ACTOR + 底边 y ⇒ 弹和角色 / Boss / 道具用同一条深度尺子互相遮挡：
  *  弹飞到人物脚下方就盖住人物，飞到人物头上就被人物盖住（俯视视角的透视）。  */
-void game_bullets_submit(void)
+BULLET_DRAW_OPT void game_bullets_submit(void)
 {
     int i;
     int draw_id = -1;
 
-    for (i = 0; i < N_BULLETS; ++i) {
+    for (i = 0; i < game_bullet_slots(); ++i) {
         const bullet_t *b = &g.bullets[i];
 
         if (!b->active) continue;
@@ -940,7 +1047,7 @@ int game_enemy_bullets_alive(void)
 int game_enemy_bullets_visible(void)
 {
     int i, n = 0;
-    for (i = 0; i < N_BULLETS; ++i) {
+    for (i = 0; i < game_bullet_slots(); ++i) {
         const bullet_t *b = &g.bullets[i];
         if (!b->active || !b->enemy) continue;
         if (b->x < g.cam_x || b->x + BW > g.cam_x + SCR_W ||
@@ -955,7 +1062,7 @@ int game_enemy_bullets_visible(void)
 void game_enemy_bullets_clear(void)
 {
     int i;
-    for (i = 0; i < N_BULLETS; ++i)
+    for (i = 0; i < game_bullet_slots(); ++i)
         if (g.bullets[i].active && g.bullets[i].enemy) bullet_release(i);
 }
 
@@ -978,7 +1085,7 @@ void game_bullets_perf_fill(int count)
     int i, n = count;
 
     if (n < 0) n = 0;
-    if (n > N_BULLETS) n = N_BULLETS;
+    if (n > game_bullet_slots()) n = game_bullet_slots();
 
     game_bullets_clear();
     for (i = 0; i < n; ++i) {
@@ -1026,7 +1133,7 @@ void game_bullets_stress_fill(int count)
     int cols;
 #endif
     if (count < 0) count = 0;
-    if (count > N_BULLETS) count = N_BULLETS;
+    if (count > game_bullet_slots()) count = game_bullet_slots();
     game_bullets_clear();
 #if GAME_CAPACITY_AUDIT
     cols = (count + 19) / 20;
@@ -1063,7 +1170,7 @@ void game_bullets_stress_step(void)
     int i;
     int x0 = g.cam_x + 24, x1 = g.cam_x + SCR_W - BW - 24;
     int y0 = g.cam_y + 56, y1 = g.cam_y + SCR_H - BH - 24;
-    for (i = 0; i < N_BULLETS; ++i) {
+    for (i = 0; i < game_bullet_slots(); ++i) {
         bullet_t *b = &g.bullets[i];
         if (!b->active) continue;
         b->x += b->vx;
@@ -1078,7 +1185,7 @@ void game_bullets_stress_step(void)
 int game_bullets_stress_visible(void)
 {
     int i, visible = 0;
-    for (i = 0; i < N_BULLETS; ++i) {
+    for (i = 0; i < game_bullet_slots(); ++i) {
         const bullet_t *b = &g.bullets[i];
         if (!b->active) continue;
         /* 要求整张精灵同时位于相机和世界范围内，

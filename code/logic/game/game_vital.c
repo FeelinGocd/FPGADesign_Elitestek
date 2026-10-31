@@ -25,8 +25,10 @@
 #define FX_LIFE_MS     800u                  /* 飘多久 */
 #define FX_RISE_MS     34u                   /* 每 34 ms 升 1 px（约 2 帧） */
 
-static int s_redraw;                         /* 本帧要不要重画血量行 */
-static int s_last_hp2[GAME_FB_COUNT], s_last_extra2[GAME_FB_COUNT];
+static unsigned char s_redraw_mask;          /* 每块帧缓冲各自是否要重画血量行 */
+typedef char vital_redraw_mask_check[(GAME_FB_COUNT <= 8) ? 1 : -1];
+static int s_last_hp2[GAME_FB_COUNT], s_last_max2[GAME_FB_COUNT];
+static int s_last_extra2[GAME_FB_COUNT];
 
 /*  ★ 整局重开：把"上次画的值"作废，下一帧两块缓冲都会重画血量行  */
 void game_vital_invalidate(void)
@@ -34,17 +36,27 @@ void game_vital_invalidate(void)
     int b;
     for (b = 0; b < GAME_FB_COUNT; ++b) {
         s_last_hp2[b] = -1;
+        s_last_max2[b] = -1;
         s_last_extra2[b] = -1;
     }
-    s_redraw = GAME_FB_COUNT;
+    s_redraw_mask = (1u << GAME_FB_COUNT) - 1u;
+}
+
+void game_vital_request_redraw(int buf)
+{
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
+    s_redraw_mask |= 1u << buf;
 }
 
 
 static int  s_hp;
+static int  s_hp_max;
 static int  s_lives;
 static u32  s_invuln_until;
+static u32  s_bonus_invuln_until;
 static u32  s_dead_until;
 static int  s_over;
+static u32  s_hit_rng = 0x51f15e5du;
 
 static struct {
     int active;
@@ -59,8 +71,10 @@ void game_vital_reset(void)
     int i;
 
     s_hp = HP_MAX;
+    s_hp_max = HP_MAX;
     s_lives = LIVES_START;
     s_invuln_until = 0u;
+    s_bonus_invuln_until = 0u;
     s_dead_until = 0u;
     s_over = 0;
     for (i = 0; i < FX_HEARTS; ++i) s_fx[i].active = 0;
@@ -74,8 +88,9 @@ void game_vital_clear_over(void) { s_over = 0; }
 /*  新一关：血量补满（命数不变）；把血量行标脏，下一帧重画心  */
 void game_vital_refill(void)
 {
-    s_hp = HP_MAX;
+    s_hp = s_hp_max;
     s_dead_until = 0u;
+    s_bonus_invuln_until = 0u;
     game_vital_invalidate();
 }
 
@@ -87,15 +102,34 @@ void game_vital_extra_life(void)
 /*  商店 heart：只回 1 格，不提升 HP_MAX；满血 / 死亡中返回 0  */
 int game_vital_heal_one(void)
 {
-    if (s_hp <= 0 || s_hp >= HP_MAX) return 0;
+    if (s_hp <= 0 || s_hp >= s_hp_max) return 0;
     ++s_hp;
     game_vital_invalidate();
     return 1;
 }
 
+/* 背包中的 hp_max 增量发生改变时重算生命上限；当前血量同步夹到新上限。 */
+void game_vital_set_max_bonus(int bonus)
+{
+    int next = HP_MAX + bonus;
+
+    if (next < HP_MAX) next = HP_MAX;
+    if (next > PLAYER_HP_CAP) next = PLAYER_HP_CAP;
+    if (s_hp_max == next) return;
+    s_hp_max = next;
+    if (s_hp > s_hp_max) s_hp = s_hp_max;
+    game_vital_invalidate();
+}
+
 int game_vital_invuln(u32 now)
 {
     return (s_invuln_until != 0u) && ((int)(now - s_invuln_until) < 0);
+}
+
+int game_vital_bonus_invuln(u32 now)
+{
+    return (s_bonus_invuln_until != 0u) &&
+           ((int)(now - s_bonus_invuln_until) < 0);
 }
 
 int game_vital_dead(u32 now)
@@ -119,7 +153,12 @@ int game_vital_hit(u32 now)
     if (s_dead_until != 0u)     return 0;
     if (s_hp <= 0)              return 0;
 
+    int bonus_invuln;
     --s_hp;
+    s_bonus_invuln_until = 0u;
+    s_hit_rng = s_hit_rng * 1664525u + 1013904223u;
+    bonus_invuln = game_item_has(ITEM_SUPER_BANDAGE) &&
+                   ((s_hit_rng >> 24) % 100u) < SUPER_BANDAGE_INVULN_PERCENT;
 
     /*  ★ TURN BACK：死亡判定处先查道具池里的 LIFE_PLUS。
      *    找到就取消这次死亡、不扣命；下一帧由 game_room_commit 回上一房间。 */
@@ -130,7 +169,9 @@ int game_vital_hit(u32 now)
     }
 
     if (s_hp > 0) {
-        s_invuln_until = now + HURT_INVULN_MS;
+        s_invuln_until = now + (bonus_invuln ? SUPER_BANDAGE_INVULN_MS
+                                             : HURT_INVULN_MS);
+        if (bonus_invuln) s_bonus_invuln_until = s_invuln_until;
         return 1;
     }
 
@@ -167,7 +208,7 @@ void game_vital_step(u32 now)
 
     if (s_dead_until != 0u && (int)(now - s_dead_until) >= 0) {
         s_dead_until = 0u;
-        s_hp = HP_MAX;
+        s_hp = s_hp_max;
         if (s_lives > 0) --s_lives;
         if (s_lives <= 0) { s_lives = 0; s_over = 1; }
     }
@@ -180,12 +221,14 @@ void game_vital_prepare(dirty_map_t dirty, int buf)
     int extra = s_lives - 1;
 
     if (buf >= GAME_FB_COUNT) buf = 0;
-    if (s_last_hp2[buf] == s_hp && s_last_extra2[buf] == extra) return;
+    if (s_last_hp2[buf] == s_hp && s_last_max2[buf] == s_hp_max &&
+        s_last_extra2[buf] == extra) return;
 
     s_last_hp2[buf] = s_hp;
+    s_last_max2[buf] = s_hp_max;
     s_last_extra2[buf] = extra;
     game_hud_dirty_row(dirty, VITAL_ROW);
-    s_redraw = GAME_FB_COUNT;
+    s_redraw_mask |= 1u << buf;
 }
 
 /*  脏区：飘心在动的时候标（它每帧都动）  */
@@ -201,7 +244,7 @@ void game_vital_mark_dirty(dirty_map_t dirty)
 }
 
 /*----------------------------------------------------------------------------*/
-void game_vital_draw(u32 fb, u32 now, int full)
+void game_vital_draw(u32 fb, u32 now, int buf, int full)
 {
     const asset_desc_t *heart = &g_assets[ASSET_SpecialEffect_heart];
     const asset_desc_t *minus = &g_assets[ASSET_SpecialEffect_subtract];
@@ -214,17 +257,20 @@ void game_vital_draw(u32 fb, u32 now, int full)
     /*  只有"血量/额外命数变了"或"有精灵压到面板上"才整行重画：
      *  先用底板擦干净，再画心 —— 不会出现旧心 / 旧 X2 的残影  */
     /*  只有"帧首标脏过"或"有精灵压到面板"时才重画；擦除已经在帧首做完了  */
-    if (full || s_redraw > 0) {
-        int lost, k;
+    if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
+    if (full || (s_redraw_mask & (1u << buf))) {
+        int lost, k, step;
 
-        if (s_redraw > 0) --s_redraw;
+        s_redraw_mask &= (unsigned char)~(1u << buf);
 
-        lost = HP_MAX - s_hp;
+        lost = s_hp_max - s_hp;
         k = 210 - lost * 55;                  /* 掉 1→155, 2→100, 3→45 */
         if (k < 40) k = 40;
+        step = s_hp_max <= HP_MAX ? (HEART_W + HEART_GAP)
+                                  : (s_hp_max == 6 ? 24 : 22);
 
-        for (i = 0; i < HP_MAX; ++i) {
-            x = HEART_X + i * (HEART_W + HEART_GAP);
+        for (i = 0; i < s_hp_max; ++i) {
+            x = HEART_X + i * step;
             if (!game_visible_screen(x, HEART_Y, HEART_W, HEART_W)) continue;
 
             if (i < s_hp)
@@ -238,7 +284,7 @@ void game_vital_draw(u32 fb, u32 now, int full)
         }
 
         if (extra > 0) {
-            x = HEART_X + HP_MAX * (HEART_W + HEART_GAP) + 8;
+            x = HEART_X + s_hp_max * step + 2;
             game_hud_char_at(fb_hud, x, HEART_Y, ASSET_English_X);
             game_hud_number_at(fb_hud, x + 16, HEART_Y, extra, 1);
         }

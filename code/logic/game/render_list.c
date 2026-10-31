@@ -19,7 +19,6 @@ static u16            s_payload[RL_MAX];
 static rl_draw_fn     s_fns[32];
 static unsigned char  s_fn_n;
 static u16       s_order[RL_MAX];
-static u16       s_radix_tmp[RL_MAX];
 static u16       s_radix_count[256];
 static int       s_n;           /* 本帧登记了几个 */
 static u32       s_dropped;     /* 累计丢了多少个（正常恒 0） */
@@ -111,11 +110,14 @@ static void rl_sift(int root, int end)
     s_order[root] = value;
 }
 
-static void rl_sort(void)
+/* Scratch is live only while sorting, before any drawing callback executes.
+ * Keep this frame separate so callbacks do not inherit its stack footprint. */
+static __attribute__((noinline, optimize("O2"))) void rl_sort(void)
 {
     int i, b;
+    u16 radix_tmp[RL_MAX];
     u16 *in = s_order;
-    u16 *out = s_radix_tmp;
+    u16 *out = radix_tmp;
 
     for (i = 0; i < s_n; ++i) s_order[i] = (u16)i;
 

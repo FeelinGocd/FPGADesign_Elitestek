@@ -61,6 +61,13 @@ static const pattern_t *cur_pattern(const shot_t *s)
     return &s->set->patterns[p];
 }
 
+static int shot_count(const shot_t *s, const pattern_t *p)
+{
+    if (s->set == g_boss_def.moves)
+        return (p->count * game_enemy_bullet_limit() + ENEMY_CAP-1) / ENEMY_CAP;
+    return p->count;
+}
+
 /*  难度缩放：关卡越高、宿主越急（Boss 残血），间隔和休息越短  */
 static int eff_gap(const shot_t *s, const pattern_t *p)
 {
@@ -119,12 +126,12 @@ static void start_volley(shot_t *s)
     if (p->aim) {
         /*  自机狙：整轮以"指向目标的角度"为中心
          *  扇形（count × step）从中心往两边摊开，所以退半步  */
-        base = angle_to_target(s) - ((int)p->count - 1) * (int)p->step / 2;
+        base = angle_to_target(s) - (shot_count(s,p) - 1) * (int)p->step / 2;
     }
 
     s->burst_base = (base + (p->repeat - s->rep_left) * p->spin) & (ANGLE_STEPS - 1);
     s->burst_idx  = 0;
-    s->burst_left = p->count;
+    s->burst_left = shot_count(s,p);
     s->burst_wait = 1;
     --s->rep_left;
 }
@@ -135,16 +142,16 @@ static void burst_next(shot_t *s)
     const pattern_t *p = cur_pattern(s);
     int a = s->burst_base + s->burst_idx * p->step;
 
-    int budget = s->enemy ? ENEMY_CAP - game_enemy_bullets_alive()
-                          : N_BULLETS - game_bullets_alive();
+    int budget = s->enemy ? game_enemy_bullet_limit() - game_enemy_bullets_alive()
+                          : game_bullet_slots() - game_bullets_alive();
     if (s->enemy && s->set == g_boss_def.moves)
         budget = game_boss_shot_limit() - game_enemy_bullets_alive();
-    int free_slots = N_BULLETS - game_bullets_alive();
+    int free_slots = game_bullet_slots() - game_bullets_alive();
     if (budget > free_slots) budget = free_slots;
     if (budget < 0) budget = 0;
 
     if (p->motion == MOTION_PULSE) {
-        int i, emit = p->count, mx = s->mx, my = s->my;
+        int i, emit = shot_count(s,p), mx = s->mx, my = s->my;
         if (s->set == g_boss_def.moves) {
             mx = g.boss_x + BOSS_W / 2;
             my = g.boss_y + BOSS_H / 2;
@@ -161,6 +168,8 @@ static void burst_next(shot_t *s)
         s->burst_left = 0;
     } else {
         int layer, twin, layers = p->layers ? p->layers : 1;
+        if (s->set == g_boss_def.moves)
+            layers = (layers * game_enemy_bullet_limit() + ENEMY_CAP-1) / ENEMY_CAP;
         for (layer = 0; layer < layers && budget > 0; ++layer) {
             /* 平行通道和 1/4 像素速度阶梯让各层保持分离，
              * 同时保留图案原有的瞄准、扇形、旋转和双向弹臂。 */

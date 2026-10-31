@@ -2,12 +2,12 @@
 //  game_item.c —— 道具：底座 + 悬浮图标 / 拾取判定
 //------------------------------------------------------------------------------
 //  干什么      :
-//    · game_item_try_pickup(): 角色矩形和道具矩形相交就吃掉：换弹种 + 记时间戳
+//    · game_item_try_pickup(): 角色矩形和道具矩形相交就结算道具效果
 //    · game_item_draw()      : 底座固定、图标上下浮（4 拍循环）
 //  上一级是谁  : game/game_player.c（判定）、game/game_main.c（绘制）
 //  接口契约    :
 //    · 底座和图标是【两张独立精灵】，不用图片合成命令（换颜色只要换图标素材）
-//    · 拾取只改 g.bullet_type / g.held_type，不动任何硬件寄存器
+//    · 拾取统一走 g_item_defs[]：回血、加命、金币和属性增减都由数据表描述
 //  为什么这么做:
 //    · 用时间戳（g.pickup_until）而不是帧计数 —— 帧率会抖，按帧算会闪得忽长忽短
 //  参考        : docs/spec/软件_驱动与API.md §2.2.1（颜色合成，可给道具加光）
@@ -36,27 +36,35 @@ const item_def_t g_item_defs[ITEM_COUNT] = {
     /* ITEM_CHILI  */ {
         "YOU FEEL SO HOT", ASSET_accessory_chili, 2, 1, 0,
         /* 辣椒不会永久替换普通武器；每发玩家弹有 33% 概率改用火焰弹效果。 */
-        { 0, 0, 0, 0, 1, 1, 3, 0, -1, 0 }
+        { 0, 0, 0, 0, 1, 1, 3, 0, -1, 0, 0 }
     },
     /* ITEM_URANUS */ {
         "IT FEELS LIKE IRON", ASSET_accessory_Uranus, 2, 1, 0,
-        { 0, 0, 0, 2, -1, 2, 3, 2, BULLET_URANUS, 0 }
+        { 0, 0, 0, 2, -1, 2, 3, 2, BULLET_URANUS, 0, 0 }
     },
     /* ITEM_EYES   */ {
         "SLOWER BUT MORER", ASSET_accessory_Inner_eyes, 2, 1, 0,
-        { 0, 0, 0, 0, 5, 0, 3, -1, -1, 1 }
+        { 0, 0, 0, 0, 5, 0, 3, -1, -1, 1, 0 }
     },
     /* ITEM_1UP    */ {
         "EXTRA LIFE", ASSET_accessory_1UP_ExtraLiFE, 2, 1, 0,
-        { 1, 0, 1, 1, 0, 0, 0, 0, -1, 0 }
+        { 3, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0 }
     },
     /* ITEM_MAGICCARD */ {
         "TURN BACK", ASSET_accessory_MagicCard_, 3, 1, ITEM_FLAG_LIFE_PLUS,
-        { 0, 0, 0, 0, -1, -2, 5, 1, -1, 0 }
+        { 0, 0, 0, 0, -1, -2, 5, 1, -1, 0, 0 }
     },
     /* ITEM_TRIPRISM */ {
         "SPLIT", ASSET_accessory_TriPrism, 3, 1, 0,
-        { 1, 0, 1, 0, 0, 0, 0, 0, -1, 0 }
+        { 1, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0 }
+    },
+    /* ITEM_COINBAG */ {
+        "COIN BAG", ASSET_accessory_CoinBag, 1, 1, 0,
+        { 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 5 }
+    },
+    /* ITEM_SUPER_BANDAGE */ {
+        "SUPER BANDAGE", ASSET_accessory_SpuerBandage, 1, 1, 0,
+        { 3, 2, 0, 0, 0, 0, 0, 0, -1, 0, 0 }
     }
 };
 
@@ -162,6 +170,7 @@ static void item_add_slot(int type)
 static void item_recompute_stats(void)
 {
     int i;
+    int max_hp_bonus = 0;
 
     g.stats.move_v8      = PLAYER_MAX_V8;
     g.stats.fire_every   = (int)FIRE_EVERY;
@@ -196,7 +205,9 @@ static void item_recompute_stats(void)
 
         if (m->bullet_type >= 0) g.bullet_type = m->bullet_type;
         if (m->triple > 0) g.fire_extra_paths += m->triple;
+        max_hp_bonus += m->hp_max;
     }
+    game_vital_set_max_bonus(max_hp_bonus);
 }
 
 /*  道具有效期结束/被消耗：移除实例，并按剩余背包重算属性。  */
@@ -260,15 +271,11 @@ void game_item_apply(int type)
 
     /*  ★ 道具池：每个实例按拾取顺序进数组；效果【累加】。  */
     item_add_slot(type);
+    item_recompute_stats();
     /*  ---- 属性增减（HUD 展示还没设计，这里先结算数值） ---- */
     for (i = 0; i < m->hp; ++i) game_vital_heal_one();
     for (i = 0; i < m->lives; ++i) game_vital_extra_life();
-    /*  m->hp_max 先保留字段：等血条 UI 支持“上限变化”后再接。  */
-
-    /*  ★ 属性不在这里逐项加：背包已经多了一件，直接从背包【整体重算】。
-     *    以前这里和 item_recompute_stats() 各抄一份"加 + 钳位"，两处钳位值
-     *    改一处忘一处就会漂（例如加滿道具后再死一次，属性会和捡的时候不一样）。  */
-    item_recompute_stats();
+    g.coins += m->coins;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -291,6 +298,35 @@ static void item_place(int type, int x, int y)
 void game_item_spawn_random(int x, int y)
 {
     item_place(game_item_random_type(), x, y);
+}
+
+int game_item_spawn_high(int x, int y)
+{
+    u32 total = 0u, r;
+    int i;
+
+    for (i = 0; i < ITEM_COUNT; ++i)
+        if (g_item_defs[i].level >= 2) total += (u32)item_weight(i);
+    if (total == 0u) {
+        i = game_item_random_type();
+        item_place(i, x, y);
+        return i;
+    }
+
+    r = item_rand() % total;
+    for (i = 0; i < ITEM_COUNT; ++i) {
+        u32 w;
+        if (g_item_defs[i].level < 2) continue;
+        w = (u32)item_weight(i);
+        if (r < w) {
+            item_place(i, x, y);
+            return i;
+        }
+        r -= w;
+    }
+    i = game_item_random_type();
+    item_place(i, x, y);
+    return i;
 }
 
 /*  Y 键：在玩家脚下按六种道具循环生成并放置底座；400 ms 内不拾取。
@@ -322,7 +358,7 @@ void game_item_try_pickup(u32 now)
         g.pickup_until = now + PICKUP_MS;
         g.toast_type = g.item.type;             /* 屏幕上方弹一行说明 */
         g.toast_until = now + HUD_TOAST_MS;
-        bsp_printf("DEBUG: accessory picked; bullet type=%d\r\n", g.bullet_type);
+        GAME_LOG("DEBUG: accessory picked; bullet type=%d\r\n", g.bullet_type);
 
         /*  ★ 道具房：拿过就算用过，这一轮再进来不会重新生成  */
         game_room_mark_used(game_room_id());
@@ -362,6 +398,9 @@ void game_item_pool_rect(int *x, int *y, int *w, int *h)
 static int s_pool_redraw[GAME_FB_COUNT];
 static unsigned s_pool_last[GAME_FB_COUNT];
 
+/*  钱袋跟随物：使用自己的世界坐标，移动到人物朝向的后方。 */
+/* 钱袋仅作为背包被动效果，不再生成跟随实体。 */
+
 void game_item_reset_cache(void)
 {
     s_debug_item_type = ITEM_MAGICCARD;
@@ -383,7 +422,6 @@ void game_item_prepare(dirty_map_t dirty, int buf)
     int x, y, w, h;
 
     if (buf < 0 || buf >= GAME_FB_COUNT) buf = 0;
-
     /*  ★ 右侧道具池同样会被"按瓦片"的脏区恢复擦到：弹幕/角色/石头走到
      *    相机窗口右缘时，它们旧位置的脏瓦片会盖住池子。池子原本只在
      *    item_mask 变化或相机移动时重画 ⇒ 那些帧里图标会"闪掉"。
@@ -472,6 +510,7 @@ static void item_draw_entry(u32 fb, u32 now, int buf, int arg)
     game_item_draw(fb, now, buf);
 }
 
+/* 钱袋跟随物：纯表现，不参与碰撞；从自身坐标移动到人物后方。 */
 void game_item_submit(void)
 {
     rl_push(ACTOR_Z(g.item.y + ITEM_H), item_draw_entry, 0);
@@ -487,9 +526,10 @@ static void triprism_draw_entry(u32 fb, u32 now, int buf, int index)
     int count = game_triprism_count();
     int x, y, visible;
     int ai, step;
+    u32 anim_now = now & ~31u;
 
     if (index < 0 || index >= count) return;
-    game_triprism_position(index, count, now, &x, &y);
+    game_triprism_position(index, count, anim_now, &x, &y);
     visible = game_visible_world(x, y, GAME_TRIPRISM_SIZE, GAME_TRIPRISM_SIZE);
 
     g.old_triprism[buf][index].active = (unsigned)visible;
@@ -497,7 +537,7 @@ static void triprism_draw_entry(u32 fb, u32 now, int buf, int index)
     g.old_triprism[buf][index].y = y;
     if (!visible) return;
 
-    step = (int)((now / 180u) % 5u);
+    step = (int)((anim_now / 180u) % 5u);
     switch (seq[step]) {
     case 0:  ai = ASSET_SpecialEffect_TriPrism_00; break;
     case 1:  ai = ASSET_SpecialEffect_TriPrism_01; break;
@@ -511,11 +551,14 @@ void game_triprism_submit(void)
 {
     int count = game_triprism_count();
     int i;
+    u32 anim_now;
 
     if (g.phase == PHASE_GAMEOVER) return;
+    anim_now = game_ms() & ~31u;
     for (i = 0; i < count; ++i) {
         int x, y;
-        game_triprism_position(i, count, game_ms(), &x, &y);
+        game_triprism_position(i, count, anim_now, &x, &y);
         rl_push(ACTOR_Z(y + GAME_TRIPRISM_SIZE), triprism_draw_entry, i);
     }
 }
+

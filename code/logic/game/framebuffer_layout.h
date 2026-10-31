@@ -29,6 +29,12 @@
 #define DDR_FULL_SLOT_BYTES 0x00800000u
 #define DDR_HALF_SLOT_BYTES 0x00400000u
 #define DDR_FULL_FRAME_BYTES (5760u * 1440u)
+/* A fixed HUD cache below the 1120-pixel room canvas in the background slot.
+ * All terrain copies stay above MAP_MAX_ROWS*TILE; this tail is never shown. */
+#define DDR_MINIMAP_CACHE (DDR_FB_BG + 5760u * 1200u)
+#if 1200u < 35u * 32u || 5760u * (1200u + 82u) > DDR_FULL_SLOT_BYTES
+#error "Minimap cache overlaps terrain or exceeds its DDR slot"
+#endif
 #define DDR_HALF_FRAME_BYTES (2880u * 1440u)
 
 #if DDR_FULL_FRAME_BYTES > DDR_FULL_SLOT_BYTES || \

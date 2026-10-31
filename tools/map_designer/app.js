@@ -5,7 +5,7 @@
    --------------------------------------------------------------------------
    · 画布尺寸自由：默认 40×23，上限 45×35（= game.h 的 MAP_MAX_COLS/ROWS）
    · 32 px/格；尺寸从地图本身读，换尺寸 = 清空重画（不做内容迁移）
-   · 地形层：. B W D C/X/Y/Z；对象层：slime/bug/web/stone/box/crate/exit
+   · 地形层：. B W D C/X/Y/Z；对象层：slime/bug/aimmer/web/stone/box/crate/exit
    · 存档只有一份：output/<name>.json；生成 C 是手动步骤，写 output/game_world_map.c
    · 校验 / C 生成 / 解析都在 mapfmt.py（服务端），前端只负责画和发请求
    ========================================================================== */
@@ -37,7 +37,7 @@
   var DOOR_CODES = { D: "door", H: "hide" };     /* 码 → 素材 id（H = 隐藏门） */
   function isDoorCode(code) { return Object.prototype.hasOwnProperty.call(DOOR_CODES, code); }
   var MAP_HEADER = "# MAP_DESIGNER v3";
-  var PAGE_VERSION = "2026-10-25f";   /* 普通房型、稳定编号与地图/布局两种模式 */
+  var PAGE_VERSION = "2026-10-29a";   /* 普通房型、稳定编号与地图/布局两种模式 */
 
   var TILES = [
     { id: "empty", code: ".", name: "空白", color: "#090e14" },
@@ -60,7 +60,8 @@
     { id: "stone", code: 3, name: "石头", image: "", layer: "actor" },
     { id: "box", code: 4, name: "木箱", image: "", layer: "actor" },
     { id: "crate", code: 5, name: "板条箱", image: "", layer: "actor" },
-    { id: "exit", code: 6, name: "出口", image: "", layer: "scene" }
+    { id: "exit", code: 6, name: "出口", image: "", layer: "scene" },
+    { id: "aimmer", code: 7, name: "瞄准怪", image: "", layer: "actor" }
   ];
 
   var OBJECT_BY_ID = {};
@@ -413,6 +414,7 @@
     var aliases = {
       mob_slime: "slime", "mob.slime": "slime", enemy_slime: "slime",
       mob_bug: "bug", "mob.bug": "bug", enemy_bug: "bug",
+      mob_aimmer: "aimmer", "mob.aimmer": "aimmer", enemy_aimmer: "aimmer", aimer: "aimmer",
       spider_web: "web", rock: "stone", crate_box: "box", eixt: "exit"
     };
     return aliases[kind] || kind;
@@ -812,7 +814,8 @@
       target.imageSmoothingEnabled = false;
       target.drawImage(image, px, py, TILE, TILE);
     } else {
-      var color = obj.kind === "slime" ? "#65c46f" : obj.kind === "bug" ? "#c58a4a" : obj.kind === "web" ? "#c8d0dc" : "#a07850";
+      var color = obj.kind === "slime" ? "#65c46f" : obj.kind === "bug" ? "#c58a4a" :
+        obj.kind === "aimmer" ? "#d84a4a" : obj.kind === "web" ? "#c8d0dc" : "#a07850";
       target.fillStyle = color;
       target.fillRect(px + 3, py + 3, TILE - 6, TILE - 6);
       target.fillStyle = "#0b1118";

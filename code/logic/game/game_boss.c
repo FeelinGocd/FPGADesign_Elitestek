@@ -56,9 +56,10 @@ static int rain_active(void)
 
 int game_boss_shot_limit(void)
 {
-    int cap = phase_def()->shot_cap;
-    if (g.boss_phase == BOSS_PHASE_COMBINED && !rain_active()) cap = ENEMY_CAP;
-    return cap < ENEMY_CAP ? cap : ENEMY_CAP;
+    int limit = game_enemy_bullet_limit();
+    int cap = phase_def()->shot_cap * limit / ENEMY_CAP;
+    if (g.boss_phase == BOSS_PHASE_COMBINED && !rain_active()) cap = limit;
+    return cap < limit ? cap : limit;
 }
 
 static void phase_pattern_begin(void)
@@ -75,15 +76,16 @@ void game_boss_resume(void)
     g.boss_tick = 0u;
     rain_side = 0;
     phase_pattern_begin();
-    bsp_printf("BOSS PHASE: id=%d hp=%d rain=%d/%d shot_cap=%d\r\n",
+    GAME_LOG("BOSS PHASE: id=%d hp=%d rain=%d/%d shot_cap=%d\r\n",
                g.boss_phase + 1, g.boss_hp,
                phase_def()->rain_drop, phase_def()->rain_every, phase_def()->shot_cap);
 }
 
 static int eff_rain_drop(void)
 {
-    int n = phase_def()->rain_drop + g.stage - 1;
-    int cap = ENEMY_CAP > 500 ? (32 * ENEMY_CAP + 499) / 500 : 32;
+    int limit = game_enemy_bullet_limit();
+    int n = (phase_def()->rain_drop * limit + ENEMY_CAP-1) / ENEMY_CAP + g.stage - 1;
+    int cap = limit > 500 ? (32 * limit + 499) / 500 : 32;
     return n > cap ? cap : n;
 }
 
@@ -95,10 +97,10 @@ static int overlap(int x,int y,int w,int h,int ax,int ay,int aw,int ah)
 static void summon_wave(void)
 {
     int made = 0, i;
-    for (i = 0; i < 64 && made < BOSS_SUMMON_COUNT && made < N_MOBS; ++i) {
+    for (i = 0; i < 128 && made < BOSS_SUMMON_COUNT && made < N_MOBS; ++i) {
         int j, blocked = 0, dx, dy;
-        int angle = (i*4 + g.boss_phase*3) & 63;
-        int radius = 160 + (i/16)*80;
+        int angle = (i*5 + g.boss_phase*3) & 63;
+        int radius = 160 + (i/24)*72;
         int x = g.boss_x+BOSS_W/2+g_sin_tab[(angle+16)&63]*radius/64-16;
         int y = g.boss_y+BOSS_H/2+g_sin_tab[angle]*radius/64-16;
         if (x < ARENA_X0+TILE) x = ARENA_X0+TILE;
@@ -112,7 +114,7 @@ static void summon_wave(void)
             if (g.mobs[j].active && overlap(x,y,32,32,g.mobs[j].x,g.mobs[j].y,32,32)) blocked = 1;
         if (!blocked && game_mobs_spawn_at(x,y,made&1)) ++made;
     }
-    bsp_printf("BOSS SUMMON: phase=%d count=%d hp=%d\r\n",g.boss_phase+1,made,g.boss_hp);
+    GAME_LOG("BOSS SUMMON: phase=%d count=%d hp=%d\r\n",g.boss_phase+1,made,g.boss_hp);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -186,13 +188,13 @@ static void boss_motion_step(u32 now)
     g.boss_y = ty;
 #if GAME_BOSS_MOTION_TRACE
     if (last_move != g.shot.move_idx) {
-        bsp_printf("BOSS MOVE: skill=%d motion=%d x=%d y=%d\r\n",
+        GAME_LOG("BOSS MOVE: skill=%d motion=%d x=%d y=%d\r\n",
                    g.shot.move_idx, (int)motion_idx, g.boss_x, g.boss_y);
         last_move = g.shot.move_idx;
     }
     if (g.boss_x - old_x > max_step || old_x - g.boss_x > max_step ||
         g.boss_y - old_y > max_step || old_y - g.boss_y > max_step)
-        bsp_printf("BOSS MOVE ERROR: dx=%d dy=%d max=%d\r\n",
+        GAME_LOG("BOSS MOVE ERROR: dx=%d dy=%d max=%d\r\n",
                    g.boss_x - old_x, g.boss_y - old_y, max_step);
 #endif
 }
@@ -202,8 +204,9 @@ static void boss_motion_step(u32 now)
 static void rain_wave(void)
 {
     int k, side, emit = eff_rain_drop();
-    int budget = ENEMY_CAP - game_enemy_bullets_alive();
-    int free_slots = N_BULLETS - game_bullets_alive();
+    int limit = game_enemy_bullet_limit();
+    int budget = limit - game_enemy_bullets_alive();
+    int free_slots = game_bullet_slots() - game_bullets_alive();
     int x0 = g.cam_x > ARENA_X0 ? g.cam_x : ARENA_X0;
     int y0 = g.cam_y > ARENA_Y0 ? g.cam_y : ARENA_Y0;
     int x1 = g.cam_x + SCR_W - BW, y1 = g.cam_y + SCR_H - BH;
@@ -211,14 +214,11 @@ static void rain_wave(void)
     if (x1 > ARENA_X1 - BW) x1 = ARENA_X1 - BW;
     if (y1 > ARENA_Y1 - BH) y1 = ARENA_Y1 - BH;
     if (budget > free_slots) budget = free_slots;
-#if ENEMY_CAP <= 500
-    if (emit > budget) emit = budget;
-#else
+    if (limit <= 500 && emit > budget) emit = budget;
     /* 保留完整的空间采样，只截断实际分配数量。
      * 若把 emit 缩成 1，最后一个候选可能总落在安全通道，
      * 导致大容量试跑池长期无法填满。 */
     if (budget <= 0) return;
-#endif
     if (emit <= 0 || x1 < x0 || y1 < y0) return;
     side = rain_side; rain_side = (rain_side + 1) & 3;
     vertical = !(side & 1);
@@ -227,9 +227,7 @@ static void rain_wave(void)
     /* 保留一条缓慢扫动的 96 px 安全通道，通道不跟随玩家。 */
     gap = lo + span/2 + g_sin_tab[((g.boss_tick/phase_def()->rain_every)/4u*2u)&63u]*span/256;
     for (k = 0; k < emit; ++k) {
-#if ENEMY_CAP > 500
         if (budget <= 0) break;
-#endif
         int pos = lo + (2*k+1)*span/(2*emit);
         int d = pos-gap;
         if (d > -48 && d < 48) continue;
@@ -238,9 +236,7 @@ static void rain_wave(void)
                           vertical ? 0 : (side == 1 ? -1 : 1),
                           vertical ? (side == 0 ? 1 : -1) : 0,
                           MOTION_ACCEL,BULLET_URANUS,1);
-#if ENEMY_CAP > 500
         --budget;
-#endif
     }
 }
 
@@ -338,7 +334,7 @@ void game_boss_step(u32 now)
             g.exit_active = 0;
             g.exit_dirty = GAME_FB_COUNT;
             ++g.stage;
-            bsp_printf("STAGE %d\r\n", g.stage);
+            GAME_LOG("STAGE %d\r\n", g.stage);
             game_room_new_run();
             game_room_request(game_room_start(), -1);
             return;
@@ -358,7 +354,7 @@ void game_boss_step(u32 now)
         g.boss_locked = 0;
         g.boss_tick = 0u;
         phase_pattern_begin();
-        bsp_printf("BOSS RESUME: phase=%d hp=%d mobs=0\r\n",g.boss_phase+1,g.boss_hp);
+        GAME_LOG("BOSS RESUME: phase=%d hp=%d mobs=0\r\n",g.boss_phase+1,g.boss_hp);
     }
     boss_motion_step(now);
 #if GAME_BOSS_STAGE_TEST == 1
@@ -425,7 +421,7 @@ void game_boss_hit(u32 now)
         g.shot.move_idx = phase_def()->first_move;
         rain_side = 0;
         summon_wave();
-        bsp_printf("BOSS PHASE: id=%d hp=%d shift_ms=%d\r\n",
+        GAME_LOG("BOSS PHASE: id=%d hp=%d shift_ms=%d\r\n",
                    g.boss_phase+1,g.boss_hp,(int)g_boss_def.phase_shift_ms);
         g.boss_gate = (g.boss_gate == g_boss_def.gate1) ? g_boss_def.gate2 : 0;
         return;
@@ -443,16 +439,18 @@ void game_boss_hit(u32 now)
         g.exit_y      = ARENA_Y0 + 64;                  /* 上面那扇门的门下 64 px */
         g.exit_dirty  = 0;
         g.door_dirty  = GAME_FB_COUNT;
-        bsp_printf("EXIT: room %d at (%d,%d)\r\n", g.exit_room, g.exit_x, g.exit_y);
+        GAME_LOG("EXIT: room %d at (%d,%d)\r\n", g.exit_room, g.exit_x, g.exit_y);
 
         /*  Boss 击破：掉一个随机饰品（不再发金币）。
          *  ★ game_room_take_reward() 只用来把本房标记成"已清"，返回值不要；
          *    普通房清怪仍然走 game_coins_spawn()。  */
         (void)game_room_take_reward();
+        if (game_item_has(ITEM_COINBAG))
+            game_coins_spawn(COINBAG_ROOM_BONUS);
         game_item_spawn_random((ARENA_X0 + ARENA_X1) / 2 - ITEM_W / 2,
                                (ARENA_Y0 + ARENA_Y1) / 2 - ITEM_H / 2);
         g.boss_drop_pending = 1;
-        bsp_printf("BOSS DROP: accessory #%d\r\n", g.item.type);
+        GAME_LOG("BOSS DROP: accessory #%d\r\n", g.item.type);
 
         /*  ★ 击破后立刻退出 PHASE_FIGHT：
          *    · 顶部 Boss 血条（含 "BOSS" 标签）只在 FIGHT 时提交，否则

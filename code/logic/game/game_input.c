@@ -29,14 +29,19 @@
  *      Y      → 在玩家脚下生成一个道具
  *      E      → 在玩家脚下放置炸弹
  *      T      → 切换测试模式（无敌 / GAME_TEST_DAMAGE 伤害）
+ *      M      → 切换游戏 Demo / GPU-CPU 对比 Demo
+ *      P      → 暂停 / 继续，锁定当前逻辑和画面
+ *      N / B  → 敌方弹幕上限增加 / 减少 25（范围 500～600）
  */
 #define CMD_MAX 16
 static char s_cmd[CMD_MAX];
 static int  s_cmd_n;
 
-/*  P 键生成道具请求 / B 放置炸弹请求  */
+/*  Y 生成道具 / E 放置炸弹；P 独立切换暂停。 */
 static int s_spawn_req;
 static int s_bomb_req;
+static int s_demo_switch_req;
+static int s_pause_change_req;
 #if GAME_BOSS_SHORTCUT
 static int s_boss_req;
 #endif
@@ -51,22 +56,44 @@ static void cmd_exec(void)
     s_cmd[s_cmd_n] = 0;
     s_cmd_n = 0;
 
+    if (single && command == 'p') {
+        game_pause_toggle();
+        s_pause_change_req = 1;
+        s_spawn_req = s_bomb_req = 0;
+#if GAME_BOSS_SHORTCUT
+        s_boss_req = 0;
+#endif
+        return;
+    }
+    /* Paused gameplay accepts only P and Demo switching; other actions are
+     * discarded so they cannot alter or queue changes to the frozen state. */
+    if (game_paused() && !(single && command == 'm')) return;
+
     if (single && command == 'y') {
         s_spawn_req = 1;
-        bsp_printf("DEBUG: spawn queued\r\n");
+        GAME_LOG("DEBUG: spawn queued\r\n");
     } else if (single && command == 'e') {
         s_bomb_req = 1;
-        bsp_printf("DEBUG: bomb queued\r\n");
+        GAME_LOG("DEBUG: bomb queued\r\n");
     } else if (single && command == 's') {
-        bsp_printf("LOAD fps=%d enemy=%d total=%d cmds=%d drops=%d\r\n",
+        GAME_LOG("LOAD fps=%d enemy=%d total=%d cmds=%d drops=%d\r\n",
                    g.fps, game_enemy_bullets_alive(), game_bullets_alive(),
                    g.cmd_frame, (int)rl_dropped());
     } else if (single && command == 't') {
         g.test_mode = !g.test_mode;
-        bsp_printf("TEST MODE: %s invincible=%d damage=%d hp=%d lives=%d boss_hp=%d boss_phase=%d mobs=%d\r\n",
+        GAME_LOG("TEST MODE: %s invincible=%d damage=%d hp=%d lives=%d boss_hp=%d boss_phase=%d mobs=%d\r\n",
                    g.test_mode ? "ON" : "OFF", g.test_mode,
                    game_player_hit_damage(BOSS_HIT_DMG), game_vital_hp(),
                    game_vital_lives(), g.boss_hp, g.boss_phase+1,game_mobs_alive());
+    } else if (single && command == 'm') {
+        s_demo_switch_req = 1;
+        GAME_LOG("DEMO: switch queued\r\n");
+    } else if (single && (command == 'n' || command == 'b')) {
+        int limit = command == 'n' ? game_enemy_bullet_limit_increase()
+                                   : game_enemy_bullet_limit_decrease();
+        g.toast_type = -1;
+        g.toast_until = game_ms() + HUD_TOAST_MS;
+        GAME_LOG("BULLET LIMIT: %d\r\n", limit);
 #if GAME_BOSS_SHORTCUT
     } else if (single && command == '1') {
         s_boss_req = 1;
@@ -77,7 +104,7 @@ static void cmd_exec(void)
         s_stats_req = 1;
 #endif
     } else if (s_cmd[0] != 0) {
-        bsp_printf("DEBUG: unknown cmd '%s'\r\n", s_cmd);
+        GAME_LOG("DEBUG: unknown cmd '%s'\r\n", s_cmd);
     }
 }
 
@@ -88,10 +115,23 @@ static u32 s_keys;              /* 最近一次收到的移动/功能掩码 */
 static u32 s_aim_keys = KEY_DOWN; /* 最近一次收到的瞄准方向 */
 static u32 s_until;             /* 这个掩码的有效期（毫秒时间戳） */
 static int s_restart_req;       /* R 键锁存：一次按下的"按下+松开"可能在同一帧里被吃掉 */
-static u32 s_prev_mask;         /* 上一帧的掩码：用来做 P/B 的上升沿 */
+static u32 s_prev_mask;         /* 上一帧掩码：动作只在上升沿触发 */
+
+int game_take_pause_change(void)
+{
+    int changed = s_pause_change_req;
+    s_pause_change_req = 0;
+    if (changed) {
+        s_restart_req = s_spawn_req = s_bomb_req = 0;
+#if GAME_BOSS_SHORTCUT
+        s_boss_req = 0;
+#endif
+    }
+    return changed;
+}
 
 /*----------------------------------------------------------------------------*/
-/*  取一次"按了 P"：取完就清 —— 主循环里在脚下生成一个道具  */
+/*  取一次"按了 Y"：取完就清 —— 主循环里在脚下生成一个道具  */
 int game_take_spawn_item(void)
 {
     int r = s_spawn_req;
@@ -133,25 +173,25 @@ static void pad_accept(u32 move, u32 aim)
 
     /* ★ 锁存：快速点一下时，"按下"和"松开"两帧可能落在同一帧里，
        照搬 s_keys 会把 R 覆盖掉 ⇒ 单独记一个请求位，等游戏来取。 */
-    if ((s_keys & KEY_RESTART) && !(s_prev_mask & KEY_RESTART))
+    if (!game_paused() && (s_keys & KEY_RESTART) && !(s_prev_mask & KEY_RESTART))
         s_restart_req = 1;
 
-    /*  ★ P 用【上升沿】：一直按住只生成一次，松开再按才生成下一次  */
-    if ((s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
+    /* Y uses an edge, so holding it generates only one item. */
+    if (!game_paused() && (s_keys & KEY_SPAWN) && !(s_prev_mask & KEY_SPAWN))
         s_spawn_req = 1;
-    if ((s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
+    if (!game_paused() && (s_keys & KEY_BOMB) && !(s_prev_mask & KEY_BOMB))
         s_bomb_req = 1;
 #if GAME_BOSS_SHORTCUT
-    if ((s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
+    if (!game_paused() && (s_keys & KEY_BOSS_JUMP) && !(s_prev_mask & KEY_BOSS_JUMP))
         s_boss_req = 1;
 #endif
     s_prev_mask = s_keys;
-    s_until = game_ms() + PAD_TIMEOUT;
+    s_until = game_wall_ms() + PAD_TIMEOUT;
 }
 
 static int pad_live(void)
 {
-    return (int)(game_ms() - s_until) < 0;
+    return (int)(game_wall_ms() - s_until) < 0;
 }
 
 /* 主循环据此选择射击策略：串口手柄按瞄准键射击，板载按键沿用自动索敌规则。 */
@@ -219,5 +259,27 @@ int game_take_restart(void)
     int r = s_restart_req;
 
     s_restart_req = 0;
+    return r;
+}
+
+/*----------------------------------------------------------------------------*/
+/* 取一次 M 键切换请求，并丢弃同一时刻积累的其它游戏动作，避免切回游戏后误触发。 */
+int game_take_demo_switch(void)
+{
+    int r = s_demo_switch_req;
+
+    if (r) {
+        s_pause_change_req = 0;
+        s_restart_req = 0;
+        s_spawn_req = 0;
+        s_bomb_req = 0;
+#if GAME_BOSS_SHORTCUT
+        s_boss_req = 0;
+#endif
+#if GAME_BOSS_DEBUG && GAME_PROFILE
+        s_stats_req = 0;
+#endif
+    }
+    s_demo_switch_req = 0;
     return r;
 }

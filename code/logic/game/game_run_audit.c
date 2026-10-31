@@ -9,6 +9,7 @@
 #include "game.h"
 #if GAME_RUN_AUDIT
 #include "game_run_audit.h"
+#include "game_schedule.h"
 #include "IRQ_frame.h"
 #include "render_list.h"
 #include "bsp.h"
@@ -28,6 +29,27 @@ static u32 start_tick, work_us, begin_drawn, begin_drops;
 static u32 last_irq, warmup;
 static int begun, ended, have_baseline;
 static int last_room = -1, last_bucket = -1, last_cam_x, last_cam_y;
+#if GAME_RUN_DETAIL
+volatile game_run_detail_t g_game_run_detail __attribute__((used, externally_visible));
+static u32 part_tick, part_us[RUN_PARTS];
+static u32 begin_alpha, begin_player;
+
+void game_run_audit_mark(unsigned part)
+{
+    u32 tick;
+    if (!begun || part >= RUN_PARTS) return;
+    tick = clint_getTimeLow(BSP_CLINT);
+    part_us[part] = (tick - part_tick) / (u32)(BSP_CLINT_HZ / 1000000u);
+    part_tick = tick;
+}
+#endif
+
+void game_run_audit_rebase(void)
+{
+    last_room = last_bucket = -1;
+    warmup = 0;
+    have_baseline = begun = ended = 0;
+}
 
 static int fight_bucket(void)
 {
@@ -46,7 +68,12 @@ void game_run_audit_begin(void)
     begun = ended = 0;
     if (fight_bucket() < 0) return;
     start_tick = clint_getTimeLow(BSP_CLINT);
+#if GAME_RUN_DETAIL
+    part_tick = start_tick;
+    game_bullet_draw_stats(&begin_alpha, &begin_drawn, &begin_player);
+#else
     game_bullet_draw_stats(0, &begin_drawn, 0);
+#endif
     begin_drops = rl_dropped();
     begun = 1;
 }
@@ -54,6 +81,7 @@ void game_run_audit_begin(void)
 void game_run_audit_end(void)
 {
     if (!begun) return;
+    game_run_audit_mark(RUN_FENCE);
     work_us = (clint_getTimeLow(BSP_CLINT) - start_tick) /
               (u32)(BSP_CLINT_HZ / 1000000u);
     ended = 1;
@@ -87,6 +115,64 @@ void game_run_audit_frame(void)
         drop_delta = rl_dropped() - begin_drops;
         delta = have_baseline ? irq - last_irq : 0u;
         enemies = game_enemy_bullets_alive();
+#if GAME_RUN_DETAIL
+        {
+            unsigned i, bin = work_us / 2000u;
+            u32 alpha, player_drawn, split_drawn;
+            int players = game_bullets_alive() - enemies;
+            int moved = have_baseline && (g.cam_x != last_cam_x || g.cam_y != last_cam_y);
+            game_bullet_draw_stats(&alpha, 0, &player_drawn);
+            alpha -= begin_alpha;
+            player_drawn -= begin_player;
+            /* Without MagicCard, only actual TriPrism split draws use player tint. */
+            split_drawn = (g.item_mask & (1u << ITEM_MAGICCARD)) ? 0u : player_drawn;
+#if GAME_BULLET_TINT
+            player_drawn += alpha;
+#else
+            /* Alpha-only enemies share this counter, so do not label them players. */
+            player_drawn = 0u;
+#endif
+            if (players > 0 && (u32)players > g_game_run_detail.player_peak)
+                g_game_run_detail.player_peak = (u32)players;
+            if (player_drawn > g_game_run_detail.drawn_player_peak)
+                g_game_run_detail.drawn_player_peak = player_drawn;
+            if (split_drawn > g_game_run_detail.drawn_split_peak)
+                g_game_run_detail.drawn_split_peak = split_drawn;
+            if (drawn + player_drawn > g_game_run_detail.total_drawn_peak)
+                g_game_run_detail.total_drawn_peak = drawn + player_drawn;
+            ++g_game_run_detail.frames;
+            if (work_us > 1000000u / GAME_LOGIC_HZ) ++g_game_run_detail.over_budget;
+            if (enemies >= game_enemy_bullet_limit() - 8) {
+                ++g_game_run_detail.full_frames;
+                if (delta > 1u) ++g_game_run_detail.full_gaps;
+            }
+            if (drawn >= (u32)(game_enemy_bullet_limit() - 8)) {
+                ++g_game_run_detail.full_drawn_frames;
+                if (delta > 1u) ++g_game_run_detail.full_drawn_gaps;
+                if (split_drawn) {
+                    ++g_game_run_detail.full_with_split_frames;
+                    if (delta > 1u) ++g_game_run_detail.full_with_split_gaps;
+                    if (split_drawn > g_game_run_detail.full_split_peak)
+                        g_game_run_detail.full_split_peak = split_drawn;
+                }
+            }
+            ++g_game_run_detail.histogram[bin < 16u ? bin : 15u];
+            for (i = 0; i < RUN_PARTS; ++i) {
+                g_game_run_detail.sum_us[i] += part_us[i];
+                if (part_us[i] > g_game_run_detail.max_us[i])
+                    g_game_run_detail.max_us[i] = part_us[i];
+                if (work_us > g_game_run_detail.worst_work_us)
+                    g_game_run_detail.worst_us[i] = part_us[i];
+            }
+            if (work_us > g_game_run_detail.worst_work_us) {
+                g_game_run_detail.worst_work_us = work_us;
+                g_game_run_detail.worst_enemy = enemies;
+                g_game_run_detail.worst_drawn = drawn;
+                g_game_run_detail.worst_cam = moved;
+                g_game_run_detail.worst_cmd = g.cmd_frame;
+            }
+        }
+#endif
         entry = &g_game_run_audit.buckets[bucket];
         ++g_game_run_audit.sequence;
         ++entry->frames;

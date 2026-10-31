@@ -33,9 +33,10 @@
 #include "framebuffer_layout.h"
 
 /*------------------------------------------------------------------------------
- * 跑哪个 Demo（改这一行就切换，现在只有两个）:
+ * 启动时先跑哪个 Demo（运行中按 M 可在两者之间切换）:
  *   1 = 分屏对比（compare_demo.c）: 左半加速器 / 右半纯 CPU，同一组方块比帧率（基础要求 3c）
  *   2 = 游戏 demo（game/ 目录）: WASD 移动 + 小键盘瞄准 + 子弹池 + Boss + 道具 + GUI
+ *   M = 串口虚拟手柄或文本命令 M + 回车：运行中切换 Demo
  *   ★ 2026-10-17：老的 demo_anim（动图）/ demo_combine（图片合成）已删除 —— 它们的功能
  *     都被游戏 demo 覆盖（动图→游戏动画、合成→道具/角色叠层），留着只占 flash。
  *----------------------------------------------------------------------------*/
@@ -53,23 +54,6 @@
 
 // 按键轮询间隔(微秒)。20ms 足够跟手,也不会把串口刷爆。
 #define POLL_US          20000
-
-/* 帧缓存地址(显示通道用, 自己定): 要求 5760 字节对齐、地址 < 0x1000_0000(Axi_Mux 只透传
- * 28 位)、不和别的用途撞车。程序跑在内部 RAM(0x00001000, 124KB), 不占 DDR。
- * 每块 6,220,800 字节 = 0x5EEC00:
- *   C: 0x0800_0000 ~ 0x085E_EBFF (上电默认显示这块)  D: 0x0880_0000 ~ 0x08DE_EBFF */
-#define LB_FRAME_C       DDR_FB_C
-#define LB_FRAME_D       DDR_FB_D
-
-// 分屏用四个半幅(每块 2.97MB, 4MB 一块, 互不重叠)
-//   A/B 是两块完整缓冲; 每块又分 左半(加速器画) / 右半(CPU 画)
-#define LB_A_L           DDR_FB_A_LEFT
-#define LB_A_R           DDR_FB_A_RIGHT
-#define LB_B_L           DDR_FB_B_LEFT
-#define LB_B_R           DDR_FB_B_RIGHT
-
-// 铺几行: 只看最上面几行时可用 16(便于判断地址/行距/像素序), 整屏就是 LINEBUFFER_HEIGHT
-#define LB_TEST_LINES    LINEBUFFER_HEIGHT
 
 #include "IRQ_frame.h"
 
@@ -140,33 +124,11 @@ void main(){
          *   画精灵时"等于这个键色的像素【不写】"—— 那些位置保留帧缓存里原有的内容,
          *   所以精灵外面不会再盖一层白框, 也不用"先擦背景再压精灵"。
          *   素材那边由 tools/img2hex/pic2pram.py 保证: 透明像素 = 调色板第 0 项 = 纯白,
-         *   且【不透明区里没有纯白】(转换时会自检并打印)。 */
+         *   且【不透明区里没有纯m'm'm'm白】(转换时会自检并打印)。 */
         lineBuffer_setCkeyColor(0x00FFFFFFu);
 
-#if DEMO_RUN_SEL == 1
-        /* 底图: C / D 都铺背景色; 分屏四块也备好,
-         *   这样按 KEY0 切到分屏时不会看到花屏 */
-        bsp_printf("HDMI: C/D 铺底色 + 分屏四块 ...\r\n");
-        lineBuffer_fillSolid(LB_FRAME_C, LB_TEST_LINES, 0u, 0u, 0u);
-        lineBuffer_fillSolid(LB_FRAME_D, LB_TEST_LINES, 0u, 0u, 0u);
-        lineBuffer_fillHalf(LB_A_L, LB_TEST_LINES,   0u,   0u, 255u);   /* A 左 = 蓝 */
-        lineBuffer_fillHalf(LB_B_L, LB_TEST_LINES,   0u, 255u, 255u);   /* B 左 = 青 */
-        lineBuffer_fillHalf(LB_A_R, LB_TEST_LINES, 255u,   0u,   0u);   /* A 右 = 红 */
-        lineBuffer_fillHalf(LB_B_R, LB_TEST_LINES,   0u, 255u,   0u);   /* B 右 = 绿 */
-        lineBuffer_setSplitBase(LB_A_L, LB_A_R, LB_B_L, LB_B_R);
-
-        lineBuffer_setFullBase(LB_FRAME_C, LB_FRAME_D);
-
-        /* --- 开显示 --- */
-        lineBuffer_enable(1);
-        bsp_printf("HDMI: C=0x%08x D=0x%08x, %d lines, enable=%d split=%d (showing C)\r\n",
-                   LB_FRAME_C, LB_FRAME_D, LB_TEST_LINES,
-                   lineBuffer_isEnabled(), lineBuffer_isSplit());
-        bsp_printf("CKEY: 键色=0x%06x (相等 = 不写)  [0x2078]\r\n", lineBuffer_getCkeyColor());
-        bsp_uDelay(2000000);
-#endif
-        /* 游戏入口在 game_init 中用 GPU 初始化实际使用的帧缓冲。
-         * 分屏演示的 CPU 铺底和启动延时仅由 DEMO_RUN_SEL=1 执行。 */
+        /* 两种 Demo 的入口都会在自身初始化流程中重新配置全屏/分屏基址。
+         * 这里只统一关闭显示并设置确定状态，避免复用上一次运行残留的配置。 */
 
         /* --- 开"帧起始"中断: 通知主循环显示边界 -------------------
          *   ISR 只清事件并计数；游戏逻辑按独立时间步更新，绘制和交帧留在主循环。
@@ -181,13 +143,27 @@ void main(){
                 bsp_printf("     重新综合并烧好 FPGA 之后, 把 IRQ_frame.h 里的 IRQ_FRAME_USE 改成 1。\r\n");
         #endif
 
-        /* 从这里开始由 Demo 接管显示和输入：
-         * 1 = GPU/CPU 分屏对比；2 = 游戏主循环。 */
-        #if (DEMO_RUN_SEL == 1)
-                compare_demo_run();
-        #else
-                game_demo_run();
-        #endif
+        /* 从这里开始由 Demo 接管显示和输入。M 请求会让当前 Demo 返回，
+         * 主循环随后完整初始化另一套流程；帧缓存、全屏/分屏模式由各 Demo
+         * 的初始化路径重新配置。 */
+        {
+            int active_demo = DEMO_RUN_SEL;
+            for (;;) {
+                int switch_requested;
+
+                if (active_demo == 1) {
+                    switch_requested = compare_demo_run();
+                    if (!switch_requested) break;
+                    active_demo = 2;
+                } else {
+                    switch_requested = game_demo_run();
+                    if (!switch_requested) break;
+                    active_demo = 1;
+                }
+                bsp_printf("DEMO: active=%s (M to switch)\r\n",
+                           active_demo == 1 ? "GPU/CPU compare" : "game");
+            }
+        }
     }
 
     /* 输入由 Demo 接管，这里不再运行旧的帧切换主循环。 */
