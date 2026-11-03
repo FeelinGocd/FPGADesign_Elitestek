@@ -1,4 +1,4 @@
-﻿# 2026 FPGA 创新设计竞赛 · 赛题二：基于 RISC-V 与 FPGA 异构架构的 2D 图形渲染加速引擎
+# 2026 FPGA 创新设计竞赛 · 赛题二：基于 RISC-V 与 FPGA 异构架构的 2D 图形渲染加速引擎
 
 > 全国大学生嵌入式芯片与系统设计竞赛 '2026 · FPGA 赛道（易灵思）
 > 平台：Ti60F225（Sapphire™ RISC-V 软核 + DDR3 + HDMI）
@@ -20,11 +20,11 @@
 
 **赛题基础要求 + 三项高阶挑战全部做完并上板验证**：BitBlt（块拷贝 / 纯色填充）、**1280×720@60** 显示、
 双缓冲翻页、**颜色键控**、**X/Y 镜像 + 90° 旋转**、**硬件 Alpha 混合**、以及自加的**图片合成 / 颜色合成（染色·加光·乘系数·正片叠底）**；
-**分屏 CPU vs 硬件帧率对比实测 5 : 60**；游戏 demo 已在 **CPU/GPU 300 MHz、内存通路 100 MHz** 上板验证，弹池 **532 槽（500 敌弹 + 32 玩家预留）**，保留实时 tint/alpha、三缓冲、角色/Boss/道具与屏上 HUD。
+**分屏 CPU vs 硬件帧率对比实测 5 : 60**；游戏 demo 已在 **CPU/GPU 300 MHz、内存通路 100 MHz** 上板验证，物理弹池 **632 槽（运行最大 600 敌弹 + 32 玩家预留；开局默认敌弹上限 500）**，保留实时 tint/alpha、三缓冲、角色/Boss/道具与屏上 HUD。
 
 2026-10-28 最终 300 MHz 构建 **全部 setup/hold 关系 PASS（+0.056 / +0.009 ns）**，资源 **RAM10 243/256、DSP 31/160、XLR 36206/60800**；13 项相关 RTL 回归通过，含 300/100 MHz、流水反压和多宽度双素材旋转/镜像上下文。500 发约 64 秒 / 153 快照上板采样，敌弹峰值 500、渲染队列丢弃 0；密集移动快照 FPS 最低/中位为 58/59，未据此宣称逐帧锁定 60 FPS。
 
-**现用工程统一为 `project/GamingPlayUnit/GamingPlayUnit.xml`**，PLL、约束、工具参数与 BSP 均为 300 MHz，内存通路仍为 100 MHz。默认软件 `build/GamingPlayUnit.bin` 前缀 `df9035b0`，RAM 占用 **114,160 / 126,976 B**、剩余 **12,816 B**；弹池为 **532 槽（500 敌弹 + 32 玩家预留）**。Chili、Uranus 与 Inner Eyes 已编译，Inner Eyes 每拾取1件增加1条弹道；道具提示在屏幕中央上方显示，连续更换文案会清除旧内容，BOSS 全称在锁血换阶段时持续显示。板端 BOSS 连续移动并发射弹幕时，500 发档的 **12 个采样窗口均为 60 FPS**，峰值达到 500、渲染队列丢弃为 0；550 发档实测降到 57–59 FPS，因此恢复 500 稳定基线。FPS 统计按最近窗口四舍五入，真实 59/55 帧仍分别显示 59/55。当前 `outflow/GamingPlayUnit.bit` 已按 `speed2 / fanout=100 / TIMING_3 / effort=5` 重新生成，setup **+0.056 ns**、hold **+0.009 ns**，并已通过 JTAG 下载。大小房间往返修复后用户确认流畅、无明显残影；道具设计继续逐项对齐。`project` 顶层只保留这份主工程和原 `verified`，旧时钟副本与临时目录已清理，不再额外补存。数字见 [实测数据](docs/spec/实测数据.md) §5.14～5.19。
+**现用工程统一为 `project/GamingPlayUnit/GamingPlayUnit.xml`**，PLL、约束、工具参数与 BSP 均为 300 MHz，内存通路仍为 100 MHz。本地 `build/GamingPlayUnit.bin` 为 **89,122 B**、SHA256 `fd816c596417bdc13def56e472ebb57088832ab79cb464d8ce4aeaa74a85acf5`（2026-10-31 构建，**本地构建不等于板上运行镜像**），RAM 占用 **130,624 / 135,168 B（132 KiB，含栈）**、剩余 **4,544 B**；物理弹池 **632 槽（运行最大 600 敌弹 + 32 玩家预留；开局默认 500，N/B 每次 25）**。Chili、Uranus 与 Inner Eyes 已编译，Inner Eyes 每拾取1件增加1条弹道；道具提示在屏幕中央上方显示，连续更换文案会清除旧内容，BOSS 全称在锁血换阶段时持续显示。板端 BOSS 连续移动并发射弹幕时，500 发档的 **12 个采样窗口均为 60 FPS**，峰值达到 500、渲染队列丢弃为 0；550 发档实测降到 57–59 FPS，因此恢复 500 稳定基线。FPS 统计按最近窗口四舍五入，真实 59/55 帧仍分别显示 59/55。当前 `outflow/GamingPlayUnit.bit` 已按 `speed2 / fanout=100 / TIMING_3 / effort=5` 重新生成，setup **+0.056 ns**、hold **+0.009 ns**，并已通过 JTAG 下载。大小房间往返修复后用户确认流畅、无明显残影；道具设计继续逐项对齐。`project` 顶层只保留这份主工程和原 `verified`，旧时钟副本与临时目录已清理，不再额外补存。数字见 [实测数据](docs/spec/实测数据.md) §5.14～5.20。
 
 ---
 
@@ -37,8 +37,7 @@ FPGADesign_Elitestek/
 │  ├─ GamingPlayUnit_Top.v       顶层
 │  ├─ Peripherial/GPU_2D/        2D 加速器（cmd / pixel / process / factory / interface / lineBuffer）
 │  ├─ Peripherial/APB0/          APB 子系统（按键 / GPU_2D 寄存器）
-│  ├─ Peripherial/AXI4/          AXI4 主/从
-│  ├─ Axi_Mux.v                  多主汇聚（X4）
+│  ├─ Peripherial/AXI4/          AXI4 主/从 + Axi_Mux.v（多主汇聚 X4）
 │  └─ ddr3_controller/           官方 DDR3 控制器
 │
 ├─ project/
@@ -59,13 +58,17 @@ FPGADesign_Elitestek/
 │  ├─ 芯片手册/                  Ti60 数据手册 v3.8
 │  ├─ 参考/                      AXI总线解析.md（协议速查）
 │  ├─ 易灵思资料/                官方技术文档与参考工程（大文件不入库）
-│  └─ spec/                      ★ 自建规格（6 份 + 归档）
+│  └─ spec/                      ★ 自建规格（11 份 + 归档）
 │     ├─ 设计总纲.md             系统分层 / 地址 / 带宽 / 时钟 / 纪律 / 里程碑
+│     ├─ 架构_系统框图.md        当前 RTL 整体框图与文件清单
 │     ├─ 硬件_显示通路.md        lineBuffer：DDR → HDMI 720p60
 │     ├─ 硬件_加速器.md          GPU_2D：CI 命令接口 / 数据通路 / alpha / ck / 镜像 / 旋转 / 合成
-│     ├─ 软件_驱动与API.md       C 侧 API / 时序纪律 / 图层 / 脏区
-│     ├─ 实测数据.md             ★ 所有量过的数（资源 / 带宽 / 命令开销 / TB / 上板）
 │     ├─ 硬件_RTL规范.md         RTL 写法约定（命名 / 文件结构 / 顶层只连线 / 改 RTL 的纪律）
+│     ├─ 软件_驱动与API.md       C 侧 API / 时序纪律 / 图层 / 脏区
+│     ├─ 游戏_房间.md            房间网格 / 异形房 / 门 / 小地图
+│     ├─ 道具_规范.md            道具表（items.csv + 预览图）与属性
+│     ├─ PRAM_资源清单.md        素材逐张清单 + PRAM 占用率
+│     ├─ 实测数据.md             ★ 所有量过的数（资源 / 带宽 / 命令开销 / TB / 上板）
 │     ├─ 功能拓展表.md           已实现能力清单 + 明确不做的功能及理由
 │     └─ _归档/                  整理前的旧稿（只读留档）
 │
@@ -95,7 +98,7 @@ FPGADesign_Elitestek/
 >
 > - **改 RTL 改仓库根 `RTL/`** —— 发布工程 `GamingPlayUnit` 的设计文件表指向它；改完**要重新综合**
 > - **改固件改 `project/GamingPlayUnit/embedded_sw/.../standalone/GamingPlayUnit/src|peripheral`**（只重编 app，不用重新综合）
-> - **改素材改 `res/pic/*` 然后跑 `tools/img2hex/pic2pram.py`** —— 它会自动把 hex 放到每个工程的 hex 位置；
+> - **改素材改 `res/pic/*` 然后跑 `tools/img2hex/pic2pram.py`** —— 默认只更新发布工程 `hex/` 与 `tools/img2hex/output/`（`--target all` 才带 `verified/` 和 `code/` 归档）；
 >   素材和调色板是 **BRAM 初值**，所以**一改就必须重新综合 + 重编固件**
 
 ---
@@ -112,14 +115,15 @@ uv run tools/img2hex/pic2pram.py               # 打 res/pic 下默认那几个�
 > 否则 `import serial` / `from PIL import Image` 会报"无法解析导入"。
 
 产物：`assets.hex`（PRAM 初值）、`palette.hex`（一项 = `AARRGGBB`）、`assets_desc.h`（C 侧素材表，用 `ASSET_*` 名字）、
-`report.txt`（这次转换的账）。脚本会顺手把这些放到：
+`report.txt`（这次转换的账）。**默认 `--target project`** 只写：
 
 | 放哪 | 为什么 |
 |---|---|
 | `project/GamingPlayUnit/hex/` | 发布工程的综合初值（`assets.hex` / `palette.hex`） |
-| `project/verified/06_SoC_2DGPU/project/` | 已验证工程的同类副本（RTL 的 `INIT_FILE` 写在工程根） |
 | `tools/img2hex/output/` | `report.txt` + `assets_desc.h`（工具自己的账和素材表） |
-| 各 C 工程的 `peripheral/APB0/gpu2d/` | 固件 `#include "assets_desc.h"` |
+| `project/GamingPlayUnit/.../peripheral/APB0/gpu2d/` | 发布固件 `#include "assets_desc.h"` 用的那一份 |
+
+> `--target all` 才会再写 `project/verified/06_SoC_2DGPU/project/`（已验证工程的同类副本）和 `code/peripheral/APB0/gpu2d/`（归档）。
 
 **三条规矩（踩过才写下来的）**
 
@@ -130,7 +134,7 @@ uv run tools/img2hex/pic2pram.py               # 打 res/pic 下默认那几个�
 4. **不透明区里不许有纯白**（键色是白，会被 ck 抠掉）—— 脚本会自检，不合格直接报错。
 5. **朝左的帧不用画**：命名带 `_left` 的会被跳过，要用时开 `FLIP_X`。
 
-当前用量：**99 张素材、PRAM 27264 / 32768 字（83.2%）、调色板 161 / 256 色**（`tools/img2hex/output/report.txt`，2026-10-25 重画木地板/墙/墙角后重跑）。
+当前用量：**105 张素材、PRAM 28464 / 32768 字（86.87%）、调色板 168 / 256 色**（`tools/img2hex/output/report.txt`，2026-10-31）。只读核对用 `python tools/img2hex/check_assets.py --sources-only`。
 
 ---
 
@@ -156,12 +160,12 @@ uv run tools/img2hex/pic2pram.py               # 打 res/pic 下默认那几个�
 | make | — | IDE 自带 | `EfinityRISCV\build_tools\bin\make.exe` |
 | OpenOCD | 0.11.0+dev | IDE 自带 | `EfinityRISCV\openocd` |
 | ModelSim | SE-64 10.5 | 本机 | `sim/tb/run_tb.ps1 -TbDir <目录> -TbTop <顶层>` |
-| 开发板驱动 / 下载工具 | — | 群文件 | 见 `tools/JTAG_UART_驱动问题排查.md` |
+| 开发板驱动 / 下载工具 | — | 群文件 | 见 `docs/问题速查/JTAG_UART_驱动问题排查.md` |
 | **uv**（PC 侧 Python 工具） | 0.11.x | astral.sh | 依赖看 `pyproject.toml`；`uv sync` 后 `uv run <脚本>` |
 
 > 命令行编固件：在 app 目录下 `make all BSP=efinix/EfxSapphireSoc`（工具链与 build_tools 要在 PATH 里），产物在 `build/`；
-> 当前主工程和板上均为 300 MHz，默认 `build/` 已重建并与板上正常固件一致，无需实验覆盖头。
-> 当前 BIN `8d4b6989...` 为 79,890 B，RAM 区域占用 115,616 / 126,976 B，剩余 11,360 B；IDE 直接使用默认 `build/GamingPlayUnit.elf`。
+> 当前主工程与板上配置均为 300 MHz；`build/` 只是本地重新构建的产物，是否与板上运行镜像一致要以实际下载/串口日志为准，不能由本地构建推断。
+> 当前本地 BIN `build/GamingPlayUnit.bin` 为 89,122 B（SHA256 `fd816c59…`），RAM 区域占用 **130,624 / 135,168 B**、剩余 **4,544 B**；IDE 直接使用默认 `build/GamingPlayUnit.elf`。这是本地构建数据，不代表板上正在运行的镜像。
 > 仓库根有 `.vscode/`（编译器路径 / 头文件路径 / 编 . 清 . 打包任务），VS Code 打开仓库根就能直接跳转和编译。
 
 ---
@@ -186,7 +190,7 @@ uv run tools/img2hex/pic2pram.py               # 打 res/pic 下默认那几个�
 - [x] **颜色合成**（`MODE=3` 纯色层：插值染色 / 加光 / 乘系数 / 正片叠底 + 强度，**12 个 DSP**）—— demo 的"受击闪红"
 - [x] **脏区 + 分层重放**（每块缓冲各记一份旧位置；层号 + 稳定排序；HUD 作为最高层）
 - [x] **M4** 分屏 CPU vs 硬件帧率对比 Demo —— **上板实测 CPU 5 fps : 加速器 60 fps**
-- [x] **M5** 高负载游戏 Demo：532 弹槽 / 500 敌弹上限、16 种 Boss 招式、三阶段与清怪解盾、实时 tint/alpha、三缓冲及 HUD；主机回归已验证所有招式和三阶段达到 500
+- [x] **M5** 高负载游戏 Demo：物理弹池 632 槽（运行最大 600 敌弹 + 32 玩家弹；默认 500，N/B 每次 25）、16 种 Boss 招式、三阶段与清怪解盾、实时 tint/alpha、三缓冲及 HUD；主机回归已验证所有招式和三阶段峰值达到 500（600 档未做板上验收）
 - [x] **300/100 MHz 时序和上板闭环**：alpha 四级流水 + FIFO4、Decoder 双槽、tint 操作数寄存、旋转起点和拍边界准备、双素材上下文修复；不放宽 SDC，最终 setup/hold 均通过
 - [x] 本轮相关 **13 项 RTL 回归全部 PASS**，含 M2 三种时钟各 936 行、300/100 MHz CDC、算术/反压/flush、多宽度双素材上下文；`run_regress.ps1` 另含未计入本轮的历史 TB，不能据此写成所有历史测试全通过
 - [x] **工程整理**：发布工程 `GamingPlayUnit`（RTL 收进 `RTL/`、素材初值收进 `hex/`、固件移入 `embedded_sw/` 并编译通过）；旧工程存入 `project/verified/`

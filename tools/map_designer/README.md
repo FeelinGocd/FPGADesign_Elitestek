@@ -14,7 +14,7 @@
 3. 点 **保存布局**，按房型自动编号，保存为 `output/layouts/1x1_001.json`、`L_001.json`、`2x2_001.json`。
    每种房型独立从 001 递增。读取已有方案后保存为更新；新建不会覆盖已有编号。
    `1x1_000.json` 是保留的起点空布局，不能放对象，也不会被普通房间抽选。
-4. 在仓库根目录执行 `python tools/map_designer/serve.py --emit-layouts --apply`。
+4. 在仓库根目录执行 `python tools/map_designer/map_designer.py --emit-layouts --apply`。
    默认只更新 `project` 的生成数据；`--emit-layouts --check` 可检查是否同步。
 5. 用户重新编译、下载固件。初始房固定使用空的 `1x1_000`；普通 1×1 和 L 房按空间选择正编号方案；同一间房在本层保持选择。
    有编号方案时不再抽中旧参考空布局；没有编号方案时回退到原有布局。
@@ -48,7 +48,7 @@
 }
 ```
 
-读取方案时由服务端补回固定空间，所以请通过 `serve.py` 打开设计器。
+读取方案时由服务端补回固定空间，所以请通过 `map_designer.py` 打开设计器。
 运行时如果地图拓扑采用 L 型其它朝向，地形、对象生成、绘制、碰撞与擦除统一镜像；
 破坏状态仍用设计原坐标记录。多套 L 对象方案共享同一份 C 地形表与地形缓存身份。
 每方案最多 200 个对象，总布局最多 127 张；实际怪物数量仍受游戏对象容量约束。
@@ -59,14 +59,18 @@
 旧完整 JSON 可导入，但参与布局生成时地形和旋转必须匹配固定地图池。
 不要为替换房内对象修改 `maps/`。以下自由画布及旧完整地图内容属于兼容参考，以本节工作流为准。
 
-更新后需要重启 `serve.py` 并刷新页面，以加载新的编号接口。验证命令：
+更新后需要重启 `map_designer.py` 并刷新页面，以加载新的编号接口。可运行的验证命令：
 
 ```powershell
-python -m unittest discover -s tools/map_designer -p 'test_*.py'
-node tools/map_designer/test_editor.js
-# 可选：本机已安装 Chrome/Edge 和 websocket-client 时，运行隔离目录的真实浏览器检查
-python tools/map_designer/check_workflow_browser.py
+node tools/map_designer/test_editor.js                                  # 前端编辑/布局几何回归
+python tools/map_designer/map_designer.py --emit-layouts --check        # 生成数据是否最新（当前 PASS）
+python tools/map_designer/map_designer.py --check --map tools/map_designer/maps/L.json   # 单张固定空间合法性
+python tools/map_designer/check_game_layout.py --all                    # 布局放置检查（当前报 4 个问题，是数据提示，不是命令失效）
 ```
+
+> `python -m unittest discover -s tools/map_designer -p 'test_*.py'` 当前发现 **0 项**（目录里没有 `test_*.py`）；
+> `check_workflow_browser.py` 仍 `import serve`（旧模块名），**当前不可运行**，修好前不要当验证命令用。
+> `--check` 不带 `--map` 时默认找 `output/room_map.json`，该文件不存在会直接报错退出。
 
 给 FPGA 游戏 demo 用的固定房间设计器：**画布尺寸自由**，32 px/格，默认
 **40 × 23（1280 × 736）**，上限 **45 × 35（1440 × 1120，Boss 房）**，下限 8 × 8。
@@ -90,7 +94,7 @@ python tools/map_designer/check_workflow_browser.py
 ## 快速开始
 
 ~~~powershell
-uv run tools/map_designer/serve.py --open
+uv run tools/map_designer/map_designer.py --open
 ~~~
 
 不自动开浏览器就去掉 `--open`，然后打开：
@@ -103,7 +107,7 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 > 8766 被占用时工具会自动尝试 8767–8775，并打印实际地址。
 > 也可以手动指定：`--port 8767`。
 
-需要保存 / 生成 C / 自动校验时**必须通过 serve.py 打开**；直接双击
+需要保存 / 生成 C / 自动校验时**必须通过 map_designer.py 打开**；直接双击
 `index.html`（file://）只能编辑和导入导出文本。
 
 ## 两个文件
@@ -187,7 +191,7 @@ http://127.0.0.1:8766/tools/map_designer/index.html
 * 纯 `B` 的标准房画完点 **`--emit-frame`** 可以拿到要贴进 `g_maps[]` 的那一行：
 
 ~~~powershell
-uv run tools/map_designer/serve.py --emit-frame --map tools/map_designer/output/room2x2_map1.txt
+uv run tools/map_designer/map_designer.py --emit-frame --map tools/map_designer/output/room2x2_map1.txt
 ~~~
 
 * 加了墙 / 挖了角、改得不是标准矩形 → 会判为"异形房"（L 形也支持）：
@@ -199,9 +203,9 @@ uv run tools/map_designer/serve.py --emit-frame --map tools/map_designer/output/
 规矩一句话：**一份房间 = 一份文件，`output/<房间名>.json` 就是那间房**（地形 + 对象都在里面，文件名 = 房间名，也是代码里的 `LAY_<房间名>`）。想留草稿就存到 `output/_archive/` 或别处，`output/` 根下只放要进代码的房间。
 
 ~~~powershell
-uv run tools/map_designer/serve.py --emit-layouts              # 预览，不写文件
-uv run tools/map_designer/serve.py --emit-layouts --apply      # 生成到 project 工程树
-uv run tools/map_designer/serve.py --emit-layouts --check      # 只查生成物是否过期
+uv run tools/map_designer/map_designer.py --emit-layouts              # 预览，不写文件
+uv run tools/map_designer/map_designer.py --emit-layouts --apply      # 生成到 project 工程树
+uv run tools/map_designer/map_designer.py --emit-layouts --check      # 只查生成物是否过期
 ~~~
 
 生成两个文件，**都是机器写的，别手改**（头部有源文件哈希）：
@@ -408,25 +412,26 @@ for (i = 0; i < game_world_object_count(); ++i) {
 
 ~~~powershell
 # 只检查：地图合法 + JSON 是否最新（C 是可选导出，没有就跳过；失败退出码 1）
-uv run tools/map_designer/serve.py --check
+uv run tools/map_designer/map_designer.py --check
 
 # 老 .txt → .json（迁移老文件用）
-uv run tools/map_designer/serve.py --emit-json --map tools/map_designer/output/xxx.txt
+uv run tools/map_designer/map_designer.py --emit-json --map tools/map_designer/output/xxx.txt
 
 # 手动生成 C（可选导出）
-uv run tools/map_designer/serve.py --emit-c
+uv run tools/map_designer/map_designer.py --emit-c
 
 # 检查某个已经拷进 code/ 的副本是否和地图一致
-uv run tools/map_designer/serve.py --check --c code/logic/game/game_world_map.c
+uv run tools/map_designer/map_designer.py --check --c code/logic/game/game_world_map.c
 
 # 换端口 / 只监听本机
-uv run tools/map_designer/serve.py --port 8767
+uv run tools/map_designer/map_designer.py --port 8767
 ~~~
 
-单元测试：
+单元测试 / 自检（`unittest discover` 在本目录发现 0 项，不要用它当门禁）：
 
 ~~~powershell
-uv run python -m unittest discover -s tools/map_designer -p "test_*.py" -v
+node tools/map_designer/test_editor.js
+python tools/map_designer/map_designer.py --emit-layouts --check
 ~~~
 
 ## 编辑器快捷键
@@ -455,10 +460,12 @@ uv run python -m unittest discover -s tools/map_designer -p "test_*.py" -v
 | `index.html` | 页面骨架 |
 | `style.css` | 样式（深色三栏） |
 | `app.js` | 画布、地形 / 对象编辑、撤销、导入导出、校验展示 |
-| `serve.py` | 本地服务 + `--check` / `--emit-c` |
+| `map_designer.py` | 本地服务 + 地图编辑 + `--check` / `--emit-*` |
 | `mapfmt.py` | 格式解析、校验、C 生成 / 回读（唯一实现） |
-| `test_mapfmt.py` | 单元测试 |
+| `test_editor.js` | 前端编辑 / 布局 / 缩放回归（`node` 运行） |
 | `check_game_layout.py` | 生成布局的对象位置检查 |
+| `check_workflow_browser.py` | 浏览器流程检查；**仍 `import serve`，当前不可运行** |
+| `maps/` | 正式固定空间（`1x1.json` / `L.json` / `2x2.json` / `hidden.json`） |
 | `templates/` | 内置 1×1 / 2×2 / L 模板（JSON v4 数字） |
 | `templates/custom/` | 页面保存的自定义模板 `custom_*.json` |
 | `output/` | 房间 JSON v4、可选的 C 导出 |

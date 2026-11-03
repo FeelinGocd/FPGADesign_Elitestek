@@ -8,7 +8,7 @@
 
 在仓库根目录、普通终端里运行：
 
-    python tools/item_designer/server.py
+    python tools/item_designer/item_designer.py
 
 然后打开：
 
@@ -16,11 +16,11 @@
 
 如果 8765 被占用：
 
-    python tools/item_designer/server.py --port 8766
+    python tools/item_designer/item_designer.py --port 8766
 
 不想自动打开浏览器：
 
-    python tools/item_designer/server.py --no-open
+    python tools/item_designer/item_designer.py --no-open
 
 需要 Pillow（仓库环境已有；没有就 `python -m pip install pillow`）。
 
@@ -39,7 +39,7 @@
 | `items.csv` | 唯一道具数据源 |
 | `items.example.csv` | items.csv 缺失时读取的默认数据（保存时才写 items.csv）；不是硬编码 |
 | `preview.py` | CSV→PNG / C 片段（原 item_preview 合并进来） |
-| `server.py` | 本地网页后端 |
+| `item_designer.py` | 本地网页后端（原 `server.py`） |
 | `index.html` | 网页前端 |
 | `design_brief.md` | 设计说明（保存时生成） |
 | `pending_request.md` | 提交实现时生成 |
@@ -56,7 +56,7 @@
 - 当前：8 件已实装道具全部 `pool=1`；
 - 游戏里按 Y 在脚下生成一个道具；R 仍重开；其它旧快捷键已移除；
 - **自动草稿**：编辑时把未保存内容存到浏览器 localStorage；刷新/误关后自动恢复，点“丢弃草稿”才放弃；
-- **改了 server.py 必须重启 Python 服务**；只刷新网页不会重启后端。旧后端缺少 `level/pool` 时页面会提示，并禁止保存以免丢列；
+- **改了 `item_designer.py` 必须重启 Python 服务**；只刷新网页不会重启后端。旧后端缺少 `level/pool` 时页面会提示，并禁止保存以免丢列；
 - 底图 + 图标实时合成预览，右侧看整张规范 PNG；
 - **保存 CSV + 生成 PNG**：
   - 写 `tools/item_designer/items.csv`

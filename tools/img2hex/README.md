@@ -12,14 +12,15 @@ uv run tools/img2hex/pic2pram.py          # 重新打包 res/pic → hex / 调�
 
 | 脚本 | 作用 |
 |---|---|
-| `pic2pram.py` | `res/pic/*` → `assets.hex` / `palette.hex`（直接写进 Efinity 工程）、`assets_desc.h` / `report.txt`（`tools/img2hex/output/`）；并复制 `assets_desc.h` 到各 C 工程的 `peripheral/APB0/gpu2d/` |
+| `pic2pram.py` | `res/pic/*` → `assets.hex` / `palette.hex`（写进 Efinity 工程）、`assets_desc.h` / `report.txt`（`tools/img2hex/output/`）；默认把 `assets_desc.h` 复制到发布固件的 `peripheral/APB0/gpu2d/` |
 
-产物落点：
+产物落点（**默认 `--target project`**）：
 
 - `project/GamingPlayUnit/hex/`：发布工程的 `assets.hex` / `palette.hex`
-- `project/verified/06_SoC_2DGPU/project/`：已验证工程的副本（RTL 的 `INIT_FILE` 写在工程根）
 - `tools/img2hex/output/`：`report.txt` 和 `assets_desc.h`
-- 各 C 工程 `peripheral/APB0/gpu2d/`：`assets_desc.h`
+- `project/GamingPlayUnit/.../peripheral/APB0/gpu2d/`：`assets_desc.h`
+
+> `--target all` 才额外写 `project/verified/06_SoC_2DGPU/project/`（已验证工程副本）和 `code/peripheral/APB0/gpu2d/`（归档）。
 
 不再生成 `preview_*.png` / `alpha_demo_*.png`。
 
@@ -47,18 +48,18 @@ uv run tools/img2hex/pic2pram.py          # 重新打包 res/pic → hex / 调�
 `PIC_DIRS_DEFAULT` 的**目录顺序 = 素材编号顺序**。新图放进已有目录时，会按文件名**插在该目录内部**，
 后面的编号会整体后移 —— 这就是"为什么加一张图要重新综合"的根源。
 
-| 目录 | 大致编号段（以当前表为准；2026-10-25 共 99 张） |
+| 目录 | 大致编号段（以当前表为准；2026-10-31 共 105 张） |
 |---|---|
 | `character/bigFish` | 0..8 |
 | `character/TheBoss` | 9..12 |
 | `UI/num` | 13..34 |
 | `UI/Eng` | 35..60 |
-| `background` | 61..67 |
-| `specialEffect` | 68..72 |
-| `bullet` | 73..75 |
-| `accessory` | 76..82 |
-| `character/mobs` | 83..86 |
-| `background_interact` | 87..98 |
+| `background` | 61..66 |
+| `specialEffect` | 67..74 |
+| `bullet` | 75..77 |
+| `accessory` | 78..86 |
+| `character/mobs` | 87..92 |
+| `background_interact` | 93..104 |
 
 > 号段每次跑完以 `report.txt` 为准，别背。
 > **想"只追加、不动别人"**：新开一个目录，并把它加在 `PIC_DIRS_DEFAULT` 的**最后一行**。
@@ -67,31 +68,33 @@ uv run tools/img2hex/pic2pram.py          # 重新打包 res/pic → hex / 调�
 
 ```bash
 python tools/img2hex/pic2pram.py                 # 正常转换（要 Pillow）
-python tools/img2hex/pic2pram.py --budget 8192   # 只看 PRAM 预算够不够，不写文件
+python tools/img2hex/pic2pram.py --dry --budget 8192   # 只算账不写盘：--budget 只改预算，必须配 --dry
 python tools/img2hex/pic2pram.py --dir res/pic/背景 res/pic/角色   # 临时换目录（不改默认表）
 ```
 
-一次写 4 处（脚本自己做的，不用手拷）：
+默认 `--target project` 只写 3 处（脚本自己做的，不用手拷）：
 
 | 产物 | 去哪 |
 |---|---|
-| `assets.hex` + `palette.hex` | `project/verified/06_SoC_2DGPU/project/`、`project/GamingPlayUnit/hex/` |
-| `assets_desc.h` | 3 个 `peripheral/APB0/gpu2d/`（含固件用的那份） |
+| `assets.hex` + `palette.hex` | `project/GamingPlayUnit/hex/` |
+| `assets_desc.h` | 发布固件的 `peripheral/APB0/gpu2d/` |
 | `report.txt` | `tools/img2hex/output/` |
+
+> `--target all` 才再写 `project/verified/06_SoC_2DGPU/project/` 和 `code/peripheral/APB0/gpu2d/`。
 
 ### 2. 看报告（30 秒）
 
 `tools/img2hex/output/report.txt`：
 
 - 头两行：扫了哪些目录、写进了哪些工程；
-- `PRAM : 共 N 字 = X KB` —— **上限 32768 字 / 128 KB**，超了就得缩图或拆；
+- `PRAM : 每字 4 个索引, 共 N 字 = X KB` —— **上限 32768 字 / 128 KB**，超了就得缩图或拆；
 - 表格里找到你的图：**宽 / 高 / 跨距 / 基址**，基址就是 `ASSET_*` 里那个数；
 - `透明` / `不透明纯白` 两列：纯白不为 0 会被 ck 抠洞（脚本会自检报警）。
 
 ### 3. 四件套，少一件都不行
 
 1. `assets.hex` / `palette.hex` 写进工程 ✔（脚本）
-2. `assets_desc.h` 拷到 3 个 `gpu2d/` ✔（脚本）
+2. `assets_desc.h` 写到发布固件的 `gpu2d/` ✔（脚本；`--target all` 才带归档）
 3. **重新综合** —— hex 是 BRAM 初值，只重编软件没用
 4. **重编固件**，然后**固件 + 比特流一起烧**（只烧一个 = 两边对不上，纹理全串）
 
